@@ -1,0 +1,538 @@
+package backup
+
+import (
+	"bufio"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/RoseOO/TapeBackarr/internal/database"
+	"github.com/RoseOO/TapeBackarr/internal/logging"
+	"github.com/RoseOO/TapeBackarr/internal/models"
+	"github.com/RoseOO/TapeBackarr/internal/tape"
+)
+
+// FileInfo represents a file in the backup set
+type FileInfo struct {
+	Path    string    `json:"path"`
+	Size    int64     `json:"size"`
+	Mode    int       `json:"mode"`
+	ModTime time.Time `json:"mod_time"`
+	Hash    string    `json:"hash,omitempty"`
+}
+
+// Service handles backup operations
+type Service struct {
+	db          *database.DB
+	tapeService *tape.Service
+	logger      *logging.Logger
+	blockSize   int
+}
+
+// NewService creates a new backup service
+func NewService(db *database.DB, tapeService *tape.Service, logger *logging.Logger, blockSize int) *Service {
+	return &Service{
+		db:          db,
+		tapeService: tapeService,
+		logger:      logger,
+		blockSize:   blockSize,
+	}
+}
+
+// ScanSource scans a backup source and returns file information
+func (s *Service) ScanSource(ctx context.Context, source *models.BackupSource) ([]FileInfo, error) {
+	var files []FileInfo
+
+	// Parse include/exclude patterns
+	var includePatterns, excludePatterns []string
+	if source.IncludePatterns != "" {
+		json.Unmarshal([]byte(source.IncludePatterns), &includePatterns)
+	}
+	if source.ExcludePatterns != "" {
+		json.Unmarshal([]byte(source.ExcludePatterns), &excludePatterns)
+	}
+
+	err := filepath.WalkDir(source.Path, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			s.logger.Warn("Error accessing path", map[string]interface{}{
+				"path":  path,
+				"error": err.Error(),
+			})
+			return nil // Continue walking
+		}
+
+		if d.IsDir() {
+			return nil
+		}
+
+		// Get relative path for pattern matching
+		relPath, _ := filepath.Rel(source.Path, path)
+
+		// Check exclude patterns
+		for _, pattern := range excludePatterns {
+			matched, _ := filepath.Match(pattern, relPath)
+			if matched {
+				return nil
+			}
+			matched, _ = filepath.Match(pattern, filepath.Base(path))
+			if matched {
+				return nil
+			}
+		}
+
+		// Check include patterns (if any)
+		if len(includePatterns) > 0 {
+			included := false
+			for _, pattern := range includePatterns {
+				matched, _ := filepath.Match(pattern, relPath)
+				if matched {
+					included = true
+					break
+				}
+				matched, _ = filepath.Match(pattern, filepath.Base(path))
+				if matched {
+					included = true
+					break
+				}
+			}
+			if !included {
+				return nil
+			}
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+
+		files = append(files, FileInfo{
+			Path:    path,
+			Size:    info.Size(),
+			Mode:    int(info.Mode()),
+			ModTime: info.ModTime(),
+		})
+
+		return nil
+	})
+
+	return files, err
+}
+
+// CompareWithSnapshot compares current files with a previous snapshot for incremental backup
+func (s *Service) CompareWithSnapshot(ctx context.Context, currentFiles []FileInfo, snapshotData []byte) ([]FileInfo, error) {
+	if len(snapshotData) == 0 {
+		return currentFiles, nil
+	}
+
+	var previousFiles []FileInfo
+	if err := json.Unmarshal(snapshotData, &previousFiles); err != nil {
+		return nil, fmt.Errorf("failed to parse snapshot: %w", err)
+	}
+
+	// Create a map of previous files
+	prevMap := make(map[string]FileInfo)
+	for _, f := range previousFiles {
+		prevMap[f.Path] = f
+	}
+
+	// Find changed files
+	var changedFiles []FileInfo
+	for _, current := range currentFiles {
+		prev, exists := prevMap[current.Path]
+		if !exists {
+			// New file
+			changedFiles = append(changedFiles, current)
+		} else if current.ModTime.After(prev.ModTime) || current.Size != prev.Size {
+			// Modified file
+			changedFiles = append(changedFiles, current)
+		}
+	}
+
+	return changedFiles, nil
+}
+
+// StreamToTape streams files directly to tape using tar
+func (s *Service) StreamToTape(ctx context.Context, sourcePath string, files []FileInfo, devicePath string, progressCb func(bytesWritten int64)) error {
+	if len(files) == 0 {
+		return nil
+	}
+
+	// Create a file list for tar
+	fileListPath := fmt.Sprintf("/tmp/tapebackarr-filelist-%d.txt", time.Now().UnixNano())
+	fileList, err := os.Create(fileListPath)
+	if err != nil {
+		return fmt.Errorf("failed to create file list: %w", err)
+	}
+	defer os.Remove(fileListPath)
+
+	for _, f := range files {
+		// Write relative path to file list
+		relPath, _ := filepath.Rel(sourcePath, f.Path)
+		fmt.Fprintln(fileList, relPath)
+	}
+	fileList.Close()
+
+	// Build tar command with streaming to tape
+	// Using mbuffer for buffering if available, otherwise direct
+	tarArgs := []string{
+		"-c",                              // Create archive
+		"-b", fmt.Sprintf("%d", s.blockSize/512), // Block size in 512-byte units
+		"-C", sourcePath,                  // Change to source directory
+		"-T", fileListPath,                // Read files from list
+	}
+
+	var cmd *exec.Cmd
+	
+	// Check if mbuffer is available
+	_, mbufferErr := exec.LookPath("mbuffer")
+	if mbufferErr == nil {
+		// Use mbuffer for better streaming performance
+		tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
+		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", "256M", "-o", devicePath)
+		
+		// Pipe tar output to mbuffer
+		tarCmd.Dir = sourcePath
+		pipe, err := tarCmd.StdoutPipe()
+		if err != nil {
+			return fmt.Errorf("failed to create pipe: %w", err)
+		}
+		mbufferCmd.Stdin = pipe
+		
+		if err := tarCmd.Start(); err != nil {
+			return fmt.Errorf("failed to start tar: %w", err)
+		}
+		if err := mbufferCmd.Start(); err != nil {
+			tarCmd.Process.Kill()
+			return fmt.Errorf("failed to start mbuffer: %w", err)
+		}
+		
+		tarErr := tarCmd.Wait()
+		mbufferErr := mbufferCmd.Wait()
+		
+		if tarErr != nil {
+			return fmt.Errorf("tar failed: %w", tarErr)
+		}
+		if mbufferErr != nil {
+			return fmt.Errorf("mbuffer failed: %w", mbufferErr)
+		}
+	} else {
+		// Direct tar to tape
+		tarArgs = append(tarArgs, "-f", devicePath)
+		cmd = exec.CommandContext(ctx, "tar", tarArgs...)
+		cmd.Dir = sourcePath
+		
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("tar failed: %s", string(output))
+		}
+	}
+
+	return nil
+}
+
+// CalculateChecksum calculates SHA256 checksum of a file
+func (s *Service) CalculateChecksum(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// CreateSnapshot creates a snapshot of the current file state
+func (s *Service) CreateSnapshot(files []FileInfo) ([]byte, error) {
+	return json.Marshal(files)
+}
+
+// RunBackup executes a full backup job
+func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *models.BackupSource, tapeID int64, backupType models.BackupType) (*models.BackupSet, error) {
+	startTime := time.Now()
+
+	s.logger.Info("Starting backup job", map[string]interface{}{
+		"job_id":      job.ID,
+		"job_name":    job.Name,
+		"source_path": source.Path,
+		"backup_type": backupType,
+	})
+
+	// Create backup set record
+	result, err := s.db.Exec(`
+		INSERT INTO backup_sets (job_id, tape_id, backup_type, start_time, status)
+		VALUES (?, ?, ?, ?, ?)
+	`, job.ID, tapeID, backupType, startTime, models.BackupSetStatusRunning)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create backup set: %w", err)
+	}
+
+	backupSetID, _ := result.LastInsertId()
+
+	// Scan source
+	s.logger.Info("Scanning source", map[string]interface{}{"path": source.Path})
+	files, err := s.ScanSource(ctx, source)
+	if err != nil {
+		s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
+		return nil, fmt.Errorf("failed to scan source: %w", err)
+	}
+
+	s.logger.Info("Scan complete", map[string]interface{}{
+		"file_count": len(files),
+	})
+
+	// For incremental backup, compare with previous snapshot
+	if backupType == models.BackupTypeIncremental {
+		var snapshotData []byte
+		err := s.db.QueryRow(`
+			SELECT snapshot_data FROM snapshots 
+			WHERE source_id = ? 
+			ORDER BY created_at DESC LIMIT 1
+		`, source.ID).Scan(&snapshotData)
+		
+		if err == nil && len(snapshotData) > 0 {
+			files, err = s.CompareWithSnapshot(ctx, files, snapshotData)
+			if err != nil {
+				s.logger.Warn("Failed to compare with snapshot, doing full backup", map[string]interface{}{
+					"error": err.Error(),
+				})
+			} else {
+				s.logger.Info("Incremental backup", map[string]interface{}{
+					"changed_files": len(files),
+				})
+			}
+		}
+	}
+
+	// Calculate total size
+	var totalBytes int64
+	for _, f := range files {
+		totalBytes += f.Size
+	}
+
+	// Get tape device path
+	var devicePath string
+	err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE current_tape_id = ?", tapeID).Scan(&devicePath)
+	if err != nil {
+		s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "no drive found with tape")
+		return nil, fmt.Errorf("no drive found with specified tape: %w", err)
+	}
+
+	// Stream to tape
+	s.logger.Info("Streaming to tape", map[string]interface{}{
+		"device":      devicePath,
+		"file_count":  len(files),
+		"total_bytes": totalBytes,
+	})
+
+	if err := s.StreamToTape(ctx, source.Path, files, devicePath, nil); err != nil {
+		s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
+		return nil, fmt.Errorf("failed to stream to tape: %w", err)
+	}
+
+	// Write file mark
+	if err := s.tapeService.WriteFileMark(ctx); err != nil {
+		s.logger.Warn("Failed to write file mark", map[string]interface{}{"error": err.Error()})
+	}
+
+	// Update catalog entries
+	for _, f := range files {
+		relPath, _ := filepath.Rel(source.Path, f.Path)
+		_, err := s.db.Exec(`
+			INSERT INTO catalog_entries (backup_set_id, file_path, file_size, file_mode, mod_time)
+			VALUES (?, ?, ?, ?, ?)
+		`, backupSetID, relPath, f.Size, f.Mode, f.ModTime)
+		if err != nil {
+			s.logger.Warn("Failed to insert catalog entry", map[string]interface{}{
+				"file":  relPath,
+				"error": err.Error(),
+			})
+		}
+	}
+
+	// Save snapshot for future incremental backups
+	snapshotData, _ := s.CreateSnapshot(files)
+	s.db.Exec(`
+		INSERT INTO snapshots (source_id, backup_set_id, file_count, total_bytes, snapshot_data)
+		VALUES (?, ?, ?, ?, ?)
+	`, source.ID, backupSetID, len(files), totalBytes, snapshotData)
+
+	// Update backup set status
+	endTime := time.Now()
+	s.db.Exec(`
+		UPDATE backup_sets SET 
+			end_time = ?, 
+			status = ?, 
+			file_count = ?, 
+			total_bytes = ?
+		WHERE id = ?
+	`, endTime, models.BackupSetStatusCompleted, len(files), totalBytes, backupSetID)
+
+	// Update tape usage
+	s.db.Exec(`
+		UPDATE tapes SET 
+			used_bytes = used_bytes + ?, 
+			write_count = write_count + 1,
+			last_written_at = ?,
+			status = CASE WHEN status = 'blank' THEN 'active' ELSE status END
+		WHERE id = ?
+	`, totalBytes, endTime, tapeID)
+
+	// Update job last run
+	s.db.Exec("UPDATE backup_jobs SET last_run_at = ? WHERE id = ?", endTime, job.ID)
+
+	s.logger.Info("Backup completed", map[string]interface{}{
+		"job_id":      job.ID,
+		"file_count":  len(files),
+		"total_bytes": totalBytes,
+		"duration":    endTime.Sub(startTime).String(),
+	})
+
+	return &models.BackupSet{
+		ID:         backupSetID,
+		JobID:      job.ID,
+		TapeID:     tapeID,
+		BackupType: backupType,
+		StartTime:  startTime,
+		EndTime:    &endTime,
+		Status:     models.BackupSetStatusCompleted,
+		FileCount:  int64(len(files)),
+		TotalBytes: totalBytes,
+	}, nil
+}
+
+func (s *Service) updateBackupSetStatus(id int64, status models.BackupSetStatus, errorMsg string) {
+	s.db.Exec(`
+		UPDATE backup_sets SET status = ?, updated_at = CURRENT_TIMESTAMP 
+		WHERE id = ?
+	`, status, id)
+	
+	if errorMsg != "" {
+		s.logger.Error("Backup failed", map[string]interface{}{
+			"backup_set_id": id,
+			"error":         errorMsg,
+		})
+	}
+}
+
+// ListBackupSets returns backup sets with optional filters
+func (s *Service) ListBackupSets(ctx context.Context, jobID *int64, limit int) ([]models.BackupSet, error) {
+	query := "SELECT id, job_id, tape_id, backup_type, start_time, end_time, status, file_count, total_bytes FROM backup_sets"
+	var args []interface{}
+
+	if jobID != nil {
+		query += " WHERE job_id = ?"
+		args = append(args, *jobID)
+	}
+
+	query += " ORDER BY start_time DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var sets []models.BackupSet
+	for rows.Next() {
+		var bs models.BackupSet
+		if err := rows.Scan(&bs.ID, &bs.JobID, &bs.TapeID, &bs.BackupType, &bs.StartTime, &bs.EndTime, &bs.Status, &bs.FileCount, &bs.TotalBytes); err != nil {
+			return nil, err
+		}
+		sets = append(sets, bs)
+	}
+
+	return sets, nil
+}
+
+// SearchCatalog searches the catalog for files matching a pattern
+func (s *Service) SearchCatalog(ctx context.Context, pattern string, limit int) ([]models.CatalogEntry, error) {
+	// Replace * with % for SQL LIKE
+	sqlPattern := strings.ReplaceAll(pattern, "*", "%")
+	
+	rows, err := s.db.Query(`
+		SELECT id, backup_set_id, file_path, file_size, file_mode, mod_time, checksum, block_offset
+		FROM catalog_entries
+		WHERE file_path LIKE ?
+		ORDER BY file_path
+		LIMIT ?
+	`, sqlPattern, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []models.CatalogEntry
+	for rows.Next() {
+		var e models.CatalogEntry
+		if err := rows.Scan(&e.ID, &e.BackupSetID, &e.FilePath, &e.FileSize, &e.FileMode, &e.ModTime, &e.Checksum, &e.BlockOffset); err != nil {
+			continue
+		}
+		entries = append(entries, e)
+	}
+
+	return entries, nil
+}
+
+// GetTapesForRestore returns the tapes needed to restore specified files
+func (s *Service) GetTapesForRestore(ctx context.Context, filePaths []string) ([]models.Tape, error) {
+	if len(filePaths) == 0 {
+		return nil, nil
+	}
+
+	// Build query with placeholders
+	placeholders := make([]string, len(filePaths))
+	args := make([]interface{}, len(filePaths))
+	for i, path := range filePaths {
+		placeholders[i] = "?"
+		args[i] = path
+	}
+
+	query := fmt.Sprintf(`
+		SELECT DISTINCT t.id, t.barcode, t.label, t.status
+		FROM tapes t
+		JOIN backup_sets bs ON t.id = bs.tape_id
+		JOIN catalog_entries ce ON bs.id = ce.backup_set_id
+		WHERE ce.file_path IN (%s)
+		ORDER BY bs.start_time DESC
+	`, strings.Join(placeholders, ","))
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tapes []models.Tape
+	for rows.Next() {
+		var t models.Tape
+		if err := rows.Scan(&t.ID, &t.Barcode, &t.Label, &t.Status); err != nil {
+			continue
+		}
+		tapes = append(tapes, t)
+	}
+
+	return tapes, nil
+}
+
+// DummyScanner for when we need to suppress some output
+type DummyScanner struct{}
+
+func (d *DummyScanner) Scan() bool { return false }
+func (d *DummyScanner) Text() string { return "" }
+var _ interface{ Scan() bool } = &DummyScanner{}
+var _ = bufio.Scanner{}

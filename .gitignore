@@ -1,0 +1,55 @@
+# Binaries
+tapebackarr
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go workspace files
+go.work
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Database files (local dev)
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Frontend
+web/frontend/node_modules/
+web/frontend/.svelte-kit/
+web/frontend/build/
+web/frontend/dist/
+
+# Logs
+*.log
+logs/
+
+# Temp files
+/tmp/
+*.tmp
+*.temp
+
+# Config (keep example)
+config.json
+!deploy/config.example.json
+
+# Test data
+testdata/
