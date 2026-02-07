@@ -8,11 +8,12 @@ import (
 
 // Config holds all application configuration
 type Config struct {
-	Server   ServerConfig   `json:"server"`
-	Database DatabaseConfig `json:"database"`
-	Tape     TapeConfig     `json:"tape"`
-	Logging  LoggingConfig  `json:"logging"`
-	Auth     AuthConfig     `json:"auth"`
+	Server        ServerConfig        `json:"server"`
+	Database      DatabaseConfig      `json:"database"`
+	Tape          TapeConfig          `json:"tape"`
+	Logging       LoggingConfig       `json:"logging"`
+	Auth          AuthConfig          `json:"auth"`
+	Notifications NotificationsConfig `json:"notifications"`
 }
 
 // ServerConfig holds HTTP server configuration
@@ -49,6 +50,18 @@ type AuthConfig struct {
 	SessionTimeout  int    `json:"session_timeout"`  // minutes
 }
 
+// NotificationsConfig holds notification configuration
+type NotificationsConfig struct {
+	Telegram TelegramConfig `json:"telegram"`
+}
+
+// TelegramConfig holds Telegram bot configuration
+type TelegramConfig struct {
+	Enabled  bool   `json:"enabled"`
+	BotToken string `json:"bot_token"`
+	ChatID   string `json:"chat_id"`
+}
+
 // DefaultConfig returns a configuration with sensible defaults
 func DefaultConfig() *Config {
 	return &Config{
@@ -75,6 +88,13 @@ func DefaultConfig() *Config {
 			JWTSecret:       "", // Must be set in config file
 			TokenExpiration: 24,
 			SessionTimeout:  60,
+		},
+		Notifications: NotificationsConfig{
+			Telegram: TelegramConfig{
+				Enabled:  false,
+				BotToken: "",
+				ChatID:   "",
+			},
 		},
 	}
 }

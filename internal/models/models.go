@@ -222,3 +222,41 @@ type Snapshot struct {
 	TotalBytes   int64     `json:"total_bytes" db:"total_bytes"`
 	SnapshotData []byte    `json:"snapshot_data" db:"snapshot_data"`
 }
+
+// TapeSpanningSet represents a backup that spans multiple tapes
+type TapeSpanningSet struct {
+	ID             int64     `json:"id" db:"id"`
+	BackupSetID    int64     `json:"backup_set_id" db:"backup_set_id"`
+	TotalTapes     int       `json:"total_tapes" db:"total_tapes"`
+	TotalBytes     int64     `json:"total_bytes" db:"total_bytes"`
+	Status         string    `json:"status" db:"status"` // in_progress, completed, failed
+	CreatedAt      time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at" db:"updated_at"`
+}
+
+// TapeSpanningMember represents a single tape in a spanning set
+type TapeSpanningMember struct {
+	ID              int64     `json:"id" db:"id"`
+	SpanningSetID   int64     `json:"spanning_set_id" db:"spanning_set_id"`
+	TapeID          int64     `json:"tape_id" db:"tape_id"`
+	SequenceNumber  int       `json:"sequence_number" db:"sequence_number"`
+	StartBlock      int64     `json:"start_block" db:"start_block"`
+	EndBlock        int64     `json:"end_block" db:"end_block"`
+	BytesWritten    int64     `json:"bytes_written" db:"bytes_written"`
+	FilesStartIndex int64     `json:"files_start_index" db:"files_start_index"`
+	FilesEndIndex   int64     `json:"files_end_index" db:"files_end_index"`
+	CreatedAt       time.Time `json:"created_at" db:"created_at"`
+}
+
+// TapeChangeRequest represents a pending tape change request
+type TapeChangeRequest struct {
+	ID             int64     `json:"id" db:"id"`
+	JobExecutionID int64     `json:"job_execution_id" db:"job_execution_id"`
+	SpanningSetID  *int64    `json:"spanning_set_id" db:"spanning_set_id"`
+	CurrentTapeID  int64     `json:"current_tape_id" db:"current_tape_id"`
+	Reason         string    `json:"reason" db:"reason"` // tape_full, tape_error
+	Status         string    `json:"status" db:"status"` // pending, acknowledged, completed, cancelled
+	RequestedAt    time.Time `json:"requested_at" db:"requested_at"`
+	AcknowledgedAt *time.Time `json:"acknowledged_at" db:"acknowledged_at"`
+	NewTapeID      *int64    `json:"new_tape_id" db:"new_tape_id"`
+}

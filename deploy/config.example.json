@@ -22,5 +22,12 @@
     "jwt_secret": "CHANGE_THIS_TO_A_SECURE_RANDOM_STRING",
     "token_expiration": 24,
     "session_timeout": 60
+  },
+  "notifications": {
+    "telegram": {
+      "enabled": false,
+      "bot_token": "YOUR_TELEGRAM_BOT_TOKEN",
+      "chat_id": "YOUR_TELEGRAM_CHAT_ID"
+    }
   }
 }

@@ -10,8 +10,9 @@ TapeBackarr is a disk-light, tape-first backup system designed to run on Debian 
 - **Direct Streaming**: Stream data from SMB/NFS/local filesystem directly to tape
 - **Full Cataloging**: Complete file-level catalog with block offset tracking
 - **Incremental Backups**: Track file changes via timestamps and size
-- **Multi-tape Support**: Automatic handling of tape-full conditions and continuation
+- **Multi-tape Spanning**: Automatic handling of tape-full conditions with continuation markers
 - **Guided Restore**: Operator-friendly restore workflow with tape insertion guidance
+- **Telegram Notifications**: Real-time alerts when tapes need to be changed
 
 ### Tape Management
 - Tape labeling and pool assignment (DAILY, WEEKLY, MONTHLY, ARCHIVE)
@@ -124,9 +125,41 @@ Edit `/etc/tapebackarr/config.json`:
     "jwt_secret": "YOUR_SECURE_SECRET_HERE",
     "token_expiration": 24,
     "session_timeout": 60
+  },
+  "notifications": {
+    "telegram": {
+      "enabled": false,
+      "bot_token": "YOUR_BOT_TOKEN",
+      "chat_id": "YOUR_CHAT_ID"
+    }
   }
 }
 ```
+
+### Telegram Notifications Setup
+
+To receive notifications when tapes need to be changed:
+
+1. Create a bot with [@BotFather](https://t.me/botfather) on Telegram
+2. Get your chat ID by messaging the bot and visiting `https://api.telegram.org/bot{YOUR_TOKEN}/getUpdates`
+3. Enable in config:
+   ```json
+   "notifications": {
+     "telegram": {
+       "enabled": true,
+       "bot_token": "123456789:ABCdefGHIjklMNO...",
+       "chat_id": "-1001234567890"
+     }
+   }
+   ```
+4. Restart TapeBackarr
+
+**Notification Events:**
+- 📼 Tape change required
+- 📀 Tape full
+- ✅ Backup completed
+- ❌ Backup failed
+- 🚨 Drive error
 
 ## Usage
 
@@ -293,6 +326,16 @@ sqlite3 /var/lib/tapebackarr/tapebackarr.db ".backup backup.db"
 # Check database integrity
 sqlite3 /var/lib/tapebackarr/tapebackarr.db "PRAGMA integrity_check"
 ```
+
+## Documentation
+
+For detailed documentation, see:
+
+- [**Usage Guide**](docs/USAGE_GUIDE.md) - Complete guide for using TapeBackarr
+- [**API Reference**](docs/API_REFERENCE.md) - REST API documentation
+- [**Operator Guide**](docs/OPERATOR_GUIDE.md) - Quick reference for daily operations
+- [**Architecture**](docs/ARCHITECTURE.md) - System design and data flows
+- [**Database Schema**](docs/DATABASE_SCHEMA.md) - Database table definitions
 
 ## License
 
