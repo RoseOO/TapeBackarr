@@ -160,7 +160,7 @@ CREATE INDEX IF NOT EXISTS idx_snapshot_source ON snapshots(source_id, created_a
 
 -- Insert default admin user (password: changeme)
 INSERT INTO users (username, password_hash, role) 
-VALUES ('admin', '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZRGdjGj/n3.0rl94xCzPfL5MWzKDy', 'admin');
+VALUES ('admin', '$2a$10$3r7ZiF2GG15uE8nRtowzyOgeI8ppPSvVylKmewvvGr9jH.93HWuU.', 'admin');
 
 -- Insert default tape pools
 INSERT INTO tape_pools (name, description, retention_days) VALUES 
