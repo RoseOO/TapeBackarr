@@ -1,6 +1,7 @@
 package models
 
 import (
+	"strings"
 	"time"
 )
 
@@ -59,6 +60,29 @@ var LTOCapacities = map[string]int64{
 	"LTO-8":  12000000000000, // 12 TB
 	"LTO-9":  18000000000000, // 18 TB
 	"LTO-10": 36000000000000, // 36 TB (expected)
+}
+
+// DensityToLTOType maps SCSI density codes to LTO generation strings
+var DensityToLTOType = map[string]string{
+	"0x40": "LTO-1",
+	"0x42": "LTO-2",
+	"0x44": "LTO-3",
+	"0x46": "LTO-4",
+	"0x58": "LTO-5",
+	"0x5a": "LTO-6",
+	"0x5c": "LTO-7",
+	"0x5d": "LTO-7",  // LTO-7 Type M (M8)
+	"0x5e": "LTO-8",
+	"0x60": "LTO-9",
+	"0x62": "LTO-10",
+}
+
+// LTOTypeFromDensity returns the LTO type for a given density code.
+// The density code should be a hex string like "0x58".
+// Returns the LTO type string and true if found, or empty string and false.
+func LTOTypeFromDensity(densityCode string) (string, bool) {
+	ltoType, ok := DensityToLTOType[strings.ToLower(densityCode)]
+	return ltoType, ok
 }
 
 // UnknownTapeInfo represents a tape loaded in a drive that is not in the database

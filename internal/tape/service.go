@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/RoseOO/TapeBackarr/internal/models"
 )
 
 // DriveStatus represents the current status of a tape drive
@@ -207,10 +209,16 @@ func (s *Service) GetStatus(ctx context.Context) (*DriveStatus, error) {
 	}
 
 	// Parse density
-	densityRe := regexp.MustCompile(`Tape block size (\d+) bytes\. Density code (0x[0-9a-f]+)`)
+	densityRe := regexp.MustCompile(`Tape block size (\d+) bytes\. Density code (0x[0-9a-fA-F]+)`)
 	if matches := densityRe.FindStringSubmatch(outputStr); len(matches) > 2 {
 		status.BlockSize, _ = strconv.Atoi(matches[1])
 		status.Density = matches[2]
+	}
+
+	// Parse LTO type from density description (e.g., "Density code 0x58 (LTO-5).")
+	ltoDescRe := regexp.MustCompile(`Density code 0x[0-9a-fA-F]+ \((LTO-\d+)\)`)
+	if matches := ltoDescRe.FindStringSubmatch(outputStr); len(matches) > 1 {
+		status.DriveType = matches[1]
 	}
 
 	return status, nil
@@ -461,6 +469,33 @@ func (s *Service) IsTapeLoaded(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	return status.Online && status.Ready && status.Error == "", nil
+}
+
+// DetectTapeType detects the LTO type of the tape currently loaded in the drive
+// by reading the density code from the mt status output.
+// Returns the LTO type string (e.g., "LTO-5") or empty string if detection fails.
+func (s *Service) DetectTapeType(ctx context.Context) (string, error) {
+	status, err := s.GetStatus(ctx)
+	if err != nil {
+		return "", err
+	}
+	if status.Error != "" {
+		return "", fmt.Errorf("drive error: %s", status.Error)
+	}
+
+	// First try the LTO type parsed from the description in mt output (e.g., "(LTO-5)")
+	if status.DriveType != "" {
+		return status.DriveType, nil
+	}
+
+	// Fall back to looking up the density code in our mapping
+	if status.Density != "" {
+		if ltoType, ok := models.LTOTypeFromDensity(status.Density); ok {
+			return ltoType, nil
+		}
+	}
+
+	return "", nil
 }
 
 // WaitForTape waits for a tape to be loaded

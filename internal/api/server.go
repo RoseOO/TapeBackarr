@@ -159,6 +159,7 @@ func (s *Server) setupRoutes() {
 			r.Post("/", s.handleCreateDrive)
 			r.Get("/scan", s.handleScanDrives)
 			r.Get("/{id}/status", s.handleDriveStatus)
+			r.Get("/{id}/detect-tape", s.handleDetectTape)
 			r.Put("/{id}", s.handleUpdateDrive)
 			r.Delete("/{id}", s.handleDeleteDrive)
 			r.Post("/{id}/eject", s.handleEjectTape)
@@ -548,6 +549,18 @@ func (s *Server) handleCreateTape(w http.ResponseWriter, r *http.Request) {
 	if req.Label == "" {
 		s.respondError(w, http.StatusBadRequest, "label is required")
 		return
+	}
+
+	// Auto-detect LTO type from drive if not manually set and a drive is specified
+	if req.LTOType == "" && req.DriveID != nil {
+		var devicePath string
+		if err := s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", *req.DriveID).Scan(&devicePath); err == nil {
+			ctx := r.Context()
+			driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+			if detectedType, err := driveSvc.DetectTapeType(ctx); err == nil && detectedType != "" {
+				req.LTOType = detectedType
+			}
+		}
 	}
 
 	// Auto-infer capacity from LTO type if not manually set
@@ -1193,6 +1206,61 @@ func (s *Server) handleDriveStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.respondJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) handleDetectTape(w http.ResponseWriter, r *http.Request) {
+	driveID, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid drive id")
+		return
+	}
+
+	var devicePath string
+	err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", driveID).Scan(&devicePath)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "drive not found or not enabled")
+		return
+	}
+
+	ctx := r.Context()
+	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+
+	status, err := driveSvc.GetStatus(ctx)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to get drive status: "+err.Error())
+		return
+	}
+
+	if status.Error != "" || !status.Online || !status.Ready {
+		s.respondJSON(w, http.StatusOK, map[string]interface{}{
+			"loaded":   false,
+			"lto_type": "",
+			"density":  "",
+		})
+		return
+	}
+
+	// Determine LTO type: first from mt description, then from density code lookup
+	ltoType := status.DriveType
+	if ltoType == "" && status.Density != "" {
+		if detected, ok := models.LTOTypeFromDensity(status.Density); ok {
+			ltoType = detected
+		}
+	}
+
+	var capacityBytes int64
+	if ltoType != "" {
+		if cap, ok := models.LTOCapacities[ltoType]; ok {
+			capacityBytes = cap
+		}
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"loaded":         true,
+		"lto_type":       ltoType,
+		"density":        status.Density,
+		"capacity_bytes": capacityBytes,
+	})
 }
 
 func (s *Server) handleEjectTape(w http.ResponseWriter, r *http.Request) {
