@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/RoseOO/TapeBackarr/internal/database"
+	"github.com/RoseOO/TapeBackarr/internal/encryption"
 	"github.com/RoseOO/TapeBackarr/internal/logging"
 	"github.com/RoseOO/TapeBackarr/internal/models"
 	"github.com/RoseOO/TapeBackarr/internal/tape"
@@ -239,6 +241,143 @@ func (s *Service) StreamToTape(ctx context.Context, sourcePath string, files []F
 	return nil
 }
 
+// StreamToTapeEncrypted streams files directly to tape with encryption using openssl
+func (s *Service) StreamToTapeEncrypted(ctx context.Context, sourcePath string, files []FileInfo, devicePath string, encryptionKey string, progressCb func(bytesWritten int64)) error {
+	if len(files) == 0 {
+		return nil
+	}
+
+	// Create a file list for tar
+	fileListPath := fmt.Sprintf("/tmp/tapebackarr-filelist-%d.txt", time.Now().UnixNano())
+	fileList, err := os.Create(fileListPath)
+	if err != nil {
+		return fmt.Errorf("failed to create file list: %w", err)
+	}
+	defer os.Remove(fileListPath)
+
+	for _, f := range files {
+		relPath, _ := filepath.Rel(sourcePath, f.Path)
+		fmt.Fprintln(fileList, relPath)
+	}
+	fileList.Close()
+
+	// Build tar command
+	tarArgs := []string{
+		"-c",
+		"-b", fmt.Sprintf("%d", s.blockSize/512),
+		"-C", sourcePath,
+		"-T", fileListPath,
+	}
+
+	// Create pipeline: tar -> openssl enc -> tape device
+	// Using openssl for encryption (widely available, standard tool)
+	tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
+	tarCmd.Dir = sourcePath
+
+	// openssl enc with AES-256-GCM and the key passed via stdin-derived password
+	// Using -pbkdf2 for key derivation and -pass for the key
+	opensslCmd := exec.CommandContext(ctx, "openssl", "enc",
+		"-aes-256-cbc", // Using CBC as GCM is not widely supported in openssl enc
+		"-salt",
+		"-pbkdf2",
+		"-iter", "100000",
+		"-pass", "pass:"+encryptionKey,
+	)
+
+	// Check if mbuffer is available
+	_, mbufferErr := exec.LookPath("mbuffer")
+
+	// Set up the pipeline
+	tarPipe, err := tarCmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create tar pipe: %w", err)
+	}
+	opensslCmd.Stdin = tarPipe
+
+	if mbufferErr == nil {
+		// Use mbuffer for buffering before writing to tape
+		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", "256M", "-o", devicePath)
+
+		opensslPipe, err := opensslCmd.StdoutPipe()
+		if err != nil {
+			return fmt.Errorf("failed to create openssl pipe: %w", err)
+		}
+		mbufferCmd.Stdin = opensslPipe
+
+		// Start the pipeline
+		if err := tarCmd.Start(); err != nil {
+			return fmt.Errorf("failed to start tar: %w", err)
+		}
+		if err := opensslCmd.Start(); err != nil {
+			tarCmd.Process.Kill()
+			return fmt.Errorf("failed to start openssl: %w", err)
+		}
+		if err := mbufferCmd.Start(); err != nil {
+			tarCmd.Process.Kill()
+			opensslCmd.Process.Kill()
+			return fmt.Errorf("failed to start mbuffer: %w", err)
+		}
+
+		// Wait for all commands
+		tarErr := tarCmd.Wait()
+		opensslErr := opensslCmd.Wait()
+		mbufferErr := mbufferCmd.Wait()
+
+		if tarErr != nil {
+			return fmt.Errorf("tar failed: %w", tarErr)
+		}
+		if opensslErr != nil {
+			return fmt.Errorf("openssl encryption failed: %w", opensslErr)
+		}
+		if mbufferErr != nil {
+			return fmt.Errorf("mbuffer failed: %w", mbufferErr)
+		}
+	} else {
+		// Direct to tape device
+		tapeFile, err := os.OpenFile(devicePath, os.O_WRONLY, 0)
+		if err != nil {
+			return fmt.Errorf("failed to open tape device: %w", err)
+		}
+		defer tapeFile.Close()
+
+		opensslCmd.Stdout = tapeFile
+
+		if err := tarCmd.Start(); err != nil {
+			return fmt.Errorf("failed to start tar: %w", err)
+		}
+		if err := opensslCmd.Start(); err != nil {
+			tarCmd.Process.Kill()
+			return fmt.Errorf("failed to start openssl: %w", err)
+		}
+
+		tarErr := tarCmd.Wait()
+		opensslErr := opensslCmd.Wait()
+
+		if tarErr != nil {
+			return fmt.Errorf("tar failed: %w", tarErr)
+		}
+		if opensslErr != nil {
+			return fmt.Errorf("openssl encryption failed: %w", opensslErr)
+		}
+	}
+
+	return nil
+}
+
+// GetEncryptionKey retrieves the base64 encryption key for a given key ID
+func (s *Service) GetEncryptionKey(ctx context.Context, keyID int64) (string, error) {
+	var keyData string
+	err := s.db.QueryRow("SELECT key_data FROM encryption_keys WHERE id = ?", keyID).Scan(&keyData)
+	if err != nil {
+		return "", fmt.Errorf("failed to get encryption key: %w", err)
+	}
+	return keyData, nil
+}
+
+// Compile-time check to ensure encryption package is used
+var _ = encryption.AlgorithmAES256GCM
+var _ = base64.StdEncoding
+
 // CalculateChecksum calculates SHA256 checksum of a file
 func (s *Service) CalculateChecksum(path string) (string, error) {
 	f, err := os.Open(path)
@@ -336,11 +475,35 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		"device":      devicePath,
 		"file_count":  len(files),
 		"total_bytes": totalBytes,
+		"encrypted":   job.EncryptionEnabled,
 	})
 
-	if err := s.StreamToTape(ctx, source.Path, files, devicePath, nil); err != nil {
-		s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
-		return nil, fmt.Errorf("failed to stream to tape: %w", err)
+	var encrypted bool
+	var encryptionKeyID *int64
+
+	if job.EncryptionEnabled && job.EncryptionKeyID != nil {
+		// Get encryption key
+		encKey, err := s.GetEncryptionKey(ctx, *job.EncryptionKeyID)
+		if err != nil {
+			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "encryption key not found: "+err.Error())
+			return nil, fmt.Errorf("failed to get encryption key: %w", err)
+		}
+
+		s.logger.Info("Encrypting backup with key", map[string]interface{}{
+			"key_id": *job.EncryptionKeyID,
+		})
+
+		if err := s.StreamToTapeEncrypted(ctx, source.Path, files, devicePath, encKey, nil); err != nil {
+			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
+			return nil, fmt.Errorf("failed to stream encrypted backup to tape: %w", err)
+		}
+		encrypted = true
+		encryptionKeyID = job.EncryptionKeyID
+	} else {
+		if err := s.StreamToTape(ctx, source.Path, files, devicePath, nil); err != nil {
+			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
+			return nil, fmt.Errorf("failed to stream to tape: %w", err)
+		}
 	}
 
 	// Write file mark
@@ -391,9 +554,11 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 			end_time = ?, 
 			status = ?, 
 			file_count = ?, 
-			total_bytes = ?
+			total_bytes = ?,
+			encrypted = ?,
+			encryption_key_id = ?
 		WHERE id = ?
-	`, endTime, models.BackupSetStatusCompleted, len(files), totalBytes, backupSetID)
+	`, endTime, models.BackupSetStatusCompleted, len(files), totalBytes, encrypted, encryptionKeyID, backupSetID)
 
 	// Update tape usage
 	s.db.Exec(`
@@ -413,18 +578,21 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		"file_count":  len(files),
 		"total_bytes": totalBytes,
 		"duration":    endTime.Sub(startTime).String(),
+		"encrypted":   encrypted,
 	})
 
 	return &models.BackupSet{
-		ID:         backupSetID,
-		JobID:      job.ID,
-		TapeID:     tapeID,
-		BackupType: backupType,
-		StartTime:  startTime,
-		EndTime:    &endTime,
-		Status:     models.BackupSetStatusCompleted,
-		FileCount:  int64(len(files)),
-		TotalBytes: totalBytes,
+		ID:              backupSetID,
+		JobID:           job.ID,
+		TapeID:          tapeID,
+		BackupType:      backupType,
+		StartTime:       startTime,
+		EndTime:         &endTime,
+		Status:          models.BackupSetStatusCompleted,
+		FileCount:       int64(len(files)),
+		TotalBytes:      totalBytes,
+		Encrypted:       encrypted,
+		EncryptionKeyID: encryptionKeyID,
 	}, nil
 }
 

@@ -16,6 +16,7 @@ import (
 	"github.com/RoseOO/TapeBackarr/internal/auth"
 	"github.com/RoseOO/TapeBackarr/internal/backup"
 	"github.com/RoseOO/TapeBackarr/internal/database"
+	"github.com/RoseOO/TapeBackarr/internal/encryption"
 	"github.com/RoseOO/TapeBackarr/internal/logging"
 	"github.com/RoseOO/TapeBackarr/internal/models"
 	"github.com/RoseOO/TapeBackarr/internal/proxmox"
@@ -36,6 +37,7 @@ type Server struct {
 	tapeService           *tape.Service
 	backupService         *backup.Service
 	restoreService        *restore.Service
+	encryptionService     *encryption.Service
 	scheduler             *scheduler.Service
 	logger                *logging.Logger
 	proxmoxBackupService  *proxmox.BackupService
@@ -50,6 +52,7 @@ func NewServer(
 	tapeService *tape.Service,
 	backupService *backup.Service,
 	restoreService *restore.Service,
+	encryptionService *encryption.Service,
 	scheduler *scheduler.Service,
 	logger *logging.Logger,
 	proxmoxClient *proxmox.Client,
@@ -63,6 +66,7 @@ func NewServer(
 		tapeService:           tapeService,
 		backupService:         backupService,
 		restoreService:        restoreService,
+		encryptionService:     encryptionService,
 		scheduler:             scheduler,
 		logger:                logger,
 		proxmoxClient:         proxmoxClient,
@@ -199,6 +203,19 @@ func (s *Server) setupRoutes() {
 			r.Get("/", s.handleListDatabaseBackups)
 			r.Post("/backup", s.handleBackupDatabase)
 			r.Post("/restore", s.handleRestoreDatabaseBackup)
+		})
+
+		// Encryption keys (admin only for management, all authenticated users can list)
+		r.Route("/api/v1/encryption-keys", func(r chi.Router) {
+			r.Get("/", s.handleListEncryptionKeys)
+			r.Get("/keysheet", s.handleGetKeySheet)
+			r.Get("/keysheet/text", s.handleGetKeySheetText)
+			r.Group(func(r chi.Router) {
+				r.Use(s.adminOnlyMiddleware)
+				r.Post("/", s.handleCreateEncryptionKey)
+				r.Post("/import", s.handleImportEncryptionKey)
+				r.Delete("/{id}", s.handleDeleteEncryptionKey)
+			})
 		})
 
 		// Proxmox VE integration
@@ -2712,4 +2729,151 @@ func (s *Server) handleProxmoxRunJob(w http.ResponseWriter, r *http.Request) {
 		"job_id":  id,
 		"results": results,
 	})
+}
+
+// Encryption Key Handlers
+
+func (s *Server) handleListEncryptionKeys(w http.ResponseWriter, r *http.Request) {
+	keys, err := s.encryptionService.ListKeys(r.Context())
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"keys": keys,
+	})
+}
+
+func (s *Server) handleCreateEncryptionKey(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Name == "" {
+		s.respondError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+
+	key, keyBase64, err := s.encryptionService.GenerateKey(r.Context(), req.Name, req.Description)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Log the audit
+	claims := r.Context().Value("claims").(*auth.Claims)
+	s.db.Exec(`
+		INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details)
+		VALUES (?, ?, ?, ?, ?)
+	`, claims.UserID, "create", "encryption_key", key.ID, "Created encryption key: "+req.Name)
+
+	s.respondJSON(w, http.StatusCreated, map[string]interface{}{
+		"key":        key,
+		"key_base64": keyBase64,
+		"message":    "IMPORTANT: Save this key securely. It will not be shown again.",
+	})
+}
+
+func (s *Server) handleImportEncryptionKey(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name        string `json:"name"`
+		KeyBase64   string `json:"key_base64"`
+		Description string `json:"description"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Name == "" || req.KeyBase64 == "" {
+		s.respondError(w, http.StatusBadRequest, "name and key_base64 are required")
+		return
+	}
+
+	key, err := s.encryptionService.ImportKey(r.Context(), req.Name, req.KeyBase64, req.Description)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Log the audit
+	claims := r.Context().Value("claims").(*auth.Claims)
+	s.db.Exec(`
+		INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details)
+		VALUES (?, ?, ?, ?, ?)
+	`, claims.UserID, "import", "encryption_key", key.ID, "Imported encryption key: "+req.Name)
+
+	s.respondJSON(w, http.StatusCreated, map[string]interface{}{
+		"key":     key,
+		"message": "Encryption key imported successfully",
+	})
+}
+
+func (s *Server) handleDeleteEncryptionKey(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid key ID")
+		return
+	}
+
+	if err := s.encryptionService.DeleteKey(r.Context(), id); err != nil {
+		s.respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Log the audit
+	claims := r.Context().Value("claims").(*auth.Claims)
+	s.db.Exec(`
+		INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details)
+		VALUES (?, ?, ?, ?, ?)
+	`, claims.UserID, "delete", "encryption_key", id, "Deleted encryption key")
+
+	s.respondJSON(w, http.StatusOK, map[string]string{
+		"message": "Encryption key deleted successfully",
+	})
+}
+
+func (s *Server) handleGetKeySheet(w http.ResponseWriter, r *http.Request) {
+	sheet, err := s.encryptionService.GenerateKeySheet(r.Context())
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Log the audit
+	claims := r.Context().Value("claims").(*auth.Claims)
+	s.db.Exec(`
+		INSERT INTO audit_logs (user_id, action, resource_type, details)
+		VALUES (?, ?, ?, ?)
+	`, claims.UserID, "export", "encryption_keys", "Generated key sheet for paper backup")
+
+	s.respondJSON(w, http.StatusOK, sheet)
+}
+
+func (s *Server) handleGetKeySheetText(w http.ResponseWriter, r *http.Request) {
+	text, err := s.encryptionService.GenerateKeySheetText(r.Context())
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Log the audit
+	claims := r.Context().Value("claims").(*auth.Claims)
+	s.db.Exec(`
+		INSERT INTO audit_logs (user_id, action, resource_type, details)
+		VALUES (?, ?, ?, ?)
+	`, claims.UserID, "export", "encryption_keys", "Generated key sheet text for printing")
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Disposition", "attachment; filename=tapebackarr-keysheet.txt")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(text))
 }

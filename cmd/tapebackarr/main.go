@@ -15,6 +15,7 @@ import (
 	"github.com/RoseOO/TapeBackarr/internal/backup"
 	"github.com/RoseOO/TapeBackarr/internal/config"
 	"github.com/RoseOO/TapeBackarr/internal/database"
+	"github.com/RoseOO/TapeBackarr/internal/encryption"
 	"github.com/RoseOO/TapeBackarr/internal/logging"
 	"github.com/RoseOO/TapeBackarr/internal/models"
 	"github.com/RoseOO/TapeBackarr/internal/notifications"
@@ -106,6 +107,9 @@ func main() {
 
 	// Create restore service
 	restoreService := restore.NewService(db, tapeService, logger, cfg.Tape.BlockSize)
+
+	// Create encryption service
+	encryptionService := encryption.NewService(db, logger)
 
 	// Create job runner for scheduler
 	jobRunner := func(ctx context.Context, job *models.BackupJob) error {
@@ -203,6 +207,7 @@ func main() {
 		tapeService,
 		backupService,
 		restoreService,
+		encryptionService,
 		schedulerService,
 		logger,
 		proxmoxClient,
