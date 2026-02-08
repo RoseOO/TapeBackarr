@@ -24,6 +24,7 @@ import (
 	"github.com/RoseOO/TapeBackarr/internal/encryption"
 	"github.com/RoseOO/TapeBackarr/internal/logging"
 	"github.com/RoseOO/TapeBackarr/internal/models"
+	"github.com/RoseOO/TapeBackarr/internal/notifications"
 	"github.com/RoseOO/TapeBackarr/internal/proxmox"
 	"github.com/RoseOO/TapeBackarr/internal/restore"
 	"github.com/RoseOO/TapeBackarr/internal/scheduler"
@@ -231,6 +232,7 @@ func (s *Server) setupRoutes() {
 			r.Group(func(r chi.Router) {
 				r.Use(s.adminOnlyMiddleware)
 				r.Put("/", s.handleUpdateConfig)
+				r.Post("/telegram/test", s.handleTestTelegram)
 			})
 		})
 
@@ -3508,6 +3510,33 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	*s.config = newCfg
 
 	s.respondJSON(w, http.StatusOK, map[string]string{"status": "configuration saved", "note": "some changes require a restart to take effect"})
+}
+
+// handleTestTelegram sends a test message via Telegram
+func (s *Server) handleTestTelegram(w http.ResponseWriter, r *http.Request) {
+	if s.config == nil {
+		s.respondError(w, http.StatusInternalServerError, "configuration not available")
+		return
+	}
+
+	tgConfig := s.config.Notifications.Telegram
+	if !tgConfig.Enabled || tgConfig.BotToken == "" || tgConfig.ChatID == "" {
+		s.respondError(w, http.StatusBadRequest, "Telegram notifications are not configured. Please enable and configure bot token and chat ID first.")
+		return
+	}
+
+	svc := notifications.NewTelegramService(notifications.TelegramConfig{
+		Enabled:  tgConfig.Enabled,
+		BotToken: tgConfig.BotToken,
+		ChatID:   tgConfig.ChatID,
+	})
+
+	if err := svc.SendTestMessage(r.Context()); err != nil {
+		s.respondError(w, http.StatusInternalServerError, "Failed to send test message: "+err.Error())
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]string{"status": "Test message sent successfully"})
 }
 
 // ==================== Proxmox Handlers ====================
