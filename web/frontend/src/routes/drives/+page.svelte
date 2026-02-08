@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { api } from '$lib/api/client';
+  import * as api from '$lib/api/client';
 
   interface Drive {
     id: number;
@@ -14,10 +14,22 @@
     created_at: string;
   }
 
+  interface ScannedDrive {
+    device_path: string;
+    status: string;
+    vendor?: string;
+    model?: string;
+    serial_number?: string;
+  }
+
   let drives: Drive[] = [];
+  let scannedDrives: ScannedDrive[] = [];
   let loading = true;
+  let scanning = false;
   let error = '';
+  let successMsg = '';
   let showAddModal = false;
+  let showScanModal = false;
   let newDrive = {
     device_path: '',
     display_name: '',
@@ -32,7 +44,7 @@
   async function loadDrives() {
     loading = true;
     try {
-      drives = await api.get('/drives');
+      drives = await api.getDrives();
     } catch (e) {
       error = 'Failed to load drives';
     } finally {
@@ -40,21 +52,60 @@
     }
   }
 
+  function showSuccessMsg(msg: string) {
+    successMsg = msg;
+    setTimeout(() => successMsg = '', 3000);
+  }
+
   async function addDrive() {
     try {
-      await api.post('/drives', newDrive);
+      error = '';
+      await api.api.post('/drives', newDrive);
       showAddModal = false;
       newDrive = { device_path: '', display_name: '', serial_number: '', model: '' };
+      showSuccessMsg('Drive added');
       await loadDrives();
     } catch (e) {
       error = 'Failed to add drive';
     }
   }
 
+  async function addScannedDrive(scanned: ScannedDrive) {
+    try {
+      error = '';
+      await api.api.post('/drives', {
+        device_path: scanned.device_path,
+        display_name: scanned.model ? `${scanned.vendor || ''} ${scanned.model}`.trim() : scanned.device_path,
+        serial_number: scanned.serial_number || '',
+        model: scanned.model || '',
+      });
+      showScanModal = false;
+      showSuccessMsg('Drive added from scan');
+      await loadDrives();
+    } catch (e) {
+      error = 'Failed to add scanned drive';
+    }
+  }
+
+  async function scanForDrives() {
+    scanning = true;
+    try {
+      error = '';
+      scannedDrives = await api.scanDrives();
+      showScanModal = true;
+    } catch (e) {
+      error = 'Failed to scan for drives';
+    } finally {
+      scanning = false;
+    }
+  }
+
   async function deleteDrive(id: number) {
     if (!confirm('Are you sure you want to remove this drive?')) return;
     try {
-      await api.delete(`/drives/${id}`);
+      error = '';
+      await api.api.delete(`/drives/${id}`);
+      showSuccessMsg('Drive removed');
       await loadDrives();
     } catch (e) {
       error = 'Failed to delete drive';
@@ -63,7 +114,9 @@
 
   async function selectDrive(id: number) {
     try {
-      await api.post(`/drives/${id}/select`, {});
+      error = '';
+      await api.api.post(`/drives/${id}/select`, {});
+      showSuccessMsg('Drive selected');
       await loadDrives();
     } catch (e) {
       error = 'Failed to select drive';
@@ -72,7 +125,9 @@
 
   async function ejectTape(id: number) {
     try {
-      await api.post(`/drives/${id}/eject`, {});
+      error = '';
+      await api.api.post(`/drives/${id}/eject`, {});
+      showSuccessMsg('Tape ejected');
       await loadDrives();
     } catch (e) {
       error = 'Failed to eject tape';
@@ -81,7 +136,9 @@
 
   async function rewindTape(id: number) {
     try {
-      await api.post(`/drives/${id}/rewind`, {});
+      error = '';
+      await api.api.post(`/drives/${id}/rewind`, {});
+      showSuccessMsg('Tape rewound');
       await loadDrives();
     } catch (e) {
       error = 'Failed to rewind tape';
@@ -97,15 +154,30 @@
       default: return 'badge-info';
     }
   }
+
+  function isDriveAlreadyAdded(devicePath: string): boolean {
+    return drives.some(d => d.device_path === devicePath);
+  }
 </script>
 
 <div class="page-header">
   <h1>Tape Drives</h1>
-  <button class="btn btn-primary" on:click={() => showAddModal = true}>Add Drive</button>
+  <div class="header-actions">
+    <button class="btn btn-secondary" on:click={scanForDrives} disabled={scanning}>
+      {scanning ? 'Scanning...' : '🔍 Scan Drives'}
+    </button>
+    <button class="btn btn-primary" on:click={() => showAddModal = true}>Add Drive</button>
+  </div>
 </div>
 
 {#if error}
-  <div class="alert alert-error">{error}</div>
+  <div class="alert alert-error">{error}
+    <button class="dismiss-btn" on:click={() => error = ''}>×</button>
+  </div>
+{/if}
+
+{#if successMsg}
+  <div class="alert alert-success">{successMsg}</div>
 {/if}
 
 {#if loading}
@@ -119,6 +191,7 @@
           <th>Device Path</th>
           <th>Model</th>
           <th>Status</th>
+          <th>Enabled</th>
           <th>Current Tape</th>
           <th>Actions</th>
         </tr>
@@ -130,6 +203,7 @@
             <td><code>{drive.device_path}</code></td>
             <td>{drive.model || '-'}</td>
             <td><span class="badge {getStatusBadge(drive.status)}">{drive.status}</span></td>
+            <td>{drive.enabled ? '✅' : '❌'}</td>
             <td>{drive.current_tape_id ? `Tape #${drive.current_tape_id}` : 'No tape'}</td>
             <td>
               <button class="btn btn-secondary btn-sm" on:click={() => selectDrive(drive.id)}>Select</button>
@@ -140,7 +214,7 @@
           </tr>
         {:else}
           <tr>
-            <td colspan="6">No drives configured. Add a drive to get started.</td>
+            <td colspan="7">No drives configured. Use "Scan Drives" to detect drives or add one manually.</td>
           </tr>
         {/each}
       </tbody>
@@ -148,6 +222,7 @@
   </div>
 {/if}
 
+<!-- Add Drive Modal -->
 {#if showAddModal}
   <div class="modal-backdrop" on:click={() => showAddModal = false}>
     <div class="modal" on:click|stopPropagation>
@@ -178,17 +253,83 @@
   </div>
 {/if}
 
+<!-- Scan Results Modal -->
+{#if showScanModal}
+  <div class="modal-backdrop" on:click={() => showScanModal = false}>
+    <div class="modal modal-wide" on:click|stopPropagation>
+      <h2>Detected Drives</h2>
+      {#if scannedDrives.length === 0}
+        <p>No tape drives detected. Make sure the drive is connected and the device is passed through to the container.</p>
+      {:else}
+        <table>
+          <thead>
+            <tr>
+              <th>Device</th>
+              <th>Vendor</th>
+              <th>Model</th>
+              <th>Status</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each scannedDrives as scanned}
+              <tr>
+                <td><code>{scanned.device_path}</code></td>
+                <td>{scanned.vendor || '-'}</td>
+                <td>{scanned.model || '-'}</td>
+                <td><span class="badge badge-success">{scanned.status}</span></td>
+                <td>
+                  {#if isDriveAlreadyAdded(scanned.device_path)}
+                    <span class="text-muted">Already added</span>
+                  {:else}
+                    <button class="btn btn-primary btn-sm" on:click={() => addScannedDrive(scanned)}>Add</button>
+                  {/if}
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+      <div class="form-actions">
+        <button class="btn btn-secondary" on:click={() => showScanModal = false}>Close</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <style>
+  .header-actions {
+    display: flex;
+    gap: 0.75rem;
+  }
+
   .alert {
     padding: 1rem;
     border-radius: 8px;
     margin-bottom: 1rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
   }
 
   .alert-error {
     background: #fee;
     color: #c00;
     border: 1px solid #fcc;
+  }
+
+  .alert-success {
+    background: #d4edda;
+    color: #155724;
+    border: 1px solid #c3e6cb;
+  }
+
+  .dismiss-btn {
+    background: none;
+    border: none;
+    font-size: 1.2rem;
+    cursor: pointer;
+    color: inherit;
   }
 
   code {
@@ -202,6 +343,11 @@
     padding: 0.25rem 0.5rem;
     font-size: 0.75rem;
     margin-right: 0.25rem;
+  }
+
+  .text-muted {
+    color: #999;
+    font-size: 0.8rem;
   }
 
   .modal-backdrop {
@@ -223,6 +369,10 @@
     border-radius: 12px;
     max-width: 500px;
     width: 90%;
+  }
+
+  .modal-wide {
+    max-width: 700px;
   }
 
   .modal h2 {

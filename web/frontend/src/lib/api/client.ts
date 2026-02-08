@@ -129,6 +129,40 @@ export async function rewindTape(driveId: number) {
   });
 }
 
+// Tape format/erase
+export async function formatTape(id: number, driveId: number, confirm: boolean) {
+  return fetchApi(`/tapes/${id}/format`, {
+    method: 'POST',
+    body: JSON.stringify({ drive_id: driveId, confirm }),
+  });
+}
+
+// Tape export (mark offsite)
+export async function exportTape(id: number, offsiteLocation: string) {
+  return fetchApi(`/tapes/${id}/export`, {
+    method: 'POST',
+    body: JSON.stringify({ offsite_location: offsiteLocation }),
+  });
+}
+
+// Tape import (bring back from offsite)
+export async function importTape(id: number, driveId?: number) {
+  return fetchApi(`/tapes/${id}/import`, {
+    method: 'POST',
+    body: JSON.stringify({ drive_id: driveId }),
+  });
+}
+
+// Read tape label from physical tape
+export async function readTapeLabel(id: number, driveId: number) {
+  return fetchApi(`/tapes/${id}/read-label?drive_id=${driveId}`);
+}
+
+// Scan for available tape drives
+export async function scanDrives() {
+  return fetchApi('/drives/scan');
+}
+
 // Sources
 export async function getSources() {
   return fetchApi('/sources');
