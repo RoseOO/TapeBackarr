@@ -11,32 +11,66 @@ export interface Notification {
   read?: boolean;
 }
 
+function getDismissedIds(): Set<string> {
+  if (typeof window === 'undefined') return new Set();
+  try {
+    const stored = localStorage.getItem('dismissed_notifications');
+    return stored ? new Set(JSON.parse(stored)) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function saveDismissedIds(ids: Set<string>) {
+  if (typeof window === 'undefined') return;
+  // Keep only last 500 dismissed IDs to prevent unbounded growth
+  const arr = Array.from(ids).slice(-500);
+  localStorage.setItem('dismissed_notifications', JSON.stringify(arr));
+}
+
 function createNotificationStore() {
   const { subscribe, update, set } = writable<Notification[]>([]);
   let eventSource: EventSource | null = null;
+  let dismissedIds = getDismissedIds();
 
   return {
     subscribe,
     add: (notification: Notification) => {
+      if (dismissedIds.has(notification.id)) return;
       update(n => {
+        if (n.some(existing => existing.id === notification.id)) return n;
         const updated = [notification, ...n];
-        // Keep max 200 notifications
         return updated.slice(0, 200);
       });
     },
     markRead: (id: string) => {
+      dismissedIds.add(id);
+      saveDismissedIds(dismissedIds);
       update(n => n.map(item => item.id === id ? { ...item, read: true } : item));
     },
     markAllRead: () => {
-      update(n => n.map(item => ({ ...item, read: true })));
+      update(n => {
+        for (const item of n) {
+          dismissedIds.add(item.id);
+        }
+        saveDismissedIds(dismissedIds);
+        return n.map(item => ({ ...item, read: true }));
+      });
     },
-    clear: () => set([]),
+    clear: () => {
+      update(n => {
+        for (const item of n) {
+          dismissedIds.add(item.id);
+        }
+        saveDismissedIds(dismissedIds);
+        return [];
+      });
+    },
     connect: () => {
       if (typeof window === 'undefined') return;
       const token = localStorage.getItem('token');
       if (!token) return;
 
-      // Close existing connection
       if (eventSource) {
         eventSource.close();
       }
@@ -46,8 +80,9 @@ function createNotificationStore() {
       eventSource.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data) as Notification;
+          // Skip dismissed notifications
+          if (dismissedIds.has(data.id)) return;
           update(n => {
-            // Avoid duplicates by ID
             if (n.some(existing => existing.id === data.id)) return n;
             const updated = [data, ...n];
             return updated.slice(0, 200);

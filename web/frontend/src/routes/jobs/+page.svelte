@@ -77,6 +77,16 @@
   let error = '';
   let showCreateModal = false;
   let showRunModal = false;
+  let showEditModal = false;
+  let editJob: Job | null = null;
+  let editFormData = {
+    name: '',
+    source_id: 0,
+    pool_id: 0,
+    backup_type: 'full',
+    schedule_cron: '',
+    retention_days: 30,
+  };
   let selectedJob: Job | null = null;
   let pollInterval: ReturnType<typeof setInterval>;
 
@@ -306,6 +316,30 @@
     }
   }
 
+  function openEditModal(job: Job) {
+    editJob = job;
+    editFormData = {
+      name: job.name,
+      source_id: job.source_id,
+      pool_id: job.pool_id,
+      backup_type: job.backup_type,
+      schedule_cron: job.schedule_cron || '',
+      retention_days: job.retention_days,
+    };
+    showEditModal = true;
+  }
+
+  async function handleEdit() {
+    if (!editJob) return;
+    try {
+      await api.updateJob(editJob.id, editFormData);
+      showEditModal = false;
+      await loadData();
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to update job';
+    }
+  }
+
   function getPhaseIcon(phase: string): string {
     switch (phase) {
       case 'initializing': return '⏳';
@@ -483,6 +517,7 @@
             </td>
             <td>
               <div class="actions">
+                <button class="btn btn-primary" on:click={() => openEditModal(job)}>Edit</button>
                 <button class="btn btn-success" on:click={() => openRunModal(job)}>Run</button>
                 <button class="btn btn-secondary" on:click={() => handleToggle(job)}>
                   {job.enabled ? 'Disable' : 'Enable'}
@@ -637,14 +672,89 @@
   </div>
 {/if}
 
+<!-- Edit Modal -->
+{#if showEditModal && editJob}
+  <div class="modal-overlay" on:click={() => showEditModal = false}>
+    <div class="modal" on:click|stopPropagation={() => {}}>
+      <h2>Edit Backup Job</h2>
+      <form on:submit|preventDefault={handleEdit}>
+        <div class="form-group">
+          <label for="edit-name">Job Name</label>
+          <input type="text" id="edit-name" bind:value={editFormData.name} required />
+        </div>
+        <div class="form-group">
+          <label for="edit-source">Source</label>
+          <select id="edit-source" bind:value={editFormData.source_id} required>
+            <option value={0} disabled>Select a source</option>
+            {#each sources as source}
+              <option value={source.id}>{source.name}</option>
+            {/each}
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="edit-pool">Tape Pool</label>
+          <select id="edit-pool" bind:value={editFormData.pool_id} required>
+            <option value={0} disabled>Select a pool</option>
+            {#each pools as pool}
+              <option value={pool.id}>{pool.name}</option>
+            {/each}
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="edit-type">Backup Type</label>
+          <select id="edit-type" bind:value={editFormData.backup_type}>
+            <option value="full">Full</option>
+            <option value="incremental">Incremental</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="edit-schedule">Schedule (cron)</label>
+          <input type="text" id="edit-schedule" bind:value={editFormData.schedule_cron} placeholder="e.g., 0 0 2 * * *" />
+          <small>Leave empty for manual-only jobs</small>
+        </div>
+        <div class="form-group">
+          <label for="edit-retention">Retention (days)</label>
+          <input type="number" id="edit-retention" bind:value={editFormData.retention_days} min="1" />
+        </div>
+        {#if editJob.encryption_enabled}
+          <div class="form-group">
+            <label>Encryption</label>
+            <div class="locked-field">🔒 Encrypted (cannot be changed after creation)</div>
+          </div>
+        {/if}
+        {#if editJob.compression && editJob.compression !== 'none'}
+          <div class="form-group">
+            <label>Compression</label>
+            <div class="locked-field">📦 {editJob.compression} (cannot be changed after creation)</div>
+          </div>
+        {/if}
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" on:click={() => showEditModal = false}>Cancel</button>
+          <button type="submit" class="btn btn-primary">Save Changes</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{/if}
+
 <style>
+  .locked-field {
+    background: var(--bg-input, #f5f5f5);
+    border: 1px solid var(--border-color, #ddd);
+    border-radius: 6px;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.875rem;
+    color: var(--text-muted, #999);
+    font-style: italic;
+  }
+
   .error-card {
-    background: #f8d7da;
-    color: #721c24;
+    background: var(--badge-danger-bg, #f8d7da);
+    color: var(--badge-danger-text, #721c24);
   }
 
   code {
-    background: #f0f0f0;
+    background: var(--code-bg, #f0f0f0);
     padding: 0.2rem 0.4rem;
     border-radius: 4px;
     font-size: 0.8rem;
@@ -653,7 +763,7 @@
   small {
     display: block;
     margin-top: 0.25rem;
-    color: #666;
+    color: var(--text-muted, #666);
     font-size: 0.75rem;
   }
 
@@ -664,7 +774,7 @@
 
   .no-data {
     text-align: center;
-    color: #666;
+    color: var(--text-muted, #666);
     padding: 2rem;
   }
 
@@ -682,7 +792,7 @@
   }
 
   .modal {
-    background: white;
+    background: var(--bg-card, white);
     padding: 2rem;
     border-radius: 12px;
     width: 100%;

@@ -14,6 +14,11 @@
     status: string;
     file_count: number;
     total_bytes: number;
+    encrypted: boolean;
+    encryption_key_id: number | null;
+    compressed: boolean;
+    compression_type: string;
+    pool_name: string | null;
   }
 
   interface CatalogEntry {
@@ -235,6 +240,9 @@
             </div>
             <div class="set-meta">
               <span>📼 {set.tape_label}</span>
+              {#if set.pool_name}
+                <span>🗂️ {set.pool_name}</span>
+              {/if}
               <span>📅 {formatDate(set.start_time)}</span>
             </div>
             <div class="set-stats">
@@ -243,6 +251,12 @@
               <span class="badge {set.backup_type === 'full' ? 'badge-info' : 'badge-warning'}">
                 {set.backup_type}
               </span>
+              {#if set.encrypted}
+                <span class="badge badge-warning">🔒 encrypted</span>
+              {/if}
+              {#if set.compressed}
+                <span class="badge badge-info">{set.compression_type}</span>
+              {/if}
             </div>
           </div>
         {/each}
@@ -367,8 +381,8 @@
 
 <style>
   .error-card {
-    background: #f8d7da;
-    color: #721c24;
+    background: var(--badge-danger-bg);
+    color: var(--badge-danger-text);
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -417,7 +431,7 @@
 
   .set-item {
     padding: 0.75rem;
-    border: 1px solid #eee;
+    border: 1px solid var(--border-color);
     border-radius: 8px;
     margin-bottom: 0.5rem;
     cursor: pointer;
@@ -425,12 +439,12 @@
   }
 
   .set-item:hover {
-    border-color: #4a4aff;
+    border-color: var(--accent-primary);
   }
 
   .set-item.selected {
-    border-color: #4a4aff;
-    background: #f0f0ff;
+    border-color: var(--accent-primary);
+    background: var(--bg-card-hover);
   }
 
   .set-header {
@@ -442,7 +456,7 @@
 
   .set-meta {
     font-size: 0.75rem;
-    color: #666;
+    color: var(--text-muted);
     display: flex;
     gap: 1rem;
     margin-bottom: 0.25rem;
@@ -473,12 +487,12 @@
   }
 
   .file-list tr.selected {
-    background: #f0f0ff;
+    background: var(--bg-card-hover);
   }
 
   .no-data {
     text-align: center;
-    color: #666;
+    color: var(--text-muted);
     padding: 2rem;
   }
 
@@ -496,7 +510,7 @@
   }
 
   .modal {
-    background: white;
+    background: var(--bg-card);
     padding: 2rem;
     border-radius: 12px;
     width: 100%;
@@ -510,7 +524,7 @@
   }
 
   .tape-requirements {
-    background: #f0f0ff;
+    background: var(--bg-input);
     padding: 1rem;
     border-radius: 8px;
     margin-bottom: 1.5rem;
@@ -532,7 +546,7 @@
 
   .tape-info {
     font-size: 0.75rem;
-    color: #666;
+    color: var(--text-muted);
     margin-left: 0.5rem;
   }
 
