@@ -1124,14 +1124,22 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "failed to read tape label")
 		return nil, fmt.Errorf("failed to read tape label: %w", readErr)
 	}
-	if physicalLabel == nil || physicalLabel.Label != expectedLabel {
+	if physicalLabel == nil || physicalLabel.Label != expectedLabel || physicalLabel.UUID != expectedUUID {
 		actualLabel := "unlabeled"
+		actualUUID := ""
 		if physicalLabel != nil {
 			actualLabel = physicalLabel.Label
+			actualUUID = physicalLabel.UUID
 		}
-		errMsg := fmt.Sprintf("tape label mismatch: expected %q but drive has %q", expectedLabel, actualLabel)
+		var errMsg string
+		if physicalLabel != nil && physicalLabel.Label == expectedLabel {
+			errMsg = fmt.Sprintf("tape UUID mismatch: expected %q but drive has %q (label %q) - please insert the correct tape", expectedUUID, actualUUID, actualLabel)
+		} else {
+			errMsg = fmt.Sprintf("tape label mismatch: expected %q but drive has %q - please insert the correct tape", expectedLabel, actualLabel)
+		}
 		s.updateProgress(job.ID, "failed", errMsg)
 		s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, errMsg)
+		s.emitEvent("error", "backup", "Wrong Tape Inserted", fmt.Sprintf("Job %s failed: %s", job.Name, errMsg))
 		return nil, fmt.Errorf("%s", errMsg)
 	}
 
@@ -1139,14 +1147,12 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 
 	// Position tape past the label. ReadTapeLabel already rewound, so we seek forward.
 	if err := driveSvc.SeekToFileNumber(ctx, 1); err != nil {
-		// Seek failed - re-write the label to ensure label + file mark exist, then position is correct
-		s.logger.Warn("Failed to seek past label, re-writing label to ensure file mark exists", map[string]interface{}{"error": err.Error()})
-		if writeErr := driveSvc.WriteTapeLabel(ctx, expectedLabel, expectedUUID, physicalLabel.Pool, physicalLabel.EncryptionKeyFingerprint, physicalLabel.CompressionType); writeErr != nil {
-			s.updateProgress(job.ID, "failed", "Failed to re-write tape label: "+writeErr.Error())
-			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "failed to re-write tape label")
-			return nil, fmt.Errorf("failed to re-write tape label: %w", writeErr)
-		}
-		s.updateProgress(job.ID, "positioning", "Re-wrote tape label with file mark, positioned for backup")
+		errMsg := fmt.Sprintf("Failed to position tape past label: %s - please check the tape and try again", err.Error())
+		s.logger.Error("Failed to seek past label on tape", map[string]interface{}{"error": err.Error(), "tape": expectedLabel})
+		s.updateProgress(job.ID, "failed", errMsg)
+		s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, errMsg)
+		s.emitEvent("error", "backup", "Tape Positioning Failed", fmt.Sprintf("Job %s failed: %s", job.Name, errMsg))
+		return nil, fmt.Errorf("failed to position tape past label: %w", err)
 	}
 
 	// Stream to tape
