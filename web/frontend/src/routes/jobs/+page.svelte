@@ -17,6 +17,7 @@
     encryption_key_id: number | null;
     last_run_at: string | null;
     next_run_at: string | null;
+    compression: string;
   }
 
   interface ActiveJob {
@@ -39,6 +40,8 @@
     start_time: string;
     updated_at: string;
     log_lines: string[];
+    compression: string;
+    tape_estimated_seconds_remaining: number;
   }
 
   interface Source {
@@ -85,6 +88,7 @@
     schedule_cron: '',
     retention_days: 30,
     encryption_key_id: null as number | null,
+    compression: 'none',
   };
 
   let runFormData = {
@@ -223,6 +227,7 @@
       schedule_cron: '',
       retention_days: 30,
       encryption_key_id: null as number | null,
+      compression: 'none',
     };
   }
 
@@ -398,9 +403,15 @@
               <span class="stat-value">{formatSpeed(job.write_speed)}</span>
             </div>
             <div class="stat-item">
-              <span class="stat-label">ETA</span>
+              <span class="stat-label">Job ETA</span>
               <span class="stat-value">{formatETA(job.estimated_seconds_remaining)}</span>
             </div>
+            {#if job.tape_estimated_seconds_remaining > 0}
+              <div class="stat-item">
+                <span class="stat-label">Tape ETA</span>
+                <span class="stat-value">{formatETA(job.tape_estimated_seconds_remaining)}</span>
+              </div>
+            {/if}
             <div class="stat-item">
               <span class="stat-label">Files</span>
               <span class="stat-value">{job.file_count}/{job.total_files}</span>
@@ -431,6 +442,7 @@
           <th>Pool</th>
           <th>Type</th>
           <th>Encryption</th>
+          <th>Compression</th>
           <th>Schedule</th>
           <th>Last Run</th>
           <th>Status</th>
@@ -455,6 +467,13 @@
                 <span class="badge badge-secondary">None</span>
               {/if}
             </td>
+            <td>
+              {#if job.compression && job.compression !== 'none'}
+                <span class="badge badge-info">{job.compression}</span>
+              {:else}
+                <span class="badge" style="background: var(--bg-input); color: var(--text-muted)">None</span>
+              {/if}
+            </td>
             <td><code>{job.schedule_cron || 'Manual'}</code></td>
             <td>{formatDate(job.last_run_at)}</td>
             <td>
@@ -475,7 +494,7 @@
         {/each}
         {#if jobs.length === 0}
           <tr>
-            <td colspan="9" class="no-data">No jobs found. Create a job to get started.</td>
+            <td colspan="10" class="no-data">No jobs found. Create a job to get started.</td>
           </tr>
         {/if}
       </tbody>
@@ -537,6 +556,15 @@
             {/each}
           </select>
           <small>Select an encryption key to encrypt backups. <a href="/encryption">Manage keys</a></small>
+        </div>
+        <div class="form-group">
+          <label for="compression">Compression</label>
+          <select id="compression" bind:value={formData.compression}>
+            <option value="none">None</option>
+            <option value="gzip">Gzip</option>
+            <option value="zstd">Zstd</option>
+          </select>
+          <small>Compress data before writing to tape. Recommended for LTO tapes.</small>
         </div>
         <div class="modal-actions">
           <button type="button" class="btn btn-secondary" on:click={() => showCreateModal = false}>Cancel</button>

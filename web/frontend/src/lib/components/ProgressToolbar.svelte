@@ -20,6 +20,8 @@
     tape_used_bytes: number;
     device_path: string;
     estimated_seconds_remaining: number;
+    tape_estimated_seconds_remaining: number;
+    compression: string;
     start_time: string;
     updated_at: string;
   }
@@ -116,7 +118,10 @@
             {#if job.phase === 'streaming'}
               {formatBytes(job.bytes_written)} / {formatBytes(job.total_bytes)}
               · {formatSpeed(job.write_speed)}
-              · ETA: {formatETA(job.estimated_seconds_remaining)}
+              · Job ETA: {formatETA(job.estimated_seconds_remaining)}
+              {#if job.tape_estimated_seconds_remaining > 0}
+                · Tape ETA: {formatETA(job.tape_estimated_seconds_remaining)}
+              {/if}
             {:else if job.phase === 'scanning'}
               Scanning...
             {:else if job.phase === 'cataloging'}
@@ -155,7 +160,7 @@
     bottom: 0;
     left: 240px;
     right: 0;
-    z-index: 890;
+    z-index: 910;
     background: #1a1a2e;
     border-top: 2px solid #16c784;
     font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
