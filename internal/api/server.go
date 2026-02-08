@@ -94,6 +94,20 @@ func NewServer(
 		eventBus:              NewEventBus(),
 	}
 
+	// Wire up backup service events to the event bus
+	if backupService != nil {
+		backupService.EventCallback = func(eventType, category, title, message string) {
+			if s.eventBus != nil {
+				s.eventBus.Publish(SystemEvent{
+					Type:     eventType,
+					Category: category,
+					Title:    title,
+					Message:  message,
+				})
+			}
+		}
+	}
+
 	s.setupRoutes()
 	return s
 }
@@ -186,6 +200,9 @@ func (s *Server) setupRoutes() {
 			r.Put("/{id}", s.handleUpdateJob)
 			r.Delete("/{id}", s.handleDeleteJob)
 			r.Post("/{id}/run", s.handleRunJob)
+			r.Post("/{id}/cancel", s.handleCancelJob)
+			r.Post("/{id}/pause", s.handlePauseJob)
+			r.Post("/{id}/resume", s.handleResumeJob)
 			r.Get("/{id}/recommend-tape", s.handleRecommendTape)
 		})
 
@@ -1222,6 +1239,20 @@ func (s *Server) handleListDrives(w http.ResponseWriter, r *http.Request) {
 		if !d.Enabled {
 			continue
 		}
+
+		// Skip hardware probing if drive is busy (e.g., during backup)
+		// The status was already set to 'busy' by the backup service
+		if d.Status == models.DriveStatusBusy {
+			// Resolve tape label from DB
+			if d.CurrentTapeID != nil {
+				var tapeLabel string
+				if err := s.db.QueryRow("SELECT label FROM tapes WHERE id = ?", *d.CurrentTapeID).Scan(&tapeLabel); err == nil {
+					drives[i].CurrentTape = tapeLabel
+				}
+			}
+			continue
+		}
+
 		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		driveSvc := tape.NewServiceForDevice(d.DevicePath, s.tapeService.GetBlockSize())
 		hwStatus, err := driveSvc.GetStatus(probeCtx)
@@ -1305,6 +1336,25 @@ func (s *Server) handleListDrives(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDriveStatus(w http.ResponseWriter, r *http.Request) {
+	driveID, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid drive id")
+		return
+	}
+
+	// Check if drive is busy (backup in progress) - return cached status
+	var driveStatus string
+	_ = s.db.QueryRow("SELECT status FROM tape_drives WHERE id = ?", driveID).Scan(&driveStatus)
+	if driveStatus == string(models.DriveStatusBusy) {
+		s.respondJSON(w, http.StatusOK, map[string]interface{}{
+			"ready":  true,
+			"online": true,
+			"busy":   true,
+			"error":  "",
+		})
+		return
+	}
+
 	ctx := r.Context()
 	status, err := s.tapeService.GetStatus(ctx)
 	if err != nil {
@@ -2038,6 +2088,72 @@ func (s *Server) handleRecommendTape(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleActiveJobs(w http.ResponseWriter, r *http.Request) {
 	activeJobs := s.backupService.GetActiveJobs()
 	s.respondJSON(w, http.StatusOK, activeJobs)
+}
+
+func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+
+	if s.backupService.CancelJob(id) {
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "warning",
+				Category: "backup",
+				Title:    "Job Cancelled",
+				Message:  fmt.Sprintf("Backup job %d was cancelled by user", id),
+			})
+		}
+		s.respondJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
+	} else {
+		s.respondError(w, http.StatusNotFound, "no active job found with that id")
+	}
+}
+
+func (s *Server) handlePauseJob(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+
+	if s.backupService.PauseJob(id) {
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "info",
+				Category: "backup",
+				Title:    "Job Paused",
+				Message:  fmt.Sprintf("Backup job %d was paused by user", id),
+			})
+		}
+		s.respondJSON(w, http.StatusOK, map[string]string{"status": "paused"})
+	} else {
+		s.respondError(w, http.StatusNotFound, "no active job found with that id")
+	}
+}
+
+func (s *Server) handleResumeJob(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+
+	if s.backupService.ResumeJob(id) {
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "info",
+				Category: "backup",
+				Title:    "Job Resumed",
+				Message:  fmt.Sprintf("Backup job %d was resumed by user", id),
+			})
+		}
+		s.respondJSON(w, http.StatusOK, map[string]string{"status": "resumed"})
+	} else {
+		s.respondError(w, http.StatusNotFound, "no active job found with that id")
+	}
 }
 
 // Backup set handlers
