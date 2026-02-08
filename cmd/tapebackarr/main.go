@@ -18,6 +18,7 @@ import (
 	"github.com/RoseOO/TapeBackarr/internal/logging"
 	"github.com/RoseOO/TapeBackarr/internal/models"
 	"github.com/RoseOO/TapeBackarr/internal/notifications"
+	"github.com/RoseOO/TapeBackarr/internal/proxmox"
 	"github.com/RoseOO/TapeBackarr/internal/restore"
 	"github.com/RoseOO/TapeBackarr/internal/scheduler"
 	"github.com/RoseOO/TapeBackarr/internal/tape"
@@ -154,6 +155,47 @@ func main() {
 	// Create scheduler
 	schedulerService := scheduler.NewService(db, logger, jobRunner)
 
+	// Initialize Proxmox services if configured
+	var proxmoxClient *proxmox.Client
+	var proxmoxBackupService *proxmox.BackupService
+	var proxmoxRestoreService *proxmox.RestoreService
+
+	if cfg.Proxmox.Enabled && cfg.Proxmox.Host != "" {
+		logger.Info("Initializing Proxmox integration", map[string]interface{}{
+			"host": cfg.Proxmox.Host,
+			"port": cfg.Proxmox.Port,
+		})
+
+		proxmoxCfg := &proxmox.ClientConfig{
+			Host:          cfg.Proxmox.Host,
+			Port:          cfg.Proxmox.Port,
+			SkipTLSVerify: cfg.Proxmox.SkipTLSVerify,
+			Username:      cfg.Proxmox.Username,
+			Password:      cfg.Proxmox.Password,
+			Realm:         cfg.Proxmox.Realm,
+			TokenID:       cfg.Proxmox.TokenID,
+			TokenSecret:   cfg.Proxmox.TokenSecret,
+		}
+
+		var err error
+		proxmoxClient, err = proxmox.NewClient(proxmoxCfg)
+		if err != nil {
+			logger.Warn("Failed to initialize Proxmox client", map[string]interface{}{
+				"error": err.Error(),
+			})
+		} else {
+			proxmoxBackupService = proxmox.NewBackupService(proxmoxClient, db, tapeService, logger, cfg.Tape.BlockSize)
+			proxmoxRestoreService = proxmox.NewRestoreService(proxmoxClient, db, tapeService, logger, cfg.Tape.BlockSize)
+
+			if cfg.Proxmox.TempDir != "" {
+				proxmoxBackupService.SetTempDir(cfg.Proxmox.TempDir)
+				proxmoxRestoreService.SetTempDir(cfg.Proxmox.TempDir)
+			}
+
+			logger.Info("Proxmox integration initialized successfully", nil)
+		}
+	}
+
 	// Create API server
 	server := api.NewServer(
 		db,
@@ -163,6 +205,9 @@ func main() {
 		restoreService,
 		schedulerService,
 		logger,
+		proxmoxClient,
+		proxmoxBackupService,
+		proxmoxRestoreService,
 	)
 
 	// Start scheduler
