@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import * as api from '$lib/api/client';
 
   interface Tape {
@@ -34,6 +34,14 @@
     enabled: boolean;
   }
 
+  interface BatchLabelStatus {
+    running: boolean;
+    completed: number;
+    total: number;
+    current_label: string;
+    message: string;
+  }
+
   let tapes: Tape[] = [];
   let pools: Pool[] = [];
   let drives: Drive[] = [];
@@ -46,7 +54,27 @@
   let showFormatModal = false;
   let showExportModal = false;
   let showLabelModal = false;
+  let showBatchLabelModal = false;
+  let showDeleteModal = false;
   let selectedTape: Tape | null = null;
+  let deleteTarget: Tape | null = null;
+
+  // Batch label form
+  let batchLabelDriveId: number | null = null;
+  let batchLabelPrefix = '';
+  let batchLabelStartNumber = 1;
+  let batchLabelCount = 1;
+  let batchLabelDigits = 3;
+  let batchLabelPoolId: number | null = null;
+
+  // Batch label progress
+  let batchLabelStatus: BatchLabelStatus | null = null;
+  let batchLabelPollInterval: ReturnType<typeof setInterval> | null = null;
+
+  // Batch selection
+  let selectedTapes: Set<number> = new Set();
+  let batchStatus = '';
+  let batchPoolId: number | null = null;
 
   // Form data
   let formData = {
@@ -73,6 +101,57 @@
     formData.capacity_bytes = ltoTypes[formData.lto_type];
   }
 
+  $: batchLabelPreview = generateBatchLabelPreview(batchLabelPrefix, batchLabelStartNumber, batchLabelCount, batchLabelDigits);
+
+  $: allSelected = tapes.length > 0 && tapes.every(t => selectedTapes.has(t.id));
+
+  function generateBatchLabelPreview(prefix: string, start: number, count: number, digits: number): string[] {
+    const labels: string[] = [];
+    const safeCount = Math.min(count, 50);
+    for (let i = 0; i < safeCount; i++) {
+      labels.push(prefix + String(start + i).padStart(digits, '0'));
+    }
+    return labels;
+  }
+
+  function toggleSelectAll() {
+    if (allSelected) {
+      selectedTapes = new Set();
+    } else {
+      selectedTapes = new Set(tapes.map(t => t.id));
+    }
+  }
+
+  function toggleSelectTape(id: number) {
+    const next = new Set(selectedTapes);
+    if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
+    selectedTapes = next;
+  }
+
+  async function handleBatchUpdate() {
+    if (selectedTapes.size === 0) return;
+    try {
+      error = '';
+      const data: { tape_ids: number[]; status?: string; pool_id?: number } = {
+        tape_ids: Array.from(selectedTapes),
+      };
+      if (batchStatus) data.status = batchStatus;
+      if (batchPoolId) data.pool_id = batchPoolId;
+      await api.batchUpdateTapes(data);
+      showSuccess(`Updated ${selectedTapes.size} tapes`);
+      selectedTapes = new Set();
+      batchStatus = '';
+      batchPoolId = null;
+      await loadData();
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to batch update tapes';
+    }
+  }
+
   async function onDriveChange(driveId: number | null) {
     formData.drive_id = driveId;
     detectedType = '';
@@ -97,7 +176,78 @@
 
   onMount(async () => {
     await loadData();
+    checkBatchLabelStatus();
   });
+
+  onDestroy(() => {
+    stopBatchLabelPolling();
+  });
+
+  function startBatchLabelPolling() {
+    stopBatchLabelPolling();
+    batchLabelPollInterval = setInterval(async () => {
+      await checkBatchLabelStatus();
+    }, 2000);
+  }
+
+  function stopBatchLabelPolling() {
+    if (batchLabelPollInterval) {
+      clearInterval(batchLabelPollInterval);
+      batchLabelPollInterval = null;
+    }
+  }
+
+  async function checkBatchLabelStatus() {
+    try {
+      const status = await api.getBatchLabelStatus();
+      batchLabelStatus = status;
+      if (status && status.running) {
+        if (!batchLabelPollInterval) {
+          startBatchLabelPolling();
+        }
+      } else {
+        stopBatchLabelPolling();
+        if (status && status.total > 0 && status.completed === status.total) {
+          await loadData();
+        }
+      }
+    } catch {
+      batchLabelStatus = null;
+      stopBatchLabelPolling();
+    }
+  }
+
+  async function handleCancelBatchLabel() {
+    try {
+      await api.cancelBatchLabel();
+      showSuccess('Batch label cancelled');
+      stopBatchLabelPolling();
+      batchLabelStatus = null;
+      await loadData();
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to cancel batch label';
+    }
+  }
+
+  async function handleBatchLabel() {
+    if (!batchLabelDriveId || !batchLabelPrefix || batchLabelCount < 1) return;
+    try {
+      error = '';
+      await api.batchLabelTapesFromTapes({
+        drive_id: batchLabelDriveId,
+        prefix: batchLabelPrefix,
+        start_number: batchLabelStartNumber,
+        count: batchLabelCount,
+        digits: batchLabelDigits,
+        pool_id: batchLabelPoolId ?? undefined,
+      });
+      showBatchLabelModal = false;
+      showSuccess('Batch label started');
+      startBatchLabelPolling();
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to start batch label';
+    }
+  }
 
   async function loadData() {
     loading = true;
@@ -156,6 +306,7 @@
       error = '';
       await api.updateTape(selectedTape.id, {
         label: formData.label,
+        barcode: formData.barcode,
         pool_id: formData.pool_id ?? undefined,
         status: selectedTape.status,
       });
@@ -167,12 +318,19 @@
     }
   }
 
-  async function handleDelete(tape: Tape) {
-    if (!confirm(`Delete tape ${tape.label}? This cannot be undone.`)) return;
+  function handleDelete(tape: Tape) {
+    deleteTarget = tape;
+    showDeleteModal = true;
+  }
+
+  async function confirmDelete() {
+    if (!deleteTarget) return;
     try {
       error = '';
-      await api.deleteTape(tape.id);
+      await api.deleteTape(deleteTarget.id);
       showSuccess('Tape deleted');
+      showDeleteModal = false;
+      deleteTarget = null;
       await loadData();
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to delete tape';
@@ -276,6 +434,16 @@
     showLabelModal = true;
   }
 
+  function openBatchLabelModal() {
+    batchLabelDriveId = drives.length > 0 ? drives[0].id : null;
+    batchLabelPrefix = '';
+    batchLabelStartNumber = 1;
+    batchLabelCount = 1;
+    batchLabelDigits = 3;
+    batchLabelPoolId = null;
+    showBatchLabelModal = true;
+  }
+
   function resetForm() {
     const defaultDriveId = drives.length > 0 ? drives[0].id : null;
     formData = {
@@ -323,9 +491,14 @@
 
 <div class="page-header">
   <h1>Tape Management</h1>
-  <button class="btn btn-primary" on:click={() => { showCreateModal = true; resetForm(); }}>
-    + Add Tape
-  </button>
+  <div class="header-actions">
+    <button class="btn btn-secondary" on:click={openBatchLabelModal}>
+      📦 Batch Label
+    </button>
+    <button class="btn btn-primary" on:click={() => { showCreateModal = true; resetForm(); }}>
+      + Add Tape
+    </button>
+  </div>
 </div>
 
 {#if error}
@@ -341,6 +514,50 @@
   </div>
 {/if}
 
+{#if batchLabelStatus && (batchLabelStatus.running || (batchLabelStatus.total > 0 && batchLabelStatus.completed < batchLabelStatus.total))}
+  <div class="card batch-progress-panel">
+    <div class="batch-progress-header">
+      <strong>📦 Batch Label in Progress</strong>
+      <button class="btn btn-danger btn-sm" on:click={handleCancelBatchLabel}>Cancel</button>
+    </div>
+    <div class="batch-progress-details">
+      <span>Label: <strong>{batchLabelStatus.current_label || '—'}</strong></span>
+      <span>{batchLabelStatus.message || ''}</span>
+    </div>
+    <div class="progress-bar-outer">
+      <div class="progress-bar-fill" style="width: {batchLabelStatus.total > 0 ? (batchLabelStatus.completed / batchLabelStatus.total) * 100 : 0}%"></div>
+    </div>
+    <div class="batch-progress-count">
+      {batchLabelStatus.completed} / {batchLabelStatus.total} completed
+    </div>
+  </div>
+{/if}
+
+{#if selectedTapes.size > 0}
+  <div class="card batch-actions-bar">
+    <span class="batch-count">{selectedTapes.size} tape{selectedTapes.size !== 1 ? 's' : ''} selected</span>
+    <div class="batch-controls">
+      <select class="status-select" bind:value={batchStatus}>
+        <option value="">Change Status...</option>
+        <option value="blank">Blank</option>
+        <option value="active">Active</option>
+        <option value="full">Full</option>
+        <option value="expired">Expired</option>
+        <option value="retired">Retired</option>
+        <option value="exported">Exported</option>
+      </select>
+      <select class="status-select" bind:value={batchPoolId}>
+        <option value={null}>Change Pool...</option>
+        {#each pools as pool}
+          <option value={pool.id}>{pool.name}</option>
+        {/each}
+      </select>
+      <button class="btn btn-primary btn-sm" on:click={handleBatchUpdate} disabled={!batchStatus && !batchPoolId}>Apply</button>
+      <button class="btn btn-secondary btn-sm" on:click={() => { selectedTapes = new Set(); }}>Clear Selection</button>
+    </div>
+  </div>
+{/if}
+
 {#if loading}
   <p>Loading...</p>
 {:else}
@@ -348,6 +565,9 @@
     <table>
       <thead>
         <tr>
+          <th class="checkbox-col">
+            <input type="checkbox" checked={allSelected} on:change={toggleSelectAll} />
+          </th>
           <th>Label</th>
           <th>Type</th>
           <th>UUID</th>
@@ -364,6 +584,9 @@
       <tbody>
         {#each tapes as tape}
           <tr>
+            <td class="checkbox-col">
+              <input type="checkbox" checked={selectedTapes.has(tape.id)} on:change={() => toggleSelectTape(tape.id)} />
+            </td>
             <td><strong>{tape.label}</strong></td>
             <td>{tape.lto_type || '-'}</td>
             <td class="uuid-cell" title={tape.uuid || ''}>{tape.uuid && tape.uuid.length >= 8 ? tape.uuid.substring(0, 8) + '...' : (tape.uuid || '-')}</td>
@@ -386,7 +609,7 @@
                 <span class="text-muted">—</span>
               {/if}
             </td>
-            <td>{tape.labeled_at ? new Date(tape.labeled_at).toLocaleDateString() : 'No'}</td>
+            <td>{tape.labeled_at ? new Date(tape.labeled_at).toLocaleString() : 'No'}</td>
             <td>
               <div class="actions">
                 <button class="btn btn-secondary btn-sm" on:click={() => openEditModal(tape)}>Edit</button>
@@ -412,7 +635,7 @@
         {/each}
         {#if tapes.length === 0}
           <tr>
-            <td colspan="11" class="no-data">No tapes found. Add a tape to get started.</td>
+            <td colspan="12" class="no-data">No tapes found. Add a tape to get started.</td>
           </tr>
         {/if}
       </tbody>
@@ -513,7 +736,16 @@
       <form on:submit|preventDefault={handleUpdate}>
         <div class="form-group">
           <label for="edit-label">Label</label>
-          <input type="text" id="edit-label" bind:value={formData.label} required />
+          {#if selectedTape.labeled_at}
+            <input type="text" id="edit-label" bind:value={formData.label} required disabled />
+            <small class="label-locked-note">Label cannot be changed after tape has been physically labelled</small>
+          {:else}
+            <input type="text" id="edit-label" bind:value={formData.label} required />
+          {/if}
+        </div>
+        <div class="form-group">
+          <label for="edit-barcode">Barcode</label>
+          <input type="text" id="edit-barcode" bind:value={formData.barcode} placeholder="e.g., ABC123L8" />
         </div>
         <div class="form-group">
           <label for="edit-pool">Pool</label>
@@ -619,7 +851,90 @@
   </div>
 {/if}
 
+<!-- Batch Label Modal -->
+{#if showBatchLabelModal}
+  <div class="modal-overlay" on:click={() => showBatchLabelModal = false}>
+    <div class="modal" on:click|stopPropagation={() => {}}>
+      <h2>📦 Batch Label Tapes</h2>
+      <p class="modal-desc">Automatically create and label multiple tapes. Insert blank tapes one at a time when prompted.</p>
+      <form on:submit|preventDefault={handleBatchLabel}>
+        <div class="form-group">
+          <label for="batch-drive">Drive <span class="required">*</span></label>
+          <select id="batch-drive" bind:value={batchLabelDriveId} required>
+            <option value={null} disabled>Select a drive...</option>
+            {#each drives as drive}
+              <option value={drive.id}>{drive.display_name || drive.device_path}</option>
+            {/each}
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="batch-prefix">Prefix <span class="required">*</span></label>
+          <input type="text" id="batch-prefix" bind:value={batchLabelPrefix} required placeholder="e.g., BACKUP-" />
+        </div>
+        <div class="form-group">
+          <label for="batch-start">Start Number</label>
+          <input type="number" id="batch-start" bind:value={batchLabelStartNumber} min="0" />
+        </div>
+        <div class="form-group">
+          <label for="batch-count">Count <span class="required">*</span></label>
+          <input type="number" id="batch-count" bind:value={batchLabelCount} min="1" max="100" required />
+        </div>
+        <div class="form-group">
+          <label for="batch-digits">Digits</label>
+          <input type="number" id="batch-digits" bind:value={batchLabelDigits} min="1" max="6" />
+        </div>
+        <div class="form-group">
+          <label for="batch-pool">Pool</label>
+          <select id="batch-pool" bind:value={batchLabelPoolId}>
+            <option value={null}>No Pool</option>
+            {#each pools as pool}
+              <option value={pool.id}>{pool.name}</option>
+            {/each}
+          </select>
+        </div>
+        {#if batchLabelPreview.length > 0}
+          <div class="batch-preview">
+            <strong>Preview:</strong>
+            <div class="batch-preview-labels">
+              {#each batchLabelPreview as lbl}
+                <span class="batch-preview-label">{lbl}</span>
+              {/each}
+              {#if batchLabelCount > 50}
+                <span class="batch-preview-label">…and {batchLabelCount - 50} more</span>
+              {/if}
+            </div>
+          </div>
+        {/if}
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" on:click={() => showBatchLabelModal = false}>Cancel</button>
+          <button type="submit" class="btn btn-primary" disabled={!batchLabelDriveId || !batchLabelPrefix || batchLabelCount < 1}>Start Batch Label</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{/if}
+
+<!-- Delete Confirmation Modal -->
+{#if showDeleteModal && deleteTarget}
+  <div class="modal-overlay" on:click={() => { showDeleteModal = false; deleteTarget = null; }}>
+    <div class="modal" on:click|stopPropagation={() => {}}>
+      <h2>⚠️ Delete Tape</h2>
+      <p class="modal-desc warning-text">Are you sure you want to delete tape <strong>{deleteTarget.label}</strong>? This action cannot be undone.</p>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" on:click={() => { showDeleteModal = false; deleteTarget = null; }}>Cancel</button>
+        <button class="btn btn-danger" on:click={confirmDelete}>Delete</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <style>
+  .header-actions {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+  }
+
   .error-card {
     background: #f8d7da;
     color: #721c24;
@@ -761,5 +1076,108 @@
     color: #28a745;
     font-style: normal;
     font-weight: 500;
+  }
+
+  .label-locked-note {
+    color: #856404;
+    font-style: italic;
+  }
+
+  .checkbox-col {
+    width: 2rem;
+    text-align: center;
+  }
+
+  .checkbox-col input[type="checkbox"] {
+    width: auto;
+    margin: 0;
+  }
+
+  .batch-actions-bar {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.75rem 1rem;
+    margin-bottom: 1rem;
+    background: #e8f0fe;
+    flex-wrap: wrap;
+  }
+
+  .batch-count {
+    font-weight: 600;
+    font-size: 0.875rem;
+  }
+
+  .batch-controls {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .batch-progress-panel {
+    background: #e8f4fd;
+    border: 1px solid #b8daff;
+    padding: 1rem;
+    margin-bottom: 1rem;
+  }
+
+  .batch-progress-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+  }
+
+  .batch-progress-details {
+    display: flex;
+    gap: 1rem;
+    font-size: 0.85rem;
+    margin-bottom: 0.5rem;
+    color: #333;
+  }
+
+  .progress-bar-outer {
+    width: 100%;
+    height: 10px;
+    background: #d0d0d0;
+    border-radius: 5px;
+    overflow: hidden;
+    margin-bottom: 0.25rem;
+  }
+
+  .progress-bar-fill {
+    height: 100%;
+    background: #4a4aff;
+    border-radius: 5px;
+    transition: width 0.3s ease;
+  }
+
+  .batch-progress-count {
+    font-size: 0.8rem;
+    color: #555;
+  }
+
+  .batch-preview {
+    margin-top: 0.5rem;
+    padding: 0.75rem;
+    background: #f8f9fa;
+    border-radius: 6px;
+    font-size: 0.85rem;
+  }
+
+  .batch-preview-labels {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin-top: 0.35rem;
+  }
+
+  .batch-preview-label {
+    background: #e0e0e0;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 0.8rem;
   }
 </style>
