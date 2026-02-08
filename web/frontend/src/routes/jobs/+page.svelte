@@ -13,6 +13,8 @@
     schedule_cron: string;
     retention_days: number;
     enabled: boolean;
+    encryption_enabled: boolean;
+    encryption_key_id: number | null;
     last_run_at: string | null;
     next_run_at: string | null;
   }
@@ -47,10 +49,18 @@
     status: string;
   }
 
+  interface EncryptionKey {
+    id: number;
+    name: string;
+    algorithm: string;
+    key_fingerprint: string;
+  }
+
   let jobs: Job[] = [];
   let sources: Source[] = [];
   let pools: Pool[] = [];
   let tapes: Tape[] = [];
+  let encryptionKeys: EncryptionKey[] = [];
   let activeJobs: ActiveJob[] = [];
   let loading = true;
   let error = '';
@@ -66,6 +76,7 @@
     backup_type: 'full',
     schedule_cron: '',
     retention_days: 30,
+    encryption_key_id: 0,
   };
 
   let runFormData = {
@@ -93,12 +104,18 @@
 
   async function loadData() {
     try {
-      [jobs, sources, pools, tapes] = await Promise.all([
+      const [jobsResult, sourcesResult, poolsResult, tapesResult, keysResult] = await Promise.all([
         api.getJobs(),
         api.getSources(),
         api.getPools(),
         api.getTapes(),
+        api.getEncryptionKeys(),
       ]);
+      jobs = jobsResult;
+      sources = sourcesResult;
+      pools = poolsResult;
+      tapes = tapesResult;
+      encryptionKeys = keysResult.keys || [];
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load data';
     } finally {
@@ -108,7 +125,11 @@
 
   async function handleCreate() {
     try {
-      await api.createJob(formData);
+      const payload: any = { ...formData };
+      if (payload.encryption_key_id === 0) {
+        delete payload.encryption_key_id;
+      }
+      await api.createJob(payload);
       showCreateModal = false;
       resetForm();
       await loadData();
@@ -164,6 +185,7 @@
       backup_type: 'full',
       schedule_cron: '',
       retention_days: 30,
+      encryption_key_id: 0,
     };
   }
 
@@ -247,9 +269,9 @@
           <th>Source</th>
           <th>Pool</th>
           <th>Type</th>
+          <th>Encryption</th>
           <th>Schedule</th>
           <th>Last Run</th>
-          <th>Next Run</th>
           <th>Status</th>
           <th>Actions</th>
         </tr>
@@ -265,9 +287,15 @@
                 {job.backup_type}
               </span>
             </td>
+            <td>
+              {#if job.encryption_enabled}
+                <span class="badge badge-success">🔒 Encrypted</span>
+              {:else}
+                <span class="badge badge-secondary">None</span>
+              {/if}
+            </td>
             <td><code>{job.schedule_cron || 'Manual'}</code></td>
             <td>{formatDate(job.last_run_at)}</td>
-            <td>{formatDate(job.next_run_at)}</td>
             <td>
               <span class="badge {job.enabled ? 'badge-success' : 'badge-danger'}">
                 {job.enabled ? 'Enabled' : 'Disabled'}
@@ -338,6 +366,16 @@
         <div class="form-group">
           <label for="retention">Retention (days)</label>
           <input type="number" id="retention" bind:value={formData.retention_days} min="1" />
+        </div>
+        <div class="form-group">
+          <label for="encryption-key">Encryption Key</label>
+          <select id="encryption-key" bind:value={formData.encryption_key_id}>
+            <option value={0}>None (unencrypted)</option>
+            {#each encryptionKeys as key}
+              <option value={key.id}>🔒 {key.name}</option>
+            {/each}
+          </select>
+          <small>Select an encryption key to encrypt backups. <a href="/encryption">Manage keys</a></small>
         </div>
         <div class="modal-actions">
           <button type="button" class="btn btn-secondary" on:click={() => showCreateModal = false}>Cancel</button>

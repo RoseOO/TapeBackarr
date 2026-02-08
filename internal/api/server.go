@@ -1297,7 +1297,9 @@ func (s *Server) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`
 		SELECT j.id, j.name, j.source_id, s.name as source_name, j.pool_id, p.name as pool_name,
-		       j.backup_type, j.schedule_cron, j.retention_days, j.enabled, j.last_run_at, j.next_run_at
+		       j.backup_type, j.schedule_cron, j.retention_days, j.enabled,
+		       j.encryption_enabled, j.encryption_key_id,
+		       j.last_run_at, j.next_run_at
 		FROM backup_jobs j
 		LEFT JOIN backup_sources s ON j.source_id = s.id
 		LEFT JOIN tape_pools p ON j.pool_id = p.id
@@ -1314,22 +1316,26 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		var j models.BackupJob
 		var sourceName, poolName *string
 		if err := rows.Scan(&j.ID, &j.Name, &j.SourceID, &sourceName, &j.PoolID, &poolName,
-			&j.BackupType, &j.ScheduleCron, &j.RetentionDays, &j.Enabled, &j.LastRunAt, &j.NextRunAt); err != nil {
+			&j.BackupType, &j.ScheduleCron, &j.RetentionDays, &j.Enabled,
+			&j.EncryptionEnabled, &j.EncryptionKeyID,
+			&j.LastRunAt, &j.NextRunAt); err != nil {
 			continue
 		}
 		job := map[string]interface{}{
-			"id":             j.ID,
-			"name":           j.Name,
-			"source_id":      j.SourceID,
-			"source_name":    sourceName,
-			"pool_id":        j.PoolID,
-			"pool_name":      poolName,
-			"backup_type":    j.BackupType,
-			"schedule_cron":  j.ScheduleCron,
-			"retention_days": j.RetentionDays,
-			"enabled":        j.Enabled,
-			"last_run_at":    j.LastRunAt,
-			"next_run_at":    j.NextRunAt,
+			"id":                 j.ID,
+			"name":               j.Name,
+			"source_id":          j.SourceID,
+			"source_name":        sourceName,
+			"pool_id":            j.PoolID,
+			"pool_name":          poolName,
+			"backup_type":        j.BackupType,
+			"schedule_cron":      j.ScheduleCron,
+			"retention_days":     j.RetentionDays,
+			"enabled":            j.Enabled,
+			"encryption_enabled": j.EncryptionEnabled,
+			"encryption_key_id":  j.EncryptionKeyID,
+			"last_run_at":        j.LastRunAt,
+			"next_run_at":        j.NextRunAt,
 		}
 		jobs = append(jobs, job)
 	}
@@ -1339,12 +1345,13 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name          string `json:"name"`
-		SourceID      int64  `json:"source_id"`
-		PoolID        int64  `json:"pool_id"`
-		BackupType    string `json:"backup_type"`
-		ScheduleCron  string `json:"schedule_cron"`
-		RetentionDays int    `json:"retention_days"`
+		Name            string `json:"name"`
+		SourceID        int64  `json:"source_id"`
+		PoolID          int64  `json:"pool_id"`
+		BackupType      string `json:"backup_type"`
+		ScheduleCron    string `json:"schedule_cron"`
+		RetentionDays   int    `json:"retention_days"`
+		EncryptionKeyID *int64 `json:"encryption_key_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.respondError(w, http.StatusBadRequest, "invalid request body")
@@ -1359,10 +1366,22 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Determine encryption settings
+	encryptionEnabled := false
+	if req.EncryptionKeyID != nil && *req.EncryptionKeyID > 0 {
+		// Validate the key exists
+		_, err := s.encryptionService.GetKey(r.Context(), *req.EncryptionKeyID)
+		if err != nil {
+			s.respondError(w, http.StatusBadRequest, "encryption key not found")
+			return
+		}
+		encryptionEnabled = true
+	}
+
 	result, err := s.db.Exec(`
-		INSERT INTO backup_jobs (name, source_id, pool_id, backup_type, schedule_cron, retention_days, enabled)
-		VALUES (?, ?, ?, ?, ?, ?, 1)
-	`, req.Name, req.SourceID, req.PoolID, req.BackupType, req.ScheduleCron, req.RetentionDays)
+		INSERT INTO backup_jobs (name, source_id, pool_id, backup_type, schedule_cron, retention_days, enabled, encryption_enabled, encryption_key_id)
+		VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+	`, req.Name, req.SourceID, req.PoolID, req.BackupType, req.ScheduleCron, req.RetentionDays, encryptionEnabled, req.EncryptionKeyID)
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1417,13 +1436,14 @@ func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Name          *string `json:"name"`
-		SourceID      *int64  `json:"source_id"`
-		PoolID        *int64  `json:"pool_id"`
-		BackupType    *string `json:"backup_type"`
-		ScheduleCron  *string `json:"schedule_cron"`
-		RetentionDays *int    `json:"retention_days"`
-		Enabled       *bool   `json:"enabled"`
+		Name            *string `json:"name"`
+		SourceID        *int64  `json:"source_id"`
+		PoolID          *int64  `json:"pool_id"`
+		BackupType      *string `json:"backup_type"`
+		ScheduleCron    *string `json:"schedule_cron"`
+		RetentionDays   *int    `json:"retention_days"`
+		Enabled         *bool   `json:"enabled"`
+		EncryptionKeyID *int64  `json:"encryption_key_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.respondError(w, http.StatusBadRequest, "invalid request body")
@@ -1467,6 +1487,21 @@ func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request) {
 	if req.Enabled != nil {
 		updates = append(updates, "enabled = ?")
 		args = append(args, *req.Enabled)
+	}
+	if req.EncryptionKeyID != nil {
+		if *req.EncryptionKeyID > 0 {
+			// Validate the key exists
+			_, err := s.encryptionService.GetKey(r.Context(), *req.EncryptionKeyID)
+			if err != nil {
+				s.respondError(w, http.StatusBadRequest, "encryption key not found")
+				return
+			}
+			updates = append(updates, "encryption_key_id = ?", "encryption_enabled = 1")
+			args = append(args, *req.EncryptionKeyID)
+		} else {
+			// Disable encryption (key_id = 0 means remove)
+			updates = append(updates, "encryption_key_id = NULL", "encryption_enabled = 0")
+		}
 	}
 
 	if len(updates) == 0 {
@@ -1527,9 +1562,9 @@ func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 	// Get job details
 	var job models.BackupJob
 	err = s.db.QueryRow(`
-		SELECT id, name, source_id, pool_id, backup_type, retention_days
+		SELECT id, name, source_id, pool_id, backup_type, retention_days, encryption_enabled, encryption_key_id
 		FROM backup_jobs WHERE id = ?
-	`, id).Scan(&job.ID, &job.Name, &job.SourceID, &job.PoolID, &job.BackupType, &job.RetentionDays)
+	`, id).Scan(&job.ID, &job.Name, &job.SourceID, &job.PoolID, &job.BackupType, &job.RetentionDays, &job.EncryptionEnabled, &job.EncryptionKeyID)
 	if err != nil {
 		s.respondError(w, http.StatusNotFound, "job not found")
 		return

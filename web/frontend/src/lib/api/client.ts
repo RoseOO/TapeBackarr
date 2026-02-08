@@ -206,14 +206,14 @@ export async function getJob(id: number) {
   return fetchApi(`/jobs/${id}`);
 }
 
-export async function createJob(data: { name: string; source_id: number; pool_id: number; backup_type: string; schedule_cron?: string; retention_days: number }) {
+export async function createJob(data: { name: string; source_id: number; pool_id: number; backup_type: string; schedule_cron?: string; retention_days: number; encryption_key_id?: number | null }) {
   return fetchApi('/jobs', {
     method: 'POST',
     body: JSON.stringify(data),
   });
 }
 
-export async function updateJob(id: number, data: { name?: string; source_id?: number; pool_id?: number; backup_type?: string; schedule_cron?: string; retention_days?: number; enabled?: boolean }) {
+export async function updateJob(id: number, data: { name?: string; source_id?: number; pool_id?: number; backup_type?: string; schedule_cron?: string; retention_days?: number; enabled?: boolean; encryption_key_id?: number | null }) {
   return fetchApi(`/jobs/${id}`, {
     method: 'PUT',
     body: JSON.stringify(data),

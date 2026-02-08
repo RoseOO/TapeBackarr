@@ -32,7 +32,7 @@ type EncryptionKey struct {
 	Name           string    `json:"name" db:"name"`
 	Algorithm      Algorithm `json:"algorithm" db:"algorithm"`
 	KeyData        string    `json:"-" db:"key_data"`                  // Base64 encoded key (not exposed in JSON)
-	KeyFingerprint string    `json:"fingerprint" db:"key_fingerprint"` // SHA256 fingerprint
+	KeyFingerprint string    `json:"key_fingerprint" db:"key_fingerprint"` // SHA256 fingerprint
 	Description    string    `json:"description" db:"description"`
 	CreatedAt      time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at" db:"updated_at"`
