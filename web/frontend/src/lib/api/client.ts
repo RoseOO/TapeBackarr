@@ -240,11 +240,19 @@ export async function deleteJob(id: number) {
   });
 }
 
-export async function runJob(id: number, tapeId: number, backupType?: string) {
+export async function runJob(id: number, tapeId?: number, backupType?: string, usePool?: boolean) {
+  const body: Record<string, unknown> = {};
+  if (tapeId) body.tape_id = tapeId;
+  if (backupType) body.backup_type = backupType;
+  if (usePool !== undefined) body.use_pool = usePool;
   return fetchApi(`/jobs/${id}/run`, {
     method: 'POST',
-    body: JSON.stringify({ tape_id: tapeId, backup_type: backupType }),
+    body: JSON.stringify(body),
   });
+}
+
+export async function recommendTape(jobId: number) {
+  return fetchApi(`/jobs/${jobId}/recommend-tape`);
 }
 
 // Backup Sets

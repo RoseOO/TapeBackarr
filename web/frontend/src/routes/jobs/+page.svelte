@@ -82,7 +82,11 @@
   let runFormData = {
     tape_id: 0,
     backup_type: 'full',
+    use_pool: true,
   };
+
+  let recommendedTape: { found: boolean; tape_id?: number; tape_label?: string; tape_status?: string; capacity_bytes?: number; used_bytes?: number; pool_name?: string; message?: string } | null = null;
+  let loadingRecommendation = false;
 
   onMount(async () => {
     await loadData();
@@ -162,21 +166,44 @@
   async function handleRunJob() {
     if (!selectedJob) return;
     try {
-      await api.runJob(selectedJob.id, runFormData.tape_id, runFormData.backup_type);
-      showRunModal = false;
-      alert('Backup job started!');
+      if (runFormData.use_pool) {
+        const result = await api.runJob(selectedJob.id, undefined, runFormData.backup_type, true);
+        showRunModal = false;
+        const tapeLabel = result?.tape_label ? ` using tape ${result.tape_label}` : '';
+        alert(`Backup job started${tapeLabel}!`);
+      } else {
+        if (!runFormData.tape_id) {
+          error = 'Please select a tape';
+          return;
+        }
+        await api.runJob(selectedJob.id, runFormData.tape_id, runFormData.backup_type, false);
+        showRunModal = false;
+        alert('Backup job started!');
+      }
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to start job';
     }
   }
 
-  function openRunModal(job: Job) {
+  async function openRunModal(job: Job) {
     selectedJob = job;
     runFormData = {
       tape_id: 0,
       backup_type: job.backup_type,
+      use_pool: true,
     };
+    recommendedTape = null;
     showRunModal = true;
+
+    // Fetch tape recommendation from pool
+    loadingRecommendation = true;
+    try {
+      recommendedTape = await api.recommendTape(job.id);
+    } catch {
+      recommendedTape = null;
+    } finally {
+      loadingRecommendation = false;
+    }
   }
 
   function resetForm() {
@@ -396,14 +423,44 @@
       <p>Running job: <strong>{selectedJob.name}</strong></p>
       <form on:submit|preventDefault={handleRunJob}>
         <div class="form-group">
-          <label for="run-tape">Select Tape</label>
-          <select id="run-tape" bind:value={runFormData.tape_id} required>
-            <option value={0} disabled>Select a tape</option>
-            {#each availableTapes as tape}
-              <option value={tape.id}>{tape.label} ({tape.status})</option>
-            {/each}
+          <label for="run-mode">Tape Selection</label>
+          <select id="run-mode" bind:value={runFormData.use_pool}>
+            <option value={true}>Use tape pool (recommended)</option>
+            <option value={false}>Select specific tape</option>
           </select>
+          <small>{runFormData.use_pool ? 'The system will automatically select the best tape from the job\'s pool' : 'Manually choose which tape to use'}</small>
         </div>
+        {#if runFormData.use_pool}
+          <div class="recommendation-box">
+            {#if loadingRecommendation}
+              <p class="rec-loading">⏳ Finding best tape from pool...</p>
+            {:else if recommendedTape?.found}
+              <div class="rec-found">
+                <p class="rec-title">📼 Recommended tape: <strong>{recommendedTape.tape_label}</strong></p>
+                <p class="rec-detail">Pool: {recommendedTape.pool_name} · Status: {recommendedTape.tape_status}</p>
+                {#if recommendedTape.capacity_bytes}
+                  <p class="rec-detail">Space: {formatBytes((recommendedTape.capacity_bytes || 0) - (recommendedTape.used_bytes || 0))} available</p>
+                {/if}
+                <p class="rec-message">{recommendedTape.message}</p>
+              </div>
+            {:else if recommendedTape}
+              <div class="rec-warning">
+                <p>⚠️ {recommendedTape.message}</p>
+                <p class="rec-detail">Consider adding blank tapes to the pool or switching to manual tape selection.</p>
+              </div>
+            {/if}
+          </div>
+        {:else}
+          <div class="form-group">
+            <label for="run-tape">Select Tape</label>
+            <select id="run-tape" bind:value={runFormData.tape_id} required>
+              <option value={0} disabled>Select a tape</option>
+              {#each availableTapes as tape}
+                <option value={tape.id}>{tape.label} ({tape.status})</option>
+              {/each}
+            </select>
+          </div>
+        {/if}
         <div class="form-group">
           <label for="run-type">Backup Type</label>
           <select id="run-type" bind:value={runFormData.backup_type}>
@@ -413,7 +470,7 @@
         </div>
         <div class="modal-actions">
           <button type="button" class="btn btn-secondary" on:click={() => showRunModal = false}>Cancel</button>
-          <button type="submit" class="btn btn-success">Start Backup</button>
+          <button type="submit" class="btn btn-success" disabled={runFormData.use_pool && recommendedTape !== null && !recommendedTape.found}>Start Backup</button>
         </div>
       </form>
     </div>
@@ -545,5 +602,52 @@
     color: #a6e3a1;
     white-space: pre-wrap;
     word-break: break-all;
+  }
+
+  .recommendation-box {
+    background: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 8px;
+    padding: 0.75rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .rec-loading {
+    color: #666;
+    font-style: italic;
+    margin: 0;
+  }
+
+  .rec-found {
+    color: #155724;
+  }
+
+  .rec-found .rec-title {
+    margin: 0 0 0.25rem;
+    font-size: 0.9rem;
+  }
+
+  .rec-detail {
+    margin: 0.15rem 0;
+    font-size: 0.8rem;
+    color: #666;
+  }
+
+  .rec-message {
+    margin: 0.5rem 0 0;
+    font-size: 0.85rem;
+    color: #0c5460;
+    background: #d1ecf1;
+    padding: 0.4rem 0.6rem;
+    border-radius: 4px;
+  }
+
+  .rec-warning {
+    color: #856404;
+  }
+
+  .rec-warning p {
+    margin: 0 0 0.25rem;
+    font-size: 0.85rem;
   }
 </style>

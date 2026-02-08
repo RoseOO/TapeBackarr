@@ -186,6 +186,7 @@ func (s *Server) setupRoutes() {
 			r.Put("/{id}", s.handleUpdateJob)
 			r.Delete("/{id}", s.handleDeleteJob)
 			r.Post("/{id}/run", s.handleRunJob)
+			r.Get("/{id}/recommend-tape", s.handleRecommendTape)
 		})
 
 		// Backup Sets
@@ -1850,6 +1851,7 @@ func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		TapeID     int64  `json:"tape_id"`
+		UsePool    *bool  `json:"use_pool"`    // If true, select tape from pool (default behavior)
 		BackupType string `json:"backup_type"` // Override job's backup type
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1885,15 +1887,151 @@ func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 		backupType = models.BackupType(req.BackupType)
 	}
 
-	// Run backup in background
+	// Determine tape to use
+	tapeID := req.TapeID
+
+	// Default to pool-based selection when no tape_id is provided
+	usePool := req.TapeID == 0
+	if req.UsePool != nil {
+		usePool = *req.UsePool
+	}
+
+	if usePool && job.PoolID > 0 {
+		// Select best tape from pool
+		selectedTapeID, tapeLabel, err := s.selectTapeFromPool(job.PoolID, job.RetentionDays)
+		if err != nil {
+			s.respondError(w, http.StatusBadRequest, fmt.Sprintf("no suitable tape found in pool: %v", err))
+			return
+		}
+		tapeID = selectedTapeID
+
+		// Run backup in background
+		go func() {
+			ctx := context.Background()
+			s.backupService.RunBackup(ctx, &job, &source, tapeID, backupType)
+		}()
+
+		s.respondJSON(w, http.StatusAccepted, map[string]interface{}{
+			"status":     "started",
+			"message":    fmt.Sprintf("Backup job started using tape %s from pool", tapeLabel),
+			"tape_id":    tapeID,
+			"tape_label": tapeLabel,
+		})
+		return
+	}
+
+	if tapeID == 0 {
+		s.respondError(w, http.StatusBadRequest, "tape_id is required when not using pool-based selection")
+		return
+	}
+
+	// Run backup in background with explicit tape
 	go func() {
 		ctx := context.Background()
-		s.backupService.RunBackup(ctx, &job, &source, req.TapeID, backupType)
+		s.backupService.RunBackup(ctx, &job, &source, tapeID, backupType)
 	}()
 
 	s.respondJSON(w, http.StatusAccepted, map[string]string{
 		"status":  "started",
 		"message": "Backup job started in background",
+	})
+}
+
+// selectTapeFromPool picks the best tape from a pool based on status, available space, and retention.
+// It prefers active tapes with remaining space, then blank tapes.
+func (s *Server) selectTapeFromPool(poolID int64, retentionDays int) (int64, string, error) {
+	// First, try to find an active tape in the pool with remaining capacity
+	var tapeID int64
+	var tapeLabel string
+	err := s.db.QueryRow(`
+		SELECT id, label FROM tapes
+		WHERE pool_id = ? AND status = 'active' AND (capacity_bytes - used_bytes) > 0
+		ORDER BY used_bytes ASC
+		LIMIT 1
+	`, poolID).Scan(&tapeID, &tapeLabel)
+	if err == nil {
+		return tapeID, tapeLabel, nil
+	}
+
+	// Next, try a blank tape in the pool
+	err = s.db.QueryRow(`
+		SELECT id, label FROM tapes
+		WHERE pool_id = ? AND status = 'blank'
+		ORDER BY created_at ASC
+		LIMIT 1
+	`, poolID).Scan(&tapeID, &tapeLabel)
+	if err == nil {
+		return tapeID, tapeLabel, nil
+	}
+
+	// Check if there are expired tapes that can be reused
+	var allowReuse bool
+	_ = s.db.QueryRow("SELECT allow_reuse FROM tape_pools WHERE id = ?", poolID).Scan(&allowReuse)
+	if allowReuse {
+		err = s.db.QueryRow(`
+			SELECT id, label FROM tapes
+			WHERE pool_id = ? AND status = 'expired'
+			ORDER BY last_written_at ASC
+			LIMIT 1
+		`, poolID).Scan(&tapeID, &tapeLabel)
+		if err == nil {
+			return tapeID, tapeLabel, nil
+		}
+	}
+
+	return 0, "", errors.New("no available tapes in pool (need blank, active with space, or expired reusable tapes)")
+}
+
+// handleRecommendTape recommends the best tape from a job's pool for backup
+func (s *Server) handleRecommendTape(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+
+	// Get job details
+	var poolID int64
+	var retentionDays int
+	err = s.db.QueryRow(`
+		SELECT pool_id, retention_days FROM backup_jobs WHERE id = ?
+	`, id).Scan(&poolID, &retentionDays)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "job not found")
+		return
+	}
+
+	// Get pool info
+	var poolName string
+	_ = s.db.QueryRow("SELECT name FROM tape_pools WHERE id = ?", poolID).Scan(&poolName)
+
+	// Select best tape
+	tapeID, tapeLabel, err := s.selectTapeFromPool(poolID, retentionDays)
+	if err != nil {
+		s.respondJSON(w, http.StatusOK, map[string]interface{}{
+			"found":     false,
+			"pool_id":   poolID,
+			"pool_name": poolName,
+			"message":   fmt.Sprintf("No suitable tape found: %v", err),
+		})
+		return
+	}
+
+	// Get tape details
+	var tapeStatus string
+	var capacityBytes, usedBytes int64
+	_ = s.db.QueryRow("SELECT status, capacity_bytes, used_bytes FROM tapes WHERE id = ?", tapeID).Scan(&tapeStatus, &capacityBytes, &usedBytes)
+
+	s.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"found":          true,
+		"tape_id":        tapeID,
+		"tape_label":     tapeLabel,
+		"tape_status":    tapeStatus,
+		"capacity_bytes": capacityBytes,
+		"used_bytes":     usedBytes,
+		"pool_id":        poolID,
+		"pool_name":      poolName,
+		"message":        fmt.Sprintf("Please load tape %s into the drive", tapeLabel),
 	})
 }
 

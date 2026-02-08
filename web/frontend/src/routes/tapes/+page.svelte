@@ -275,18 +275,22 @@
   }
 
   function resetForm() {
+    const defaultDriveId = drives.length > 0 ? drives[0].id : null;
     formData = {
       barcode: '',
       label: '',
       pool_id: null,
       lto_type: '',
       capacity_bytes: 12000000000000,
-      drive_id: null,
+      drive_id: defaultDriveId,
       write_label: true,
       auto_eject: true,
     };
     selectedTape = null;
     detectedType = '';
+    if (defaultDriveId) {
+      onDriveChange(defaultDriveId);
+    }
   }
 
   function formatBytes(bytes: number): string {
@@ -450,8 +454,8 @@
         {#if drives.length > 0}
           <div class="form-group">
             <label for="drive">Drive (for labeling)</label>
-            <select id="drive" on:change={(e) => onDriveChange(Number((e.target as HTMLSelectElement).value) || null)}>
-              <option value={0} selected={!formData.drive_id}>No drive (software-only)</option>
+            <select id="drive" value={formData.drive_id || 0} on:change={(e) => onDriveChange(Number((e.target as HTMLSelectElement).value) || null)}>
+              <option value={0}>No drive (software-only)</option>
               {#each drives as drive}
                 <option value={drive.id}>{drive.display_name || drive.device_path}</option>
               {/each}
