@@ -244,6 +244,9 @@
   }
 
   $: availableTapes = tapes.filter(t => t.status === 'blank' || t.status === 'active');
+
+  // Disable submit when using pool mode and no suitable tape was found
+  $: isRunDisabled = runFormData.use_pool && recommendedTape !== null && !recommendedTape.found;
 </script>
 
 <div class="page-header">
@@ -470,7 +473,7 @@
         </div>
         <div class="modal-actions">
           <button type="button" class="btn btn-secondary" on:click={() => showRunModal = false}>Cancel</button>
-          <button type="submit" class="btn btn-success" disabled={runFormData.use_pool && recommendedTape !== null && !recommendedTape.found}>Start Backup</button>
+          <button type="submit" class="btn btn-success" disabled={isRunDisabled}>Start Backup</button>
         </div>
       </form>
     </div>

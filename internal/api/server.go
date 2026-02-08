@@ -1965,6 +1965,7 @@ func (s *Server) selectTapeFromPool(poolID int64, retentionDays int) (int64, str
 	}
 
 	// Check if there are expired tapes that can be reused
+	// Defaulting to false on error is safe - it avoids accidentally reusing tapes
 	var allowReuse bool
 	_ = s.db.QueryRow("SELECT allow_reuse FROM tape_pools WHERE id = ?", poolID).Scan(&allowReuse)
 	if allowReuse {
@@ -2001,7 +2002,7 @@ func (s *Server) handleRecommendTape(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get pool info
+	// Get pool info (supplementary - pool existence already validated via job.pool_id)
 	var poolName string
 	_ = s.db.QueryRow("SELECT name FROM tape_pools WHERE id = ?", poolID).Scan(&poolName)
 
@@ -2017,7 +2018,7 @@ func (s *Server) handleRecommendTape(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get tape details
+	// Get tape details (supplementary - tape existence already verified by selectTapeFromPool)
 	var tapeStatus string
 	var capacityBytes, usedBytes int64
 	_ = s.db.QueryRow("SELECT status, capacity_bytes, used_bytes FROM tapes WHERE id = ?", tapeID).Scan(&tapeStatus, &capacityBytes, &usedBytes)
