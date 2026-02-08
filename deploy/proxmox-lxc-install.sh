@@ -31,6 +31,10 @@ CT_STORAGE="${CT_STORAGE:-local-lvm}"       # Storage for container disk
 CT_TEMPLATE="${CT_TEMPLATE:-}"              # Template to use (auto-select if not set)
 TAPE_DEVICE="${TAPE_DEVICE:-/dev/nst0}"     # Tape device to pass through
 
+# Container startup timing configuration
+CONTAINER_INIT_DELAY="${CONTAINER_INIT_DELAY:-5}"       # Seconds to wait after starting container before checking status
+CONTAINER_START_TIMEOUT="${CONTAINER_START_TIMEOUT:-120}"  # Maximum seconds to wait for container to be fully running
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -235,12 +239,21 @@ start_container() {
     msg_info "Starting container $ct_id..."
     pct start "$ct_id"
     
+    # Give the container a moment to initialize before checking status
+    sleep "$CONTAINER_INIT_DELAY"
+    
     # Wait for container to be fully up
+    # We use '|| true' to prevent set -e from exiting on command failure
     local count=0
-    while ! pct exec "$ct_id" -- systemctl is-system-running &>/dev/null; do
+    local status
+    while true; do
+        status=$(pct exec "$ct_id" -- systemctl is-system-running 2>/dev/null) || true
+        if [[ "$status" == "running" ]]; then
+            break
+        fi
         sleep 1
         ((count++))
-        if [[ $count -ge 60 ]]; then
+        if [[ $count -ge $CONTAINER_START_TIMEOUT ]]; then
             msg_warn "Container took too long to start, continuing anyway..."
             break
         fi
@@ -316,7 +329,7 @@ show_summary() {
     
     # Get the container IP
     local ip_addr
-    ip_addr=$(pct exec "$ct_id" -- hostname -I 2>/dev/null | awk '{print $1}')
+    ip_addr=$(pct exec "$ct_id" -- hostname -I 2>/dev/null | awk '{print $1}') || true
     
     echo
     echo -e "${GREEN}================================================================${NC}"
