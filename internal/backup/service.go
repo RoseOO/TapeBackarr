@@ -1132,7 +1132,7 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 			actualUUID = physicalLabel.UUID
 		}
 		var errMsg string
-		if physicalLabel != nil && physicalLabel.Label == expectedLabel && physicalLabel.UUID != expectedUUID {
+		if physicalLabel != nil && physicalLabel.Label == expectedLabel {
 			errMsg = fmt.Sprintf("tape UUID mismatch: expected %q but drive has %q (label %q) - please insert the correct tape", expectedUUID, actualUUID, actualLabel)
 		} else {
 			errMsg = fmt.Sprintf("tape label mismatch: expected %q but drive has %q - please insert the correct tape", expectedLabel, actualLabel)
