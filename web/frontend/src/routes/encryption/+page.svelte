@@ -42,9 +42,11 @@
   });
 
   async function loadKeys() {
+    loading = true;
+    error = '';
     try {
       const result = await api.getEncryptionKeys();
-      keys = result.keys || [];
+      keys = result?.keys || [];
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load encryption keys';
     } finally {
@@ -266,7 +268,7 @@
 <!-- Create Key Modal -->
 {#if showCreateModal}
   <div class="modal-overlay" on:click={() => showCreateModal = false} role="presentation">
-    <div class="modal" on:click|stopPropagation role="dialog" aria-modal="true" tabindex="-1">
+    <div class="modal" on:click|stopPropagation={() => {}} role="dialog" aria-modal="true" tabindex="-1">
       <h2>Generate Encryption Key</h2>
       <p class="modal-desc">Generate a new AES-256-GCM encryption key. The key will be shown once after creation.</p>
       <form on:submit|preventDefault={handleCreate}>
@@ -290,7 +292,7 @@
 <!-- Import Key Modal -->
 {#if showImportModal}
   <div class="modal-overlay" on:click={() => showImportModal = false} role="presentation">
-    <div class="modal" on:click|stopPropagation role="dialog" aria-modal="true" tabindex="-1">
+    <div class="modal" on:click|stopPropagation={() => {}} role="dialog" aria-modal="true" tabindex="-1">
       <h2>Import Encryption Key</h2>
       <p class="modal-desc">Import an existing AES-256 key from a base64-encoded string.</p>
       <form on:submit|preventDefault={handleImport}>
@@ -318,7 +320,7 @@
 <!-- Key Sheet Modal -->
 {#if showKeySheetModal}
   <div class="modal-overlay" on:click={() => showKeySheetModal = false} role="presentation">
-    <div class="modal modal-wide" on:click|stopPropagation role="dialog" aria-modal="true" tabindex="-1">
+    <div class="modal modal-wide" on:click|stopPropagation={() => {}} role="dialog" aria-modal="true" tabindex="-1">
       <h2>📄 Key Sheet</h2>
       <p class="modal-desc">Print this page or save the text as a paper backup for your encryption keys.</p>
       <pre class="keysheet-content">{keySheetText}</pre>

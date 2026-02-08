@@ -58,8 +58,11 @@
   });
 
   async function loadBackupSets() {
+    loading = true;
+    error = '';
     try {
-      backupSets = await api.getBackupSets();
+      const result = await api.getBackupSets();
+      backupSets = Array.isArray(result) ? result : [];
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load backup sets';
     } finally {
@@ -311,7 +314,7 @@
 <!-- Restore Modal -->
 {#if showRestoreModal && selectedSet}
   <div class="modal-overlay" on:click={() => showRestoreModal = false}>
-    <div class="modal" on:click|stopPropagation>
+    <div class="modal" on:click|stopPropagation={() => {}}>
       <h2>Restore Files</h2>
       
       {#if requiredTapes.length > 0}

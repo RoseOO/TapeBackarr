@@ -34,8 +34,11 @@
   });
 
   async function loadPools() {
+    loading = true;
+    error = '';
     try {
-      pools = await api.getPools();
+      const result = await api.getPools();
+      pools = Array.isArray(result) ? result : [];
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load pools';
     } finally {
@@ -193,7 +196,7 @@
 <!-- Create Pool Modal -->
 {#if showCreateModal}
   <div class="modal-overlay" on:click={() => showCreateModal = false}>
-    <div class="modal" on:click|stopPropagation>
+    <div class="modal" on:click|stopPropagation={() => {}}>
       <h2>Create Media Pool</h2>
       <p class="modal-desc">Pools group tapes by lifecycle policy. Each tape belongs to exactly one pool.</p>
       <form on:submit|preventDefault={handleCreate}>
@@ -236,7 +239,7 @@
 <!-- Edit Pool Modal -->
 {#if showEditModal && selectedPool}
   <div class="modal-overlay" on:click={() => showEditModal = false}>
-    <div class="modal" on:click|stopPropagation>
+    <div class="modal" on:click|stopPropagation={() => {}}>
       <h2>Edit Pool: {selectedPool.name}</h2>
       <form on:submit|preventDefault={handleUpdate}>
         <div class="form-group">

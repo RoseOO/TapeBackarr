@@ -31,7 +31,16 @@ async function fetchApi(endpoint: string, options: RequestInit = {}) {
     throw new Error(error.error || 'Request failed');
   }
 
-  return response.json();
+  // Handle empty or non-JSON responses gracefully
+  const text = await response.text();
+  if (!text) {
+    return {};
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    return {};
+  }
 }
 
 // Auth

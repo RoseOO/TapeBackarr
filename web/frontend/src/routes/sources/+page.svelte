@@ -36,8 +36,11 @@
   });
 
   async function loadData() {
+    loading = true;
+    error = '';
     try {
-      sources = await api.getSources();
+      const result = await api.getSources();
+      sources = Array.isArray(result) ? result : [];
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load sources';
     } finally {
@@ -235,7 +238,7 @@
 <!-- Create Modal -->
 {#if showCreateModal}
   <div class="modal-overlay" on:click={() => showCreateModal = false}>
-    <div class="modal" on:click|stopPropagation>
+    <div class="modal" on:click|stopPropagation={() => {}}>
       <h2>Add Backup Source</h2>
       <form on:submit|preventDefault={handleCreate}>
         <div class="form-group">
@@ -297,7 +300,7 @@
 <!-- Edit Modal -->
 {#if showEditModal && selectedSource}
   <div class="modal-overlay" on:click={() => showEditModal = false}>
-    <div class="modal" on:click|stopPropagation>
+    <div class="modal" on:click|stopPropagation={() => {}}>
       <h2>Edit Source</h2>
       <form on:submit|preventDefault={handleUpdate}>
         <div class="form-group">
