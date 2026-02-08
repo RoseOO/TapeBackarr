@@ -812,6 +812,24 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		s.mu.Unlock()
 	}
 
+	// Position tape past the label before writing data.
+	// The tape label occupies file position 0 followed by a file mark.
+	// We must seek to file position 1 so that backup data does not overwrite the label.
+	s.updateProgress(job.ID, "positioning", "Positioning tape past label...")
+	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+	if err := driveSvc.Rewind(ctx); err != nil {
+		s.logger.Warn("Failed to rewind tape before positioning", map[string]interface{}{"error": err.Error()})
+	}
+	if err := driveSvc.SeekToFileNumber(ctx, 1); err != nil {
+		// If seek fails (e.g. no file mark yet on a blank tape), rewind and write a label first
+		s.logger.Warn("Failed to seek past label, tape may be unlabeled", map[string]interface{}{"error": err.Error()})
+		if rewindErr := driveSvc.Rewind(ctx); rewindErr != nil {
+			s.updateProgress(job.ID, "failed", "Failed to position tape: "+rewindErr.Error())
+			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "failed to position tape")
+			return nil, fmt.Errorf("failed to rewind tape: %w", rewindErr)
+		}
+	}
+
 	// Stream to tape
 	s.updateProgress(job.ID, "streaming", fmt.Sprintf("Streaming %d files (%d bytes) to tape device %s", len(files), totalBytes, devicePath))
 	s.logger.Info("Streaming to tape", map[string]interface{}{
