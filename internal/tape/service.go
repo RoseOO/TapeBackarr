@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -34,8 +35,18 @@ type DriveStatus struct {
 type TapeInfo struct {
 	Loaded     bool   `json:"loaded"`
 	Label      string `json:"label,omitempty"`
+	UUID       string `json:"uuid,omitempty"`
+	Pool       string `json:"pool,omitempty"`
 	WriteCount int    `json:"write_count"`
 	Density    string `json:"density,omitempty"`
+}
+
+// TapeLabelData represents structured label data written to tape
+type TapeLabelData struct {
+	Label     string `json:"label"`
+	UUID      string `json:"uuid"`
+	Pool      string `json:"pool"`
+	Timestamp int64  `json:"timestamp"`
 }
 
 // Service provides tape drive operations
@@ -44,12 +55,107 @@ type Service struct {
 	blockSize  int
 }
 
+// GetBlockSize returns the configured block size
+func (s *Service) GetBlockSize() int {
+	return s.blockSize
+}
+
 // NewService creates a new tape service
 func NewService(devicePath string, blockSize int) *Service {
 	return &Service{
 		devicePath: devicePath,
 		blockSize:  blockSize,
 	}
+}
+
+// NewServiceForDevice creates a tape service for a specific device path
+func NewServiceForDevice(devicePath string, blockSize int) *Service {
+	return &Service{
+		devicePath: devicePath,
+		blockSize:  blockSize,
+	}
+}
+
+// ScanDrives scans the system for available tape drives
+func ScanDrives(ctx context.Context) ([]map[string]string, error) {
+	drives := make([]map[string]string, 0)
+
+	// Check common tape device paths
+	devicePaths := []string{
+		"/dev/nst0", "/dev/nst1", "/dev/nst2", "/dev/nst3",
+		"/dev/st0", "/dev/st1", "/dev/st2", "/dev/st3",
+	}
+
+	for _, path := range devicePaths {
+		if _, err := os.Stat(path); err == nil {
+			drive := map[string]string{
+				"device_path": path,
+				"status":      "detected",
+			}
+
+			// Try to get drive info
+			svc := NewServiceForDevice(path, 65536)
+			if info, err := svc.GetDriveInfo(ctx); err == nil {
+				if v, ok := info["Vendor identification"]; ok {
+					drive["vendor"] = v
+				}
+				if v, ok := info["Product identification"]; ok {
+					drive["model"] = v
+				}
+				if v, ok := info["Unit serial number"]; ok {
+					drive["serial_number"] = v
+				}
+			}
+
+			// Check if drive is online
+			if status, err := svc.GetStatus(ctx); err == nil {
+				if status.Online {
+					drive["status"] = "online"
+				}
+			}
+
+			drives = append(drives, drive)
+		}
+	}
+
+	// Also try lsscsi for more comprehensive detection
+	cmd := exec.CommandContext(ctx, "lsscsi", "-g")
+	if output, err := cmd.CombinedOutput(); err == nil {
+		scanner := bufio.NewScanner(bytes.NewReader(output))
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.Contains(line, "tape") || strings.Contains(line, "mediumx") {
+				// Parse lsscsi output: [H:C:T:L] type vendor model rev device
+				fields := strings.Fields(line)
+				if len(fields) >= 6 {
+					devPath := fields[len(fields)-1]
+					if devPath != "-" {
+						// Check if we already have this drive
+						found := false
+						for _, d := range drives {
+							if d["device_path"] == devPath {
+								found = true
+								break
+							}
+						}
+						if !found {
+							drive := map[string]string{
+								"device_path": devPath,
+								"status":      "detected",
+							}
+							if len(fields) >= 4 {
+								drive["vendor"] = fields[2]
+								drive["model"] = fields[3]
+							}
+							drives = append(drives, drive)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return drives, nil
 }
 
 // GetStatus returns the current status of the tape drive
@@ -177,37 +283,49 @@ func (s *Service) SetBlockSize(ctx context.Context, size int) error {
 }
 
 // ReadTapeLabel reads the label from the beginning of the tape
-func (s *Service) ReadTapeLabel(ctx context.Context) (string, error) {
+func (s *Service) ReadTapeLabel(ctx context.Context) (*TapeLabelData, error) {
 	// Rewind to beginning
 	if err := s.Rewind(ctx); err != nil {
-		return "", err
+		return nil, err
 	}
 
 	// Read first block which should contain the label
 	cmd := exec.CommandContext(ctx, "dd", fmt.Sprintf("if=%s", s.devicePath), "bs=512", "count=1")
 	output, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("failed to read label: %w", err)
+		return nil, fmt.Errorf("failed to read label: %w", err)
 	}
 
-	// Parse label (assuming our custom format: "TAPEBACKARR|label|timestamp")
-	parts := strings.Split(strings.TrimSpace(string(output)), "|")
+	// Parse label (format: "TAPEBACKARR|label|uuid|pool|timestamp")
+	parts := strings.Split(strings.TrimRight(string(output), "\x00"), "|")
 	if len(parts) >= 2 && parts[0] == "TAPEBACKARR" {
-		return parts[1], nil
+		data := &TapeLabelData{
+			Label: parts[1],
+		}
+		if len(parts) >= 3 {
+			data.UUID = parts[2]
+		}
+		if len(parts) >= 4 {
+			data.Pool = parts[3]
+		}
+		if len(parts) >= 5 {
+			data.Timestamp, _ = strconv.ParseInt(parts[4], 10, 64)
+		}
+		return data, nil
 	}
 
-	return "", nil
+	return nil, nil
 }
 
 // WriteTapeLabel writes a label to the beginning of the tape
-func (s *Service) WriteTapeLabel(ctx context.Context, label string) error {
+func (s *Service) WriteTapeLabel(ctx context.Context, label string, uuid string, pool string) error {
 	// Rewind to beginning
 	if err := s.Rewind(ctx); err != nil {
 		return err
 	}
 
-	// Create label block
-	labelData := fmt.Sprintf("TAPEBACKARR|%s|%d", label, time.Now().Unix())
+	// Create label block with UUID and pool info
+	labelData := fmt.Sprintf("TAPEBACKARR|%s|%s|%s|%d", label, uuid, pool, time.Now().Unix())
 	// Pad to 512 bytes
 	padded := make([]byte, 512)
 	copy(padded, []byte(labelData))
@@ -222,6 +340,24 @@ func (s *Service) WriteTapeLabel(ctx context.Context, label string) error {
 
 	// Write file mark after label
 	return s.WriteFileMark(ctx)
+}
+
+// EraseTape erases/formats the tape, removing all data including labels
+func (s *Service) EraseTape(ctx context.Context) error {
+	// Rewind first
+	if err := s.Rewind(ctx); err != nil {
+		return err
+	}
+
+	// Write end-of-data mark at beginning to effectively erase
+	cmd := exec.CommandContext(ctx, "mt", "-f", s.devicePath, "weof", "1")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("erase failed: %s", string(output))
+	}
+
+	// Rewind again after erase
+	return s.Rewind(ctx)
 }
 
 // GetDriveInfo returns drive information using sg_inq
