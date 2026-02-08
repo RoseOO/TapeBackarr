@@ -682,7 +682,7 @@
   }
 
   code {
-    background: #f0f0f0;
+    background: var(--bg-input);
     padding: 0.25rem 0.5rem;
     border-radius: 4px;
     font-family: monospace;
@@ -713,7 +713,7 @@
   }
 
   .modal {
-    background: white;
+    background: var(--bg-card);
     padding: 2rem;
     border-radius: 12px;
     max-width: 500px;

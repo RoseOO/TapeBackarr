@@ -571,8 +571,8 @@
   }
 
   .success-card {
-    background: #d4edda;
-    color: #155724;
+    background: var(--badge-success-bg);
+    color: var(--badge-success-text);
     padding: 0.75rem 1rem;
     border-radius: 8px;
     margin-bottom: 1rem;
@@ -596,17 +596,17 @@
     gap: 0.5rem;
     padding: 0.75rem 1rem;
     border: none;
-    background: white;
+    background: var(--bg-card);
     border-radius: 8px;
     cursor: pointer;
     text-align: left;
     font-size: 0.875rem;
-    color: #555;
+    color: var(--text-secondary);
     transition: all 0.2s;
   }
 
   .tab-btn:hover {
-    background: #f0f0f5;
+    background: var(--bg-card-hover);
   }
 
   .tab-btn.active {
@@ -619,24 +619,24 @@
   }
 
   .tab-content {
-    background: white;
+    background: var(--bg-card);
     border-radius: 12px;
     padding: 2rem;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    box-shadow: var(--shadow);
   }
 
   .settings-section h2 {
     margin: 0 0 1.5rem;
     font-size: 1.25rem;
-    color: #333;
+    color: var(--text-primary);
   }
 
   .settings-section h3 {
     margin: 1.5rem 0 1rem;
     font-size: 1rem;
-    color: #555;
+    color: var(--text-secondary);
     padding-top: 1rem;
-    border-top: 1px solid #eee;
+    border-top: 1px solid var(--border-color);
   }
 
   .form-row {
@@ -651,7 +651,7 @@
     gap: 0.75rem;
     align-items: end;
     padding: 0.75rem;
-    background: #f9f9f9;
+    background: var(--bg-input);
     border-radius: 8px;
     margin-bottom: 0.5rem;
   }
@@ -674,13 +674,13 @@
 
   small {
     display: block;
-    color: #888;
+    color: var(--text-muted);
     font-size: 0.75rem;
     margin-top: 0.25rem;
   }
 
   .section-desc {
-    color: #666;
+    color: var(--text-secondary);
     font-size: 0.875rem;
     margin-bottom: 1.5rem;
   }
@@ -690,7 +690,7 @@
   }
 
   .no-data-text {
-    color: #888;
+    color: var(--text-muted);
     font-style: italic;
     margin-bottom: 1rem;
   }
@@ -698,6 +698,6 @@
   .checksum-cell {
     font-family: monospace;
     font-size: 0.75rem;
-    color: #888;
+    color: var(--text-muted);
   }
 </style>
