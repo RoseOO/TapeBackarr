@@ -56,7 +56,7 @@ export async function getTape(id: number) {
   return fetchApi(`/tapes/${id}`);
 }
 
-export async function createTape(data: { barcode: string; label: string; pool_id?: number; capacity_bytes: number; drive_id?: number; write_label?: boolean; auto_eject?: boolean }) {
+export async function createTape(data: { barcode: string; label: string; pool_id?: number; lto_type?: string; capacity_bytes: number; drive_id?: number; write_label?: boolean; auto_eject?: boolean }) {
   return fetchApi('/tapes', {
     method: 'POST',
     body: JSON.stringify(data),
@@ -363,6 +363,24 @@ export async function updateSettings(data: any) {
   return fetchApi('/settings', {
     method: 'PUT',
     body: JSON.stringify(data),
+  });
+}
+
+// Get LTO type capacity mapping
+export async function getLTOTypes(): Promise<Record<string, number>> {
+  return fetchApi('/tapes/lto-types');
+}
+
+// Get notification history
+export async function getNotifications() {
+  return fetchApi('/events');
+}
+
+// Format tape in a specific drive (works for tapes not in DB)
+export async function formatTapeInDrive(driveId: number, confirm: boolean) {
+  return fetchApi(`/drives/${driveId}/format-tape`, {
+    method: 'POST',
+    body: JSON.stringify({ confirm }),
   });
 }
 

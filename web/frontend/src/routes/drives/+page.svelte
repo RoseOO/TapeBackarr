@@ -14,6 +14,12 @@
     current_tape: string;
     enabled: boolean;
     created_at: string;
+    unknown_tape?: {
+      label: string;
+      uuid: string;
+      pool: string;
+      timestamp: number;
+    } | null;
   }
 
   interface ScannedDrive {
@@ -27,11 +33,25 @@
   let drives: Drive[] = [];
   let scannedDrives: ScannedDrive[] = [];
   let loading = true;
+  let initialLoad = true;
   let scanning = false;
   let error = '';
   let successMsg = '';
   let showAddModal = false;
   let showScanModal = false;
+  let showFormatDriveModal = false;
+  let formatDriveTarget: Drive | null = null;
+  let formatConfirmChecked = false;
+  let showAddUnknownTapeModal = false;
+  let unknownTapeTarget: { drive: Drive; tape: Drive['unknown_tape'] } | null = null;
+  let addTapeFormData = {
+    label: '',
+    barcode: '',
+    pool_id: null as number | null,
+    lto_type: '',
+  };
+  let pools: any[] = [];
+  let ltoTypes: Record<string, number> = {};
   let newDrive = {
     device_path: '',
     display_name: '',
@@ -41,16 +61,28 @@
 
   onMount(async () => {
     await loadDrives();
+    try {
+      const [poolsData, ltoTypesData] = await Promise.all([
+        api.getPools(),
+        api.getLTOTypes()
+      ]);
+      pools = poolsData;
+      ltoTypes = ltoTypesData;
+    } catch (e) {
+      // Non-critical
+    }
   });
 
   async function loadDrives() {
-    loading = true;
+    if (initialLoad) loading = true;
     try {
       drives = await api.getDrives();
+      error = '';
     } catch (e) {
       error = 'Failed to load drives';
     } finally {
       loading = false;
+      initialLoad = false;
     }
   }
 
@@ -161,6 +193,67 @@
   function isDriveAlreadyAdded(devicePath: string): boolean {
     return drives.some(d => d.device_path === devicePath);
   }
+
+  function formatBytes(bytes: number): string {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  }
+
+  async function formatTapeInDrive() {
+    if (!formatDriveTarget || !formatConfirmChecked) return;
+    try {
+      error = '';
+      await api.formatTapeInDrive(formatDriveTarget.id, true);
+      showFormatDriveModal = false;
+      formatDriveTarget = null;
+      formatConfirmChecked = false;
+      showSuccessMsg('Tape formatted successfully');
+      await loadDrives();
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to format tape';
+    }
+  }
+
+  function openFormatDriveModal(drive: Drive) {
+    formatDriveTarget = drive;
+    formatConfirmChecked = false;
+    showFormatDriveModal = true;
+  }
+
+  async function openAddUnknownTapeModal(drive: Drive) {
+    if (!drive.unknown_tape) return;
+    unknownTapeTarget = { drive, tape: drive.unknown_tape };
+    addTapeFormData = {
+      label: drive.unknown_tape.label,
+      barcode: '',
+      pool_id: null,
+      lto_type: '',
+    };
+    showAddUnknownTapeModal = true;
+  }
+
+  async function addUnknownTapeToLibrary() {
+    if (!unknownTapeTarget?.tape) return;
+    try {
+      error = '';
+      const capacity = ltoTypes[addTapeFormData.lto_type] || 0;
+      await api.createTape({
+        barcode: addTapeFormData.barcode,
+        label: unknownTapeTarget.tape.label,
+        pool_id: addTapeFormData.pool_id ?? undefined,
+        lto_type: addTapeFormData.lto_type,
+        capacity_bytes: capacity,
+      } as any);
+      showAddUnknownTapeModal = false;
+      showSuccessMsg('Tape added to library');
+      await loadDrives();
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to add tape to library';
+    }
+  }
 </script>
 
 <div class="page-header">
@@ -214,6 +307,7 @@
               <button class="btn btn-secondary btn-sm" on:click={() => selectDrive(drive.id)}>Select</button>
               <button class="btn btn-secondary btn-sm" on:click={() => rewindTape(drive.id)}>Rewind</button>
               <button class="btn btn-secondary btn-sm" on:click={() => ejectTape(drive.id)}>Eject</button>
+              <button class="btn btn-warning btn-sm" on:click={() => openFormatDriveModal(drive)} disabled={drive.status === 'offline'}>Format</button>
               <button class="btn btn-danger btn-sm" on:click={() => deleteDrive(drive.id)}>Remove</button>
             </td>
           </tr>
@@ -224,6 +318,19 @@
         {/each}
       </tbody>
     </table>
+    {#each drives.filter(d => d.unknown_tape) as drive}
+      <div class="unknown-tape-warning">
+        <div class="warning-icon">⚠️</div>
+        <div class="warning-content">
+          <strong>Unknown tape detected in {drive.display_name || drive.device_path}</strong>
+          <p>Tape "<strong>{drive.unknown_tape?.label}</strong>" (UUID: {drive.unknown_tape?.uuid || 'N/A'}) is loaded but not in the tape library.</p>
+          <div class="warning-actions">
+            <button class="btn btn-primary btn-sm" on:click={() => openAddUnknownTapeModal(drive)}>Add to Library</button>
+            <button class="btn btn-warning btn-sm" on:click={() => openFormatDriveModal(drive)}>Format Tape</button>
+          </div>
+        </div>
+      </div>
+    {/each}
   </div>
 {/if}
 
@@ -298,6 +405,83 @@
       <div class="form-actions">
         <button class="btn btn-secondary" on:click={() => showScanModal = false}>Close</button>
       </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Format Tape in Drive Modal -->
+{#if showFormatDriveModal && formatDriveTarget}
+  <div class="modal-backdrop" on:click={() => showFormatDriveModal = false}>
+    <div class="modal" on:click|stopPropagation>
+      <h2>⚠️ Format Tape</h2>
+      <div class="format-warning">
+        <p><strong>WARNING: This will ERASE ALL DATA on the tape currently loaded in {formatDriveTarget.display_name || formatDriveTarget.device_path}.</strong></p>
+        {#if formatDriveTarget.current_tape}
+          <p>Current tape: <strong>{formatDriveTarget.current_tape}</strong></p>
+        {/if}
+        {#if formatDriveTarget.unknown_tape}
+          <p>Tape label: <strong>{formatDriveTarget.unknown_tape.label}</strong><br/>
+          UUID: <code>{formatDriveTarget.unknown_tape.uuid || 'N/A'}</code></p>
+        {/if}
+        <p class="danger-text">This action is <strong>irreversible</strong>. All data on the tape will be permanently destroyed.</p>
+      </div>
+      <div class="form-group checkbox-group">
+        <label class="confirm-label">
+          <input type="checkbox" bind:checked={formatConfirmChecked} />
+          <span>I understand this will permanently erase all data on this tape</span>
+        </label>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-secondary" on:click={() => showFormatDriveModal = false}>Cancel</button>
+        <button class="btn btn-danger" on:click={formatTapeInDrive} disabled={!formatConfirmChecked}>
+          🗑️ Format Tape
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Add Unknown Tape to Library Modal -->
+{#if showAddUnknownTapeModal && unknownTapeTarget}
+  <div class="modal-backdrop" on:click={() => showAddUnknownTapeModal = false}>
+    <div class="modal" on:click|stopPropagation>
+      <h2>Add Tape to Library</h2>
+      <p class="modal-desc">This tape was found loaded in a drive but is not in the database. Add it to track it in the tape library.</p>
+      <div class="tape-info-box">
+        <div><strong>Label:</strong> {unknownTapeTarget.tape?.label}</div>
+        <div><strong>UUID:</strong> <code>{unknownTapeTarget.tape?.uuid || 'N/A'}</code></div>
+        {#if unknownTapeTarget.tape?.pool}
+          <div><strong>Pool (from tape):</strong> {unknownTapeTarget.tape.pool}</div>
+        {/if}
+      </div>
+      <form on:submit|preventDefault={addUnknownTapeToLibrary}>
+        <div class="form-group">
+          <label for="ut-barcode">Barcode</label>
+          <input type="text" id="ut-barcode" bind:value={addTapeFormData.barcode} placeholder="Optional" />
+        </div>
+        <div class="form-group">
+          <label for="ut-pool">Pool</label>
+          <select id="ut-pool" bind:value={addTapeFormData.pool_id}>
+            <option value={null}>Select a pool...</option>
+            {#each pools as pool}
+              <option value={pool.id}>{pool.name}</option>
+            {/each}
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="ut-lto">LTO Type</label>
+          <select id="ut-lto" bind:value={addTapeFormData.lto_type}>
+            <option value="">Select LTO type...</option>
+            {#each Object.entries(ltoTypes).sort((a, b) => a[1] - b[1]) as [type, capacity]}
+              <option value={type}>{type} ({formatBytes(capacity)})</option>
+            {/each}
+          </select>
+        </div>
+        <div class="form-actions">
+          <button type="button" class="btn btn-secondary" on:click={() => showAddUnknownTapeModal = false}>Cancel</button>
+          <button type="submit" class="btn btn-primary">Add to Library</button>
+        </div>
+      </form>
     </div>
   </div>
 {/if}
@@ -389,5 +573,114 @@
     gap: 1rem;
     justify-content: flex-end;
     margin-top: 1.5rem;
+  }
+
+  .unknown-tape-warning {
+    display: flex;
+    gap: 1rem;
+    padding: 1rem;
+    margin-top: 1rem;
+    background: #fff3cd;
+    border: 1px solid #ffc107;
+    border-radius: 8px;
+    align-items: flex-start;
+  }
+
+  .warning-icon {
+    font-size: 1.5rem;
+    flex-shrink: 0;
+  }
+
+  .warning-content {
+    flex: 1;
+  }
+
+  .warning-content p {
+    margin: 0.25rem 0;
+    font-size: 0.875rem;
+    color: #856404;
+  }
+
+  .warning-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+  }
+
+  .format-warning {
+    background: #f8d7da;
+    border: 1px solid #f5c6cb;
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+  }
+
+  .format-warning p {
+    margin: 0.5rem 0;
+    font-size: 0.875rem;
+  }
+
+  .danger-text {
+    color: #721c24;
+    font-weight: 500;
+  }
+
+  .confirm-label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    font-size: 0.875rem;
+    font-weight: 500;
+  }
+
+  .confirm-label input[type="checkbox"] {
+    width: auto;
+  }
+
+  .checkbox-group label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+  }
+
+  .checkbox-group input[type="checkbox"] {
+    width: auto;
+  }
+
+  .tape-info-box {
+    background: #e3f2fd;
+    border: 1px solid #bbdefb;
+    border-radius: 8px;
+    padding: 0.75rem;
+    margin-bottom: 1rem;
+    font-size: 0.875rem;
+  }
+
+  .tape-info-box div {
+    margin: 0.25rem 0;
+  }
+
+  .tape-info-box code {
+    background: #ddd;
+    padding: 0.15rem 0.35rem;
+    border-radius: 3px;
+    font-size: 0.8rem;
+  }
+
+  .modal-desc {
+    color: #666;
+    font-size: 0.875rem;
+    margin: 0.25rem 0 1rem;
+  }
+
+  .btn-warning {
+    background: #ffc107;
+    color: #212529;
+  }
+
+  .btn-warning:hover {
+    background: #e0a800;
   }
 </style>

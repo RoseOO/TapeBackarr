@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -148,6 +149,19 @@ func ScanDrives(ctx context.Context) ([]map[string]string, error) {
 								drive["model"] = fields[3]
 							}
 							drives = append(drives, drive)
+						} else {
+							// Merge lsscsi data into existing drive if fields are missing
+							for _, d := range drives {
+								if d["device_path"] == devPath {
+									if d["vendor"] == "" && len(fields) >= 3 {
+										d["vendor"] = fields[2]
+									}
+									if d["model"] == "" && len(fields) >= 4 {
+										d["model"] = fields[3]
+									}
+									break
+								}
+							}
 						}
 					}
 				}
@@ -272,6 +286,11 @@ func (s *Service) WriteFileMark(ctx context.Context) error {
 	return nil
 }
 
+const (
+	// vpdHeaderSize is the number of bytes to skip in VPD page 80 before the serial number
+	vpdHeaderSize = 4
+)
+
 // SetBlockSize sets the tape block size
 func (s *Service) SetBlockSize(ctx context.Context, size int) error {
 	cmd := exec.CommandContext(ctx, "mt", "-f", s.devicePath, "setblk", strconv.Itoa(size))
@@ -393,6 +412,42 @@ func (s *Service) GetDriveInfo(ctx context.Context) (map[string]string, error) {
 			key := strings.TrimSpace(parts[0])
 			value := strings.TrimSpace(parts[1])
 			info[key] = value
+		}
+	}
+
+	// Fallback: try sysfs for vendor/model/serial info
+	if info["Vendor identification"] == "" {
+		// Try reading from sysfs - extract device name from path
+		devName := filepath.Base(s.devicePath)
+		// Try common sysfs paths for tape devices
+		sysfsBase := fmt.Sprintf("/sys/class/scsi_tape/%s/device", devName)
+		if _, err := os.Stat(sysfsBase); err != nil {
+			// Try without 'n' prefix (nst0 -> st0)
+			if strings.HasPrefix(devName, "n") {
+				sysfsBase = fmt.Sprintf("/sys/class/scsi_tape/%s/device", devName[1:])
+			}
+		}
+		if vendor, err := os.ReadFile(filepath.Join(sysfsBase, "vendor")); err == nil {
+			info["Vendor identification"] = strings.TrimSpace(string(vendor))
+		}
+		if model, err := os.ReadFile(filepath.Join(sysfsBase, "model")); err == nil {
+			info["Product identification"] = strings.TrimSpace(string(model))
+		}
+		// Try to find serial from vpd_pg80
+		serialPath := filepath.Join(sysfsBase, "vpd_pg80")
+		if serial, err := os.ReadFile(serialPath); err == nil {
+			// VPD page 80 contains unit serial number in binary - extract printable chars
+			serialStr := strings.Map(func(r rune) rune {
+				if r >= 32 && r < 127 {
+					return r
+				}
+				return -1
+			}, string(serial))
+			serialStr = strings.TrimSpace(serialStr)
+			if len(serialStr) > vpdHeaderSize {
+				// Skip the VPD header bytes
+				info["Unit serial number"] = serialStr[vpdHeaderSize:]
+			}
 		}
 	}
 

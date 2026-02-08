@@ -9,6 +9,7 @@
     label: string;
     pool_id: number | null;
     pool_name: string | null;
+    lto_type: string;
     status: string;
     capacity_bytes: number;
     used_bytes: number;
@@ -34,6 +35,7 @@
   let tapes: Tape[] = [];
   let pools: Pool[] = [];
   let drives: Drive[] = [];
+  let ltoTypes: Record<string, number> = {};
   let loading = true;
   let error = '';
   let successMsg = '';
@@ -49,6 +51,7 @@
     barcode: '',
     label: '',
     pool_id: null as number | null,
+    lto_type: '' as string,
     capacity_bytes: 12000000000000,
     drive_id: null as number | null,
     write_label: false,
@@ -62,20 +65,26 @@
   let labelAutoEject = false;
   let newLabel = '';
 
+  $: if (formData.lto_type && ltoTypes[formData.lto_type]) {
+    formData.capacity_bytes = ltoTypes[formData.lto_type];
+  }
+
   onMount(async () => {
     await loadData();
   });
 
   async function loadData() {
     try {
-      const [tapesData, poolsData, drivesData] = await Promise.all([
+      const [tapesData, poolsData, drivesData, ltoTypesData] = await Promise.all([
         api.getTapes(),
         api.getPools(),
-        api.getDrives()
+        api.getDrives(),
+        api.getLTOTypes()
       ]);
       tapes = tapesData;
       pools = poolsData;
       drives = drivesData.filter((d: Drive) => d.enabled);
+      ltoTypes = ltoTypesData;
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load data';
     } finally {
@@ -103,8 +112,6 @@
         ...formData,
         pool_id: formData.pool_id ?? undefined,
         drive_id: formData.drive_id ?? undefined,
-        write_label: formData.write_label,
-        auto_eject: formData.auto_eject,
       } as any);
       showCreateModal = false;
       resetForm();
@@ -211,9 +218,11 @@
       barcode: tape.barcode,
       label: tape.label,
       pool_id: tape.pool_id,
+      lto_type: tape.lto_type || '',
       capacity_bytes: tape.capacity_bytes,
       drive_id: null,
       write_label: false,
+      auto_eject: false,
     };
     showEditModal = true;
   }
@@ -244,6 +253,7 @@
       barcode: '',
       label: '',
       pool_id: null,
+      lto_type: '',
       capacity_bytes: 12000000000000,
       drive_id: null,
       write_label: false,
@@ -306,6 +316,7 @@
       <thead>
         <tr>
           <th>Label</th>
+          <th>Type</th>
           <th>UUID</th>
           <th>Barcode</th>
           <th>Pool</th>
@@ -320,6 +331,7 @@
         {#each tapes as tape}
           <tr>
             <td><strong>{tape.label}</strong></td>
+            <td>{tape.lto_type || '-'}</td>
             <td class="uuid-cell" title={tape.uuid || ''}>{tape.uuid && tape.uuid.length >= 8 ? tape.uuid.substring(0, 8) + '...' : (tape.uuid || '-')}</td>
             <td>{tape.barcode || '-'}</td>
             <td>{tape.pool_name || '-'}</td>
@@ -359,7 +371,7 @@
         {/each}
         {#if tapes.length === 0}
           <tr>
-            <td colspan="9" class="no-data">No tapes found. Add a tape to get started.</td>
+            <td colspan="10" class="no-data">No tapes found. Add a tape to get started.</td>
           </tr>
         {/if}
       </tbody>
@@ -394,9 +406,19 @@
           <small>A tape must belong to exactly one pool</small>
         </div>
         <div class="form-group">
-          <label for="capacity">Capacity (TB)</label>
-          <input type="number" id="capacity" value={formData.capacity_bytes / 1000000000000}
-            on:input={(e) => formData.capacity_bytes = parseFloat((e.target as HTMLInputElement).value) * 1000000000000} />
+          <label for="lto_type">LTO Type</label>
+          <select id="lto_type" bind:value={formData.lto_type}>
+            <option value="">Select LTO type...</option>
+            {#each Object.entries(ltoTypes).sort((a, b) => a[1] - b[1]) as [type, capacity]}
+              <option value={type}>{type} ({formatBytes(capacity)})</option>
+            {/each}
+          </select>
+          <small>Capacity is automatically set based on LTO generation</small>
+        </div>
+        <div class="form-group">
+          <label for="capacity">Capacity</label>
+          <input type="text" id="capacity" value={formatBytes(formData.capacity_bytes)} disabled />
+          <small>Set automatically from LTO type</small>
         </div>
         {#if drives.length > 0}
           <div class="form-group">

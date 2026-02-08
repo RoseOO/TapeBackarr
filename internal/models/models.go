@@ -47,12 +47,35 @@ const (
 	TapeStatusExported TapeStatus = "exported"
 )
 
+// LTOCapacities maps LTO generation to native capacity in bytes
+var LTOCapacities = map[string]int64{
+	"LTO-1":  100000000000,   // 100 GB
+	"LTO-2":  200000000000,   // 200 GB
+	"LTO-3":  400000000000,   // 400 GB
+	"LTO-4":  800000000000,   // 800 GB
+	"LTO-5":  1500000000000,  // 1.5 TB
+	"LTO-6":  2500000000000,  // 2.5 TB
+	"LTO-7":  6000000000000,  // 6 TB
+	"LTO-8":  12000000000000, // 12 TB
+	"LTO-9":  18000000000000, // 18 TB
+	"LTO-10": 36000000000000, // 36 TB (expected)
+}
+
+// UnknownTapeInfo represents a tape loaded in a drive that is not in the database
+type UnknownTapeInfo struct {
+	Label     string `json:"label"`
+	UUID      string `json:"uuid"`
+	Pool      string `json:"pool"`
+	Timestamp int64  `json:"timestamp"`
+}
+
 // Tape represents a physical tape media
 type Tape struct {
 	ID              int64      `json:"id" db:"id"`
 	UUID            string     `json:"uuid" db:"uuid"`
 	Barcode         string     `json:"barcode" db:"barcode"`
 	Label           string     `json:"label" db:"label"`
+	LTOType         string     `json:"lto_type" db:"lto_type"`
 	PoolID          *int64     `json:"pool_id" db:"pool_id"`
 	Status          TapeStatus `json:"status" db:"status"`
 	CapacityBytes   int64      `json:"capacity_bytes" db:"capacity_bytes"`
@@ -87,8 +110,9 @@ type TapeDrive struct {
 	Model         string      `json:"model" db:"model"`
 	Status        DriveStatus `json:"status" db:"status"`
 	CurrentTapeID *int64      `json:"current_tape_id" db:"current_tape_id"`
-	CurrentTape   string      `json:"current_tape" db:"-"`
-	Enabled       bool        `json:"enabled" db:"enabled"`
+	CurrentTape   string           `json:"current_tape" db:"-"`
+	UnknownTape   *UnknownTapeInfo `json:"unknown_tape,omitempty" db:"-"`
+	Enabled       bool             `json:"enabled" db:"enabled"`
 	CreatedAt     time.Time   `json:"created_at" db:"created_at"`
 	UpdatedAt     time.Time   `json:"updated_at" db:"updated_at"`
 }
