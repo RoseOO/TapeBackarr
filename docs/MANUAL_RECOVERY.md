@@ -438,5 +438,5 @@ For TapeBackarr software issues:
 ## Document Version
 
 - Version: 1.0
-- Last Updated: 2024
+- Last Updated: February 2026
 - Applies to: TapeBackarr 1.x, LTO-5 through LTO-9 drives

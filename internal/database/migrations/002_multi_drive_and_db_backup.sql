@@ -1,7 +1,7 @@
 -- Multi-drive support and database backup capability
 
--- Add enabled flag and display name to drives
-ALTER TABLE tape_drives ADD COLUMN enabled BOOLEAN DEFAULT 1;
+-- Add enabled flag (1=true, 0=false) and display name to drives
+ALTER TABLE tape_drives ADD COLUMN enabled INTEGER DEFAULT 1;
 ALTER TABLE tape_drives ADD COLUMN display_name TEXT;
 
 -- Database backup tracking table

@@ -54,14 +54,18 @@
       .replace(/`([^`]+)`/gim, '<code>$1</code>')
       // Links
       .replace(/\[([^\]]+)\]\(([^)]+)\)/gim, '<a href="$2" target="_blank">$1</a>')
-      // Tables - basic support
-      .replace(/\|(.+)\|/gim, (match) => {
+      // Tables - basic support (track if we've seen a header)
+      .replace(/\|(.+)\|/gim, (match, _, offset, string) => {
         const cells = match.split('|').filter(c => c.trim());
-        if (cells.every(c => c.match(/^[-:]+$/))) {
-          return ''; // Skip separator rows
+        // Skip separator rows (rows with only dashes and colons)
+        if (cells.every(c => c.match(/^[-:\s]+$/))) {
+          return '';
         }
-        const isHeader = cells.some(c => c.includes('---'));
-        const tag = isHeader ? 'th' : 'td';
+        // Check if this is the first row (header) by seeing if previous line doesn't have |
+        const prevNewline = string.lastIndexOf('\n', offset - 1);
+        const prevLine = prevNewline >= 0 ? string.substring(prevNewline + 1, offset).trim() : '';
+        const isFirstRow = !prevLine.includes('|');
+        const tag = isFirstRow ? 'th' : 'td';
         const cellHtml = cells.map(c => `<${tag}>${c.trim()}</${tag}>`).join('');
         return `<tr>${cellHtml}</tr>`;
       })

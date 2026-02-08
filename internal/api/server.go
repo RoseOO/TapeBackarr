@@ -1615,8 +1615,8 @@ func (s *Server) runDatabaseBackup(backupID, tapeID int64, devicePath string) {
 		return
 	}
 
-	// Skip to end of data
-	// Note: In production, you'd want to seek to the proper position
+	// Skip past tape label to first file position
+	// Database backups are written after the label block (file 0)
 	s.tapeService.SeekToFileNumber(ctx, 1)
 
 	// Stream database backup to tape using tar
