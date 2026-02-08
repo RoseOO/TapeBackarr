@@ -194,6 +194,7 @@ func (s *Server) setupRoutes() {
 			r.Post("/{id}/select", s.handleSelectDrive)
 			r.Post("/{id}/format-tape", s.handleFormatTapeInDrive)
 			r.Get("/{id}/inspect-tape", s.handleInspectTape)
+			r.Get("/{id}/scan-for-db-backup", s.handleScanForDBBackup)
 			r.Post("/{id}/batch-label", s.handleBatchLabel)
 		})
 
@@ -5462,6 +5463,101 @@ func (s *Server) handleInspectTape(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.auditLog(r, "inspect", "tape_drive", driveID, fmt.Sprintf("Inspected tape in drive %s", devicePath))
+
+	s.respondJSON(w, http.StatusOK, result)
+}
+
+// handleScanForDBBackup scans a tape for TapeBackarr database backup files
+func (s *Server) handleScanForDBBackup(w http.ResponseWriter, r *http.Request) {
+	driveID, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid drive id")
+		return
+	}
+
+	var devicePath string
+	err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", driveID).Scan(&devicePath)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "drive not found or not enabled")
+		return
+	}
+
+	ctx := r.Context()
+	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "system",
+			Title:    "DB Recovery Scan",
+			Message:  "Scanning tape for database backup files...",
+		})
+	}
+
+	// Rewind
+	if err := driveSvc.Rewind(ctx); err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to rewind: "+err.Error())
+		return
+	}
+
+	// Read label if present
+	labelData, _ := driveSvc.ReadTapeLabel(ctx)
+
+	result := map[string]interface{}{
+		"drive_id":    driveID,
+		"device_path": devicePath,
+	}
+
+	if labelData != nil {
+		result["tape_label"] = labelData.Label
+		result["tape_uuid"] = labelData.UUID
+	}
+
+	// Try to list contents and find database backup files
+	driveSvc.Rewind(ctx)
+	if labelData != nil && labelData.Label != "" {
+		driveSvc.SeekToFileNumber(ctx, 1)
+	}
+
+	entries, err := driveSvc.ListTapeContents(ctx, 5000)
+
+	dbBackups := []map[string]interface{}{}
+	if entries != nil {
+		for _, entry := range entries {
+			name := entry.Path
+			if strings.Contains(strings.ToLower(name), "tapebackarr-db") ||
+				strings.Contains(strings.ToLower(name), "tapebackarr_db") ||
+				strings.HasSuffix(strings.ToLower(name), ".sql") ||
+				strings.HasSuffix(strings.ToLower(name), ".db") {
+				dbBackups = append(dbBackups, map[string]interface{}{
+					"name":  name,
+					"entry": entry,
+				})
+			}
+		}
+	}
+
+	result["db_backups_found"] = len(dbBackups)
+	result["db_backups"] = dbBackups
+	result["total_entries"] = 0
+	if entries != nil {
+		result["total_entries"] = len(entries)
+	}
+
+	if err != nil {
+		result["scan_error"] = err.Error()
+	}
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "success",
+			Category: "system",
+			Title:    "DB Recovery Scan Complete",
+			Message:  fmt.Sprintf("Found %d database backup file(s) on tape", len(dbBackups)),
+		})
+	}
+
+	s.auditLog(r, "scan_db_backup", "tape_drive", driveID, fmt.Sprintf("Scanned for DB backups, found %d", len(dbBackups)))
 
 	s.respondJSON(w, http.StatusOK, result)
 }
