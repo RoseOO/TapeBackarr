@@ -242,19 +242,35 @@ start_container() {
     # Give the container a moment to initialize before checking status
     sleep "$CONTAINER_INIT_DELAY"
     
-    # Wait for container to be fully up
-    # We use '|| true' to prevent set -e from exiting on command failure
+    # First, wait until we can connect to the container via pct exec
+    # This ensures the LXC runtime is ready before checking systemd status
+    msg_info "Waiting for container to be connectable..."
     local count=0
-    local status
+    while ! pct exec "$ct_id" -- true 2>/dev/null; do
+        sleep 1
+        ((count++))
+        if [[ $count -ge $CONTAINER_START_TIMEOUT ]]; then
+            msg_error "Container $ct_id failed to become connectable within $CONTAINER_START_TIMEOUT seconds"
+        fi
+    done
+    msg_ok "Container is connectable"
+    
+    # Now wait for container to be fully up
+    # We use '|| true' to prevent set -e from exiting on command failure
+    msg_info "Waiting for container to be fully running..."
+    count=0
+    local status=""
     while true; do
         status=$(pct exec "$ct_id" -- systemctl is-system-running 2>/dev/null) || true
-        if [[ "$status" == "running" ]]; then
+        # Accept both "running" and "degraded" as valid ready states
+        # "degraded" means system is up but some non-critical services failed
+        if [[ "$status" == "running" || "$status" == "degraded" ]]; then
             break
         fi
         sleep 1
         ((count++))
         if [[ $count -ge $CONTAINER_START_TIMEOUT ]]; then
-            msg_warn "Container took too long to start, continuing anyway..."
+            msg_warn "Container took too long to reach running state (current: $status), continuing anyway..."
             break
         fi
     done
