@@ -442,6 +442,55 @@ docker compose build
 docker compose up -d
 ```
 
+### Proxmox LXC
+
+1. **Enter the container:**
+   ```bash
+   pct enter 200
+   ```
+
+2. **Stop the service:**
+   ```bash
+   systemctl stop tapebackarr
+   ```
+
+3. **Backup the database:**
+   ```bash
+   sqlite3 /var/lib/tapebackarr/tapebackarr.db ".backup /tmp/tapebackarr-backup.db"
+   ```
+
+4. **Update the code:**
+   ```bash
+   cd /opt/tapebackarr/src/TapeBackarr
+   git pull
+   make build
+   ```
+
+   If the source was not cloned during install, clone it first:
+   ```bash
+   apt install -y git golang-go nodejs npm
+   git clone https://github.com/RoseOO/TapeBackarr.git /opt/tapebackarr/src/TapeBackarr
+   cd /opt/tapebackarr/src/TapeBackarr
+   make build
+   ```
+
+5. **Install the new version:**
+   ```bash
+   cp tapebackarr /opt/tapebackarr/tapebackarr
+   cp -r web/frontend/build /opt/tapebackarr/static
+   ```
+
+6. **Start the service:**
+   ```bash
+   systemctl start tapebackarr
+   ```
+
+7. **Verify the update:**
+   ```bash
+   systemctl status tapebackarr
+   curl http://localhost:8080/api/v1/health
+   ```
+
 ---
 
 ## Uninstalling
