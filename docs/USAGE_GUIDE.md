@@ -11,10 +11,14 @@ Complete guide to using TapeBackarr for tape backup and restore operations.
 5. [Creating and Running Backup Jobs](#creating-and-running-backup-jobs)
 6. [Multi-Tape Spanning](#multi-tape-spanning)
 7. [Restoring Data](#restoring-data)
-8. [Telegram Notifications](#telegram-notifications)
+8. [Notifications](#notifications)
 9. [Viewing Logs](#viewing-logs)
-10. [User Management](#user-management)
-11. [Best Practices](#best-practices)
+10. [Tape Inspection and Encryption](#tape-inspection-and-encryption)
+11. [User Management](#user-management)
+12. [Database Backup](#database-backup)
+13. [In-App Documentation](#in-app-documentation)
+14. [Best Practices](#best-practices)
+15. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -163,21 +167,22 @@ Pools help organize tapes by retention policy:
 ### Tape Status Workflow
 
 ```
-blank → active → full → retired
-                   ↓
-                offsite
+blank → active → full → expired → retired
+                  ↓
+               exported
 ```
 
 - **blank**: New tape, never written
 - **active**: In use, has space remaining
 - **full**: Tape is full
+- **expired**: Tape retention period has elapsed
 - **retired**: No longer in use
-- **offsite**: Stored at an offsite location
+- **exported**: Removed from the library (e.g., sent offsite)
 
 ### Marking Tapes
 
-- **Mark as Offsite**: When tape is moved to offsite storage
-- **Mark as Returned**: When tape returns from offsite
+- **Export**: When tape is removed from the library (e.g., moved to offsite storage)
+- **Import**: When tape returns to the library
 - **Mark as Retired**: When tape is no longer usable
 
 ---
@@ -389,11 +394,13 @@ sudo mount -t nfs server:/export/path /mnt/nfs/restore
 
 ---
 
-## Telegram Notifications
+## Notifications
 
-TapeBackarr can send notifications to Telegram when operator action is required.
+TapeBackarr can send notifications via Telegram and Email when operator action is required.
 
-### Setting Up Telegram Bot
+### Telegram Notifications
+
+#### Setting Up Telegram Bot
 
 1. **Create a Telegram Bot:**
    - Message [@BotFather](https://t.me/botfather) on Telegram
@@ -455,6 +462,45 @@ Please insert a new tape and acknowledge in the web interface.
 • Reason: Tape full
 
 _Sent at 2024-01-15 14:30:45_
+```
+
+### Email Notifications (SMTP)
+
+TapeBackarr also supports email notifications for the same events.
+
+#### Configuring Email
+
+Edit `/etc/tapebackarr/config.json`:
+
+```json
+{
+  "notifications": {
+    "email": {
+      "enabled": true,
+      "smtp_host": "smtp.gmail.com",
+      "smtp_port": 587,
+      "username": "your-email@gmail.com",
+      "password": "your-app-password",
+      "from_email": "tapebackarr@yourdomain.com",
+      "from_name": "TapeBackarr",
+      "to_emails": "admin@yourdomain.com, operator@yourdomain.com",
+      "use_tls": true,
+      "skip_verify": false
+    }
+  }
+}
+```
+
+**Note:** For Gmail, use an [App Password](https://support.google.com/accounts/answer/185833) instead of your regular password.
+
+#### Testing Notifications
+
+Use the Settings page or API to test your notification configuration:
+
+```bash
+# Test Telegram
+curl -X POST http://localhost:8080/api/v1/settings/telegram/test \
+  -H "Authorization: Bearer <token>"
 ```
 
 ---

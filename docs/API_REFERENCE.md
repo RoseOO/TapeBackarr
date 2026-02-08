@@ -105,7 +105,7 @@ Authorization: Bearer <token>
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `pool_id` | int | Filter by pool ID |
-| `status` | string | Filter by status (blank, active, full, retired, offsite) |
+| `status` | string | Filter by status (blank, active, full, expired, retired, exported) |
 | `limit` | int | Number of results (default: 100) |
 | `offset` | int | Pagination offset |
 
@@ -190,25 +190,80 @@ Content-Type: application/json
 }
 ```
 
-### Update Tape Status
+### Format Tape
 
 ```http
-PUT /api/v1/tapes/{id}/status
+POST /api/v1/tapes/{id}/format
 Authorization: Bearer <token>
-Content-Type: application/json
+```
 
+Formats the physical tape. Tape must be loaded in a drive.
+
+### Export Tape
+
+```http
+POST /api/v1/tapes/{id}/export
+Authorization: Bearer <token>
+```
+
+Marks the tape as exported (e.g., for offsite storage).
+
+### Import Tape
+
+```http
+POST /api/v1/tapes/{id}/import
+Authorization: Bearer <token>
+```
+
+Imports a previously exported tape back into the system.
+
+### Read Tape Label
+
+```http
+GET /api/v1/tapes/{id}/read-label
+Authorization: Bearer <token>
+```
+
+Reads the label block from the physical tape.
+
+**Response:**
+```json
 {
-  "status": "offsite",
-  "offsite_location": "Iron Mountain Box 42"
+  "label": "WEEKLY-001",
+  "barcode": "ABC123",
+  "written_at": "2024-01-15T02:30:00Z"
 }
 ```
 
-**Valid Status Values:**
+### Get LTO Types
+
+```http
+GET /api/v1/tapes/lto-types
+Authorization: Bearer <token>
+```
+
+Returns the list of supported LTO tape types and their capacities.
+
+**Response:**
+```json
+{
+  "lto_types": [
+    {
+      "name": "LTO-8",
+      "native_capacity_bytes": 12000000000000,
+      "compressed_capacity_bytes": 30000000000000
+    }
+  ]
+}
+```
+
+**Valid Tape Status Values:**
 - `blank`
 - `active`
 - `full`
+- `expired`
 - `retired`
-- `offsite`
+- `exported`
 
 ### Write Tape Label
 
@@ -268,6 +323,33 @@ Content-Type: application/json
 }
 ```
 
+### Get Pool
+
+```http
+GET /api/v1/pools/{id}
+Authorization: Bearer <token>
+```
+
+### Update Pool
+
+```http
+PUT /api/v1/pools/{id}
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "name": "QUARTERLY-RENAMED",
+  "retention_days": 365
+}
+```
+
+### Delete Pool
+
+```http
+DELETE /api/v1/pools/{id}
+Authorization: Bearer <token>
+```
+
 ---
 
 ## Backup Sources
@@ -310,6 +392,13 @@ Content-Type: application/json
   "include_patterns": ["*.doc", "*.pdf", "*.xlsx"],
   "exclude_patterns": ["*.tmp", "*.log", "cache/*"]
 }
+```
+
+### Get Source
+
+```http
+GET /api/v1/sources/{id}
+Authorization: Bearer <token>
 ```
 
 ### Update Source
@@ -382,6 +471,13 @@ Content-Type: application/json
 }
 ```
 
+### Get Job
+
+```http
+GET /api/v1/jobs/{id}
+Authorization: Bearer <token>
+```
+
 ### Update Job
 
 ```http
@@ -413,6 +509,60 @@ Content-Type: application/json
   "backup_set_id": 157,
   "status": "running",
   "message": "Backup job started"
+}
+```
+
+### Get Active Jobs
+
+```http
+GET /api/v1/jobs/active
+Authorization: Bearer <token>
+```
+
+Returns a list of currently running or queued jobs.
+
+### Cancel Job
+
+```http
+POST /api/v1/jobs/{id}/cancel
+Authorization: Bearer <token>
+```
+
+Cancels a running or queued job.
+
+### Pause Job
+
+```http
+POST /api/v1/jobs/{id}/pause
+Authorization: Bearer <token>
+```
+
+Pauses a running job.
+
+### Resume Job
+
+```http
+POST /api/v1/jobs/{id}/resume
+Authorization: Bearer <token>
+```
+
+Resumes a paused job.
+
+### Recommend Tape for Job
+
+```http
+GET /api/v1/jobs/{id}/recommend-tape
+Authorization: Bearer <token>
+```
+
+Recommends the best tape to use for the next run of this job.
+
+**Response:**
+```json
+{
+  "tape_id": 3,
+  "tape_label": "WEEKLY-003",
+  "reason": "Most available capacity in pool"
 }
 ```
 
@@ -472,6 +622,29 @@ Authorization: Bearer <token>
 
 Returns detailed information including file list and spanning info.
 
+### List Backup Set Files
+
+```http
+GET /api/v1/backup-sets/{id}/files
+Authorization: Bearer <token>
+```
+
+Returns the list of files included in the backup set.
+
+**Response:**
+```json
+{
+  "files": [
+    {
+      "path": "/documents/report.pdf",
+      "size": 1048576,
+      "mod_time": "2024-01-14T10:30:00Z"
+    }
+  ],
+  "total": 1500
+}
+```
+
 ---
 
 ## Catalog
@@ -517,15 +690,14 @@ Authorization: Bearer <token>
 ### Browse Catalog
 
 ```http
-GET /api/v1/catalog/browse
+GET /api/v1/catalog/browse/{backupSetId}
 Authorization: Bearer <token>
 ```
 
 **Query Parameters:**
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `path` | string | Directory path to browse |
-| `backup_set_id` | int | Specific backup set |
+| `prefix` | string | Directory path prefix to browse |
 
 ---
 
@@ -601,38 +773,6 @@ Content-Type: application/json
   "restore_id": 42,
   "status": "running",
   "message": "Restore started. Please insert tape WEEKLY-001."
-}
-```
-
-### Acknowledge Tape Change
-
-```http
-POST /api/v1/restore/{id}/acknowledge-tape
-Authorization: Bearer <token>
-Content-Type: application/json
-
-{
-  "tape_label": "WEEKLY-002"
-}
-```
-
-### Get Restore Status
-
-```http
-GET /api/v1/restore/{id}/status
-Authorization: Bearer <token>
-```
-
-**Response:**
-```json
-{
-  "restore_id": 42,
-  "status": "waiting_for_tape",
-  "current_tape": "WEEKLY-001",
-  "next_tape": "WEEKLY-002",
-  "files_restored": 5,
-  "files_total": 10,
-  "bytes_restored": 5000000
 }
 ```
 
@@ -754,6 +894,78 @@ Authorization: Bearer <token>
 POST /api/v1/drives/{id}/rewind
 Authorization: Bearer <token>
 ```
+
+### Scan for Drives
+
+```http
+GET /api/v1/drives/scan
+Authorization: Bearer <token>
+```
+
+Scans the system for available tape drives.
+
+**Response:**
+```json
+{
+  "drives": [
+    {
+      "device_path": "/dev/nst0",
+      "model": "LTO-8",
+      "serial_number": "ABC123"
+    }
+  ]
+}
+```
+
+### Detect Tape in Drive
+
+```http
+GET /api/v1/drives/{id}/detect-tape
+Authorization: Bearer <token>
+```
+
+Detects whether a tape is loaded and reads its information.
+
+### Format Tape in Drive
+
+```http
+POST /api/v1/drives/{id}/format-tape
+Authorization: Bearer <token>
+```
+
+Formats the tape currently loaded in the drive.
+
+### Inspect Tape in Drive
+
+```http
+GET /api/v1/drives/{id}/inspect-tape
+Authorization: Bearer <token>
+```
+
+Reads and returns metadata about the tape currently loaded in the drive.
+
+### Scan for Database Backup on Tape
+
+```http
+GET /api/v1/drives/{id}/scan-for-db-backup
+Authorization: Bearer <token>
+```
+
+Scans the tape in the drive for TapeBackarr database backup records.
+
+### Batch Label Tapes
+
+```http
+POST /api/v1/drives/{id}/batch-label
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "tape_ids": [1, 2, 3]
+}
+```
+
+Labels multiple tapes sequentially using the specified drive.
 
 ---
 
@@ -928,7 +1140,7 @@ Authorization: Bearer <token>
 ### Export Logs
 
 ```http
-GET /api/v1/logs/audit/export
+GET /api/v1/logs/export
 Authorization: Bearer <token>
 ```
 
@@ -981,18 +1193,6 @@ Content-Type: application/json
 }
 ```
 
-### Update User Role
-
-```http
-PUT /api/v1/users/{id}
-Authorization: Bearer <token>
-Content-Type: application/json
-
-{
-  "role": "admin"
-}
-```
-
 ### Delete User
 
 ```http
@@ -1003,7 +1203,7 @@ Authorization: Bearer <token>
 ### Change Password
 
 ```http
-PUT /api/v1/users/{id}/password
+POST /api/v1/auth/change-password
 Authorization: Bearer <token>
 Content-Type: application/json
 
@@ -1015,12 +1215,42 @@ Content-Type: application/json
 
 ---
 
-## Notifications
+## Settings
 
-### Test Telegram
+### Get Settings
 
 ```http
-POST /api/v1/notifications/telegram/test
+GET /api/v1/settings
+Authorization: Bearer <token>
+```
+
+**Response:**
+```json
+{
+  "telegram_bot_token": "***",
+  "telegram_chat_id": "123456",
+  "notifications_enabled": true
+}
+```
+
+### Update Settings (Admin Only)
+
+```http
+PUT /api/v1/settings
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "telegram_bot_token": "bot123:ABC...",
+  "telegram_chat_id": "123456",
+  "notifications_enabled": true
+}
+```
+
+### Test Telegram Notification (Admin Only)
+
+```http
+POST /api/v1/settings/telegram/test
 Authorization: Bearer <token>
 ```
 
@@ -1032,6 +1262,382 @@ Sends a test notification to verify Telegram configuration.
   "success": true,
   "message": "Test notification sent successfully"
 }
+```
+
+### Restart Application (Admin Only)
+
+```http
+POST /api/v1/settings/restart
+Authorization: Bearer <token>
+```
+
+Restarts the TapeBackarr application.
+
+---
+
+## Events
+
+### Event Stream (SSE)
+
+```http
+GET /api/v1/events/stream
+Authorization: Bearer <token>
+```
+
+Server-Sent Events stream for real-time updates (job progress, tape status changes, etc.).
+
+### Get Notifications
+
+```http
+GET /api/v1/events
+Authorization: Bearer <token>
+```
+
+Returns recent event notifications.
+
+**Response:**
+```json
+{
+  "events": [
+    {
+      "id": 1,
+      "type": "job.completed",
+      "message": "Backup job Daily-FileServer completed",
+      "timestamp": "2024-01-15T02:30:00Z"
+    }
+  ]
+}
+```
+
+---
+
+## Encryption Keys
+
+### List Encryption Keys
+
+```http
+GET /api/v1/encryption-keys
+Authorization: Bearer <token>
+```
+
+**Response:**
+```json
+{
+  "keys": [
+    {
+      "id": 1,
+      "name": "default",
+      "fingerprint": "SHA256:abc123...",
+      "created_at": "2024-01-01T00:00:00Z"
+    }
+  ]
+}
+```
+
+### Get Key Sheet
+
+```http
+GET /api/v1/encryption-keys/keysheet
+Authorization: Bearer <token>
+```
+
+Returns an HTML key sheet for printing and secure offline storage.
+
+### Get Key Sheet (Text)
+
+```http
+GET /api/v1/encryption-keys/keysheet/text
+Authorization: Bearer <token>
+```
+
+Returns a plain-text key sheet.
+
+### Create Encryption Key (Admin Only)
+
+```http
+POST /api/v1/encryption-keys
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "name": "my-key"
+}
+```
+
+### Import Encryption Key (Admin Only)
+
+```http
+POST /api/v1/encryption-keys/import
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "name": "imported-key",
+  "key_data": "base64-encoded-key-material"
+}
+```
+
+### Delete Encryption Key (Admin Only)
+
+```http
+DELETE /api/v1/encryption-keys/{id}
+Authorization: Bearer <token>
+```
+
+---
+
+## API Keys (Admin Only)
+
+### List API Keys
+
+```http
+GET /api/v1/api-keys
+Authorization: Bearer <token>
+```
+
+**Response:**
+```json
+{
+  "api_keys": [
+    {
+      "id": 1,
+      "name": "monitoring",
+      "prefix": "tb_abc1...",
+      "created_at": "2024-01-01T00:00:00Z"
+    }
+  ]
+}
+```
+
+### Create API Key
+
+```http
+POST /api/v1/api-keys
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "name": "monitoring"
+}
+```
+
+**Response:**
+```json
+{
+  "id": 2,
+  "name": "monitoring",
+  "key": "tb_full-api-key-shown-only-once"
+}
+```
+
+### Delete API Key
+
+```http
+DELETE /api/v1/api-keys/{id}
+Authorization: Bearer <token>
+```
+
+---
+
+## Health Check
+
+### Simple Health Check
+
+```http
+GET /health
+```
+
+No authentication required.
+
+**Response:**
+```json
+{
+  "status": "ok"
+}
+```
+
+### Detailed Health Check
+
+```http
+GET /api/v1/health
+```
+
+No authentication required. Returns detailed component status.
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "version": "1.0.0",
+  "database": "ok",
+  "uptime": "72h15m"
+}
+```
+
+---
+
+## Proxmox
+
+### List Nodes
+
+```http
+GET /api/v1/proxmox/nodes
+Authorization: Bearer <token>
+```
+
+### List Guests
+
+```http
+GET /api/v1/proxmox/guests
+Authorization: Bearer <token>
+```
+
+**Query Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `node` | string | Filter by Proxmox node |
+| `type` | string | Filter by guest type (qemu, lxc) |
+
+### Get Guest
+
+```http
+GET /api/v1/proxmox/guests/{vmid}
+Authorization: Bearer <token>
+```
+
+### Get Guest Config
+
+```http
+GET /api/v1/proxmox/guests/{vmid}/config
+Authorization: Bearer <token>
+```
+
+### Get Cluster Status
+
+```http
+GET /api/v1/proxmox/cluster/status
+Authorization: Bearer <token>
+```
+
+### List Proxmox Backups
+
+```http
+GET /api/v1/proxmox/backups
+Authorization: Bearer <token>
+```
+
+### Get Proxmox Backup
+
+```http
+GET /api/v1/proxmox/backups/{id}
+Authorization: Bearer <token>
+```
+
+### Create Proxmox Backup
+
+```http
+POST /api/v1/proxmox/backups
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "vmid": 100,
+  "node": "pve1"
+}
+```
+
+### Backup All Guests
+
+```http
+POST /api/v1/proxmox/backups/all
+Authorization: Bearer <token>
+```
+
+### List Proxmox Restores
+
+```http
+GET /api/v1/proxmox/restores
+Authorization: Bearer <token>
+```
+
+### Create Proxmox Restore
+
+```http
+POST /api/v1/proxmox/restores
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "backup_id": 1,
+  "target_node": "pve1"
+}
+```
+
+### Plan Proxmox Restore
+
+```http
+POST /api/v1/proxmox/restores/plan
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "backup_id": 1
+}
+```
+
+### List Proxmox Jobs
+
+```http
+GET /api/v1/proxmox/jobs
+Authorization: Bearer <token>
+```
+
+### Create Proxmox Job
+
+```http
+POST /api/v1/proxmox/jobs
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "name": "nightly-proxmox-backup",
+  "schedule": "0 3 * * *",
+  "vmids": [100, 101, 102]
+}
+```
+
+### Get Proxmox Job
+
+```http
+GET /api/v1/proxmox/jobs/{id}
+Authorization: Bearer <token>
+```
+
+### Update Proxmox Job
+
+```http
+PUT /api/v1/proxmox/jobs/{id}
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "schedule": "0 4 * * *",
+  "enabled": true
+}
+```
+
+### Delete Proxmox Job
+
+```http
+DELETE /api/v1/proxmox/jobs/{id}
+Authorization: Bearer <token>
+```
+
+### Run Proxmox Job
+
+```http
+POST /api/v1/proxmox/jobs/{id}/run
+Authorization: Bearer <token>
 ```
 
 ---

@@ -738,5 +738,5 @@ curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8080/api/v1/drives/1
 
 - Version: 1.2
 - Last Updated: February 2026
-- Applies to: TapeBackarr 1.x, LTO-5 through LTO-9 drives
+- Applies to: TapeBackarr 0.x, LTO-5 through LTO-9 drives
 - Added: Compressed tape recovery procedures, database backup recovery from tape
