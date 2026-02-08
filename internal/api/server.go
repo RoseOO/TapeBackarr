@@ -5423,14 +5423,6 @@ func (s *Server) handleInspectTape(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// Rewind and try listing from beginning
-	driveSvc.Rewind(ctx)
-
-	// If there was a label, seek past it
-	if labelData != nil && labelData.Label != "" {
-		driveSvc.SeekToFileNumber(ctx, 1)
-	}
-
 	entries, listErr := driveSvc.ListTapeContents(ctx, 1000)
 
 	if listErr != nil {
