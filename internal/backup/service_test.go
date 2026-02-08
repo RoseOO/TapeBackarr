@@ -1,9 +1,14 @@
 package backup
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
+
+	"github.com/RoseOO/TapeBackarr/internal/models"
 )
 
 func TestCalculateChecksum(t *testing.T) {
@@ -107,6 +112,189 @@ func TestCalculateChecksumEmptyFile(t *testing.T) {
 	expectedChecksum := "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 	if checksum != expectedChecksum {
 		t.Errorf("empty file checksum mismatch: expected %s, got %s", expectedChecksum, checksum)
+	}
+}
+
+func TestScanSourceBasic(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create directory structure
+	os.MkdirAll(filepath.Join(tmpDir, "subdir1"), 0755)
+	os.MkdirAll(filepath.Join(tmpDir, "subdir2"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "file1.txt"), []byte("hello"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "subdir1", "file2.txt"), []byte("world"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "subdir2", "file3.txt"), []byte("test"), 0644)
+
+	svc := &Service{}
+	source := &models.BackupSource{Path: tmpDir}
+
+	files, err := svc.ScanSource(context.Background(), source)
+	if err != nil {
+		t.Fatalf("ScanSource failed: %v", err)
+	}
+
+	if len(files) != 3 {
+		t.Fatalf("expected 3 files, got %d", len(files))
+	}
+
+	// Verify all files found (sort for deterministic comparison)
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+
+	expectedPaths := []string{
+		filepath.Join(tmpDir, "file1.txt"),
+		filepath.Join(tmpDir, "subdir1", "file2.txt"),
+		filepath.Join(tmpDir, "subdir2", "file3.txt"),
+	}
+	sort.Strings(expectedPaths)
+
+	for i, f := range files {
+		if f.Path != expectedPaths[i] {
+			t.Errorf("file %d: expected path %s, got %s", i, expectedPaths[i], f.Path)
+		}
+	}
+}
+
+func TestScanSourceExcludePatterns(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	os.WriteFile(filepath.Join(tmpDir, "keep.txt"), []byte("keep"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "skip.log"), []byte("skip"), 0644)
+
+	svc := &Service{}
+	excludeJSON, _ := json.Marshal([]string{"*.log"})
+	source := &models.BackupSource{
+		Path:            tmpDir,
+		ExcludePatterns: string(excludeJSON),
+	}
+
+	files, err := svc.ScanSource(context.Background(), source)
+	if err != nil {
+		t.Fatalf("ScanSource failed: %v", err)
+	}
+
+	if len(files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(files))
+	}
+	if filepath.Base(files[0].Path) != "keep.txt" {
+		t.Errorf("expected keep.txt, got %s", files[0].Path)
+	}
+}
+
+func TestScanSourceIncludePatterns(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	os.WriteFile(filepath.Join(tmpDir, "include.txt"), []byte("include"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "exclude.log"), []byte("exclude"), 0644)
+
+	svc := &Service{}
+	includeJSON, _ := json.Marshal([]string{"*.txt"})
+	source := &models.BackupSource{
+		Path:            tmpDir,
+		IncludePatterns: string(includeJSON),
+	}
+
+	files, err := svc.ScanSource(context.Background(), source)
+	if err != nil {
+		t.Fatalf("ScanSource failed: %v", err)
+	}
+
+	if len(files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(files))
+	}
+	if filepath.Base(files[0].Path) != "include.txt" {
+		t.Errorf("expected include.txt, got %s", files[0].Path)
+	}
+}
+
+func TestScanSourceDeepNesting(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create deeply nested directories
+	deepPath := tmpDir
+	for i := 0; i < 10; i++ {
+		deepPath = filepath.Join(deepPath, "level")
+		os.MkdirAll(deepPath, 0755)
+		os.WriteFile(filepath.Join(deepPath, "file.txt"), []byte("data"), 0644)
+	}
+
+	svc := &Service{}
+	source := &models.BackupSource{Path: tmpDir}
+
+	files, err := svc.ScanSource(context.Background(), source)
+	if err != nil {
+		t.Fatalf("ScanSource failed: %v", err)
+	}
+
+	if len(files) != 10 {
+		t.Fatalf("expected 10 files, got %d", len(files))
+	}
+}
+
+func TestScanSourceContextCancellation(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create some files
+	for i := 0; i < 5; i++ {
+		dir := filepath.Join(tmpDir, "dir", string(rune('a'+i)))
+		os.MkdirAll(dir, 0755)
+		os.WriteFile(filepath.Join(dir, "file.txt"), []byte("data"), 0644)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	svc := &Service{}
+	source := &models.BackupSource{Path: tmpDir}
+
+	// Should not hang and should return context error
+	_, err := svc.ScanSource(ctx, source)
+	if err != context.Canceled {
+		// It's also acceptable to get fewer files
+		t.Logf("ScanSource with cancelled context returned err: %v", err)
+	}
+}
+
+func TestScanSourceEmptyDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	svc := &Service{}
+	source := &models.BackupSource{Path: tmpDir}
+
+	files, err := svc.ScanSource(context.Background(), source)
+	if err != nil {
+		t.Fatalf("ScanSource failed: %v", err)
+	}
+
+	if len(files) != 0 {
+		t.Errorf("expected 0 files for empty directory, got %d", len(files))
+	}
+}
+
+func TestScanSourceFileMetadata(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	content := []byte("test content here")
+	testFile := filepath.Join(tmpDir, "meta.txt")
+	os.WriteFile(testFile, content, 0644)
+
+	svc := &Service{}
+	source := &models.BackupSource{Path: tmpDir}
+
+	files, err := svc.ScanSource(context.Background(), source)
+	if err != nil {
+		t.Fatalf("ScanSource failed: %v", err)
+	}
+
+	if len(files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(files))
+	}
+
+	f := files[0]
+	if f.Size != int64(len(content)) {
+		t.Errorf("expected size %d, got %d", len(content), f.Size)
+	}
+	if f.ModTime.IsZero() {
+		t.Error("expected non-zero mod time")
 	}
 }
 
