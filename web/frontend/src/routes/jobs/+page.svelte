@@ -76,7 +76,7 @@
     backup_type: 'full',
     schedule_cron: '',
     retention_days: 30,
-    encryption_key_id: 0,
+    encryption_key_id: null as number | null,
   };
 
   let runFormData = {
@@ -126,7 +126,7 @@
   async function handleCreate() {
     try {
       const payload: any = { ...formData };
-      if (payload.encryption_key_id === 0) {
+      if (!payload.encryption_key_id) {
         delete payload.encryption_key_id;
       }
       await api.createJob(payload);
@@ -185,7 +185,7 @@
       backup_type: 'full',
       schedule_cron: '',
       retention_days: 30,
-      encryption_key_id: 0,
+      encryption_key_id: null as number | null,
     };
   }
 
@@ -370,7 +370,7 @@
         <div class="form-group">
           <label for="encryption-key">Encryption Key</label>
           <select id="encryption-key" bind:value={formData.encryption_key_id}>
-            <option value={0}>None (unencrypted)</option>
+            <option value={null}>None (unencrypted)</option>
             {#each encryptionKeys as key}
               <option value={key.id}>🔒 {key.name}</option>
             {/each}
