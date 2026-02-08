@@ -30,7 +30,7 @@ type Service struct {
 // NewService creates a new scheduler service
 func NewService(db *database.DB, logger *logging.Logger, jobRunner JobRunner) *Service {
 	ctx, cancel := context.WithCancel(context.Background())
-	
+
 	return &Service{
 		db:        db,
 		logger:    logger,

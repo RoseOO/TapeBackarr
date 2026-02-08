@@ -189,9 +189,9 @@ func (s *BackupService) BackupGuest(ctx context.Context, req *ProxmoxBackupReque
 
 	// Start vzdump backup
 	vzdumpOptions := map[string]string{
-		"mode":     string(req.BackupMode),
-		"storage":  "", // We handle storage ourselves
-		"stdout":   "1", // Output to stdout for streaming
+		"mode":    string(req.BackupMode),
+		"storage": "",  // We handle storage ourselves
+		"stdout":  "1", // Output to stdout for streaming
 	}
 	if req.Compress != "" {
 		vzdumpOptions["compress"] = req.Compress
@@ -333,7 +333,7 @@ func (s *BackupService) executeVzdumpToTape(ctx context.Context, req *ProxmoxBac
 
 	// Wait for vzdump to complete
 	vzdumpErr := vzdumpCmd.Wait()
-	
+
 	// Close the pipe and wait for tar
 	tarErr := tarCmd.Wait()
 

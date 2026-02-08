@@ -17,32 +17,32 @@ import (
 
 // RestoreRequest represents a request to restore a Proxmox backup
 type RestoreRequest struct {
-	BackupID     int64  `json:"backup_id"`
-	TargetNode   string `json:"target_node"`          // Node to restore to (can be different from original)
-	TargetVMID   int    `json:"target_vmid,omitempty"` // New VMID (0 = use original)
-	TargetName   string `json:"target_name,omitempty"` // New name (empty = use original)
-	Storage      string `json:"storage"`               // Target storage for disks
-	StartAfter   bool   `json:"start_after"`           // Start the guest after restore
-	Overwrite    bool   `json:"overwrite"`             // Overwrite if VMID exists
-	RestoreRAM   bool   `json:"restore_ram"`           // Restore RAM state (if available)
+	BackupID   int64  `json:"backup_id"`
+	TargetNode string `json:"target_node"`           // Node to restore to (can be different from original)
+	TargetVMID int    `json:"target_vmid,omitempty"` // New VMID (0 = use original)
+	TargetName string `json:"target_name,omitempty"` // New name (empty = use original)
+	Storage    string `json:"storage"`               // Target storage for disks
+	StartAfter bool   `json:"start_after"`           // Start the guest after restore
+	Overwrite  bool   `json:"overwrite"`             // Overwrite if VMID exists
+	RestoreRAM bool   `json:"restore_ram"`           // Restore RAM state (if available)
 }
 
 // RestoreResult represents the result of a restore operation
 type RestoreResult struct {
-	RestoreID   int64     `json:"restore_id"`
-	BackupID    int64     `json:"backup_id"`
-	SourceNode  string    `json:"source_node"`
-	TargetNode  string    `json:"target_node"`
-	SourceVMID  int       `json:"source_vmid"`
-	TargetVMID  int       `json:"target_vmid"`
-	GuestType   GuestType `json:"guest_type"`
-	GuestName   string    `json:"guest_name"`
-	StartTime   time.Time `json:"start_time"`
-	EndTime     time.Time `json:"end_time"`
-	TotalBytes  int64     `json:"total_bytes"`
-	Status      string    `json:"status"`
-	Error       string    `json:"error,omitempty"`
-	ConfigApplied bool    `json:"config_applied"`
+	RestoreID     int64     `json:"restore_id"`
+	BackupID      int64     `json:"backup_id"`
+	SourceNode    string    `json:"source_node"`
+	TargetNode    string    `json:"target_node"`
+	SourceVMID    int       `json:"source_vmid"`
+	TargetVMID    int       `json:"target_vmid"`
+	GuestType     GuestType `json:"guest_type"`
+	GuestName     string    `json:"guest_name"`
+	StartTime     time.Time `json:"start_time"`
+	EndTime       time.Time `json:"end_time"`
+	TotalBytes    int64     `json:"total_bytes"`
+	Status        string    `json:"status"`
+	Error         string    `json:"error,omitempty"`
+	ConfigApplied bool      `json:"config_applied"`
 }
 
 // RestoreService handles Proxmox restore operations

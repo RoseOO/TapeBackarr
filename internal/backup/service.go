@@ -184,21 +184,21 @@ func (s *Service) StreamToTape(ctx context.Context, sourcePath string, files []F
 	// Build tar command with streaming to tape
 	// Using mbuffer for buffering if available, otherwise direct
 	tarArgs := []string{
-		"-c",                              // Create archive
+		"-c",                                     // Create archive
 		"-b", fmt.Sprintf("%d", s.blockSize/512), // Block size in 512-byte units
-		"-C", sourcePath,                  // Change to source directory
-		"-T", fileListPath,                // Read files from list
+		"-C", sourcePath, // Change to source directory
+		"-T", fileListPath, // Read files from list
 	}
 
 	var cmd *exec.Cmd
-	
+
 	// Check if mbuffer is available
 	_, mbufferErr := exec.LookPath("mbuffer")
 	if mbufferErr == nil {
 		// Use mbuffer for better streaming performance
 		tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
 		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", "256M", "-o", devicePath)
-		
+
 		// Pipe tar output to mbuffer
 		tarCmd.Dir = sourcePath
 		pipe, err := tarCmd.StdoutPipe()
@@ -206,7 +206,7 @@ func (s *Service) StreamToTape(ctx context.Context, sourcePath string, files []F
 			return fmt.Errorf("failed to create pipe: %w", err)
 		}
 		mbufferCmd.Stdin = pipe
-		
+
 		if err := tarCmd.Start(); err != nil {
 			return fmt.Errorf("failed to start tar: %w", err)
 		}
@@ -214,10 +214,10 @@ func (s *Service) StreamToTape(ctx context.Context, sourcePath string, files []F
 			tarCmd.Process.Kill()
 			return fmt.Errorf("failed to start mbuffer: %w", err)
 		}
-		
+
 		tarErr := tarCmd.Wait()
 		mbufferErr := mbufferCmd.Wait()
-		
+
 		if tarErr != nil {
 			return fmt.Errorf("tar failed: %w", tarErr)
 		}
@@ -229,7 +229,7 @@ func (s *Service) StreamToTape(ctx context.Context, sourcePath string, files []F
 		tarArgs = append(tarArgs, "-f", devicePath)
 		cmd = exec.CommandContext(ctx, "tar", tarArgs...)
 		cmd.Dir = sourcePath
-		
+
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("tar failed: %s", string(output))
@@ -302,7 +302,7 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 			WHERE source_id = ? 
 			ORDER BY created_at DESC LIMIT 1
 		`, source.ID).Scan(&snapshotData)
-		
+
 		if err == nil && len(snapshotData) > 0 {
 			files, err = s.CompareWithSnapshot(ctx, files, snapshotData)
 			if err != nil {
@@ -348,13 +348,27 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		s.logger.Warn("Failed to write file mark", map[string]interface{}{"error": err.Error()})
 	}
 
-	// Update catalog entries
+	// Update catalog entries with checksums for data integrity
+	s.logger.Info("Calculating file checksums for data integrity", map[string]interface{}{
+		"file_count": len(files),
+	})
 	for _, f := range files {
 		relPath, _ := filepath.Rel(source.Path, f.Path)
+
+		// Calculate SHA256 checksum for data integrity verification
+		checksum, checksumErr := s.CalculateChecksum(f.Path)
+		if checksumErr != nil {
+			s.logger.Warn("Failed to calculate checksum", map[string]interface{}{
+				"file":  relPath,
+				"error": checksumErr.Error(),
+			})
+			checksum = "" // Store empty checksum if calculation fails
+		}
+
 		_, err := s.db.Exec(`
-			INSERT INTO catalog_entries (backup_set_id, file_path, file_size, file_mode, mod_time)
-			VALUES (?, ?, ?, ?, ?)
-		`, backupSetID, relPath, f.Size, f.Mode, f.ModTime)
+			INSERT INTO catalog_entries (backup_set_id, file_path, file_size, file_mode, mod_time, checksum)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`, backupSetID, relPath, f.Size, f.Mode, f.ModTime, checksum)
 		if err != nil {
 			s.logger.Warn("Failed to insert catalog entry", map[string]interface{}{
 				"file":  relPath,
@@ -419,7 +433,7 @@ func (s *Service) updateBackupSetStatus(id int64, status models.BackupSetStatus,
 		UPDATE backup_sets SET status = ?, updated_at = CURRENT_TIMESTAMP 
 		WHERE id = ?
 	`, status, id)
-	
+
 	if errorMsg != "" {
 		s.logger.Error("Backup failed", map[string]interface{}{
 			"backup_set_id": id,
@@ -463,7 +477,7 @@ func (s *Service) ListBackupSets(ctx context.Context, jobID *int64, limit int) (
 func (s *Service) SearchCatalog(ctx context.Context, pattern string, limit int) ([]models.CatalogEntry, error) {
 	// Replace * with % for SQL LIKE
 	sqlPattern := strings.ReplaceAll(pattern, "*", "%")
-	
+
 	rows, err := s.db.Query(`
 		SELECT id, backup_set_id, file_path, file_size, file_mode, mod_time, checksum, block_offset
 		FROM catalog_entries
@@ -532,7 +546,8 @@ func (s *Service) GetTapesForRestore(ctx context.Context, filePaths []string) ([
 // DummyScanner for when we need to suppress some output
 type DummyScanner struct{}
 
-func (d *DummyScanner) Scan() bool { return false }
+func (d *DummyScanner) Scan() bool   { return false }
 func (d *DummyScanner) Text() string { return "" }
+
 var _ interface{ Scan() bool } = &DummyScanner{}
 var _ = bufio.Scanner{}
