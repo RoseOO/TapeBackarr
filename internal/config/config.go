@@ -27,13 +27,21 @@ type DatabaseConfig struct {
 	Path string `json:"path"`
 }
 
+// DriveConfig holds configuration for a single tape drive
+type DriveConfig struct {
+	DevicePath  string `json:"device_path"`
+	DisplayName string `json:"display_name"`
+	Enabled     bool   `json:"enabled"`
+}
+
 // TapeConfig holds tape-related configuration
 type TapeConfig struct {
-	DefaultDevice   string `json:"default_device"`
-	BufferSizeMB    int    `json:"buffer_size_mb"`
-	BlockSize       int    `json:"block_size"`
-	WriteRetries    int    `json:"write_retries"`
-	VerifyAfterWrite bool   `json:"verify_after_write"`
+	DefaultDevice    string        `json:"default_device"`
+	Drives           []DriveConfig `json:"drives,omitempty"`
+	BufferSizeMB     int           `json:"buffer_size_mb"`
+	BlockSize        int           `json:"block_size"`
+	WriteRetries     int           `json:"write_retries"`
+	VerifyAfterWrite bool          `json:"verify_after_write"`
 }
 
 // LoggingConfig holds logging configuration
@@ -73,10 +81,13 @@ func DefaultConfig() *Config {
 			Path: "/var/lib/tapebackarr/tapebackarr.db",
 		},
 		Tape: TapeConfig{
-			DefaultDevice:   "/dev/nst0",
-			BufferSizeMB:    256,
-			BlockSize:       65536,
-			WriteRetries:    3,
+			DefaultDevice:    "/dev/nst0",
+			Drives:           []DriveConfig{
+				{DevicePath: "/dev/nst0", DisplayName: "Primary LTO Drive", Enabled: true},
+			},
+			BufferSizeMB:     256,
+			BlockSize:        65536,
+			WriteRetries:     3,
 			VerifyAfterWrite: true,
 		},
 		Logging: LoggingConfig{

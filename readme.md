@@ -13,6 +13,8 @@ TapeBackarr is a disk-light, tape-first backup system designed to run on Debian 
 - **Multi-tape Spanning**: Automatic handling of tape-full conditions with continuation markers
 - **Guided Restore**: Operator-friendly restore workflow with tape insertion guidance
 - **Telegram Notifications**: Real-time alerts when tapes need to be changed
+- **Database Backup**: Backup the TapeBackarr database itself to tape for disaster recovery
+- **Multi-Drive Support**: Manage and select from multiple tape drives
 
 ### Tape Management
 - Tape labeling and pool assignment (DAILY, WEEKLY, MONTHLY, ARCHIVE)
@@ -27,15 +29,24 @@ TapeBackarr is a disk-light, tape-first backup system designed to run on Debian 
 - Glob-based include/exclude patterns
 - Full and incremental backup types
 - Job state persistence for resume after crash
+- Database backup to tape for disaster recovery
+
+### Restore Operations
+- Restore to local filesystem
+- Restore to network destinations (SMB/NFS)
+- File verification with checksums
+- Guided multi-tape restore workflow
 
 ### Web Interface
 - Modern, responsive dashboard
 - Tape management with status updates
+- Multi-drive management and selection
 - Backup job configuration and scheduling
 - Catalog browsing and file search
 - Guided restore wizard
 - Audit log viewer with export
 - Role-based access control (admin/operator/read-only)
+- **In-app documentation** - Access all guides from the web UI
 
 ## Architecture
 
@@ -65,7 +76,36 @@ TapeBackarr is a disk-light, tape-first backup system designed to run on Debian 
 
 ## Installation
 
-### Build from Source
+### Quick Install (Recommended)
+
+Use the automated installation script:
+
+```bash
+# Clone repository
+git clone https://github.com/RoseOO/TapeBackarr.git
+cd TapeBackarr
+
+# Build backend
+go build -o tapebackarr ./cmd/tapebackarr
+
+# Build frontend
+cd web/frontend
+npm install
+npm run build
+cd ../..
+
+# Run installer
+sudo ./deploy/install.sh
+```
+
+The install script will:
+- Install system dependencies (mt-st, tar, mbuffer)
+- Create required directories
+- Install the binary to `/opt/tapebackarr`
+- Create configuration with secure JWT secret
+- Install and enable the systemd service
+
+### Manual Installation
 
 ```bash
 # Clone repository
@@ -111,6 +151,18 @@ Edit `/etc/tapebackarr/config.json`:
   },
   "tape": {
     "default_device": "/dev/nst0",
+    "drives": [
+      {
+        "device_path": "/dev/nst0",
+        "display_name": "Primary LTO Drive",
+        "enabled": true
+      },
+      {
+        "device_path": "/dev/nst1",
+        "display_name": "Secondary LTO Drive",
+        "enabled": false
+      }
+    ],
     "buffer_size_mb": 256,
     "block_size": 65536,
     "write_retries": 3,
@@ -135,6 +187,27 @@ Edit `/etc/tapebackarr/config.json`:
   }
 }
 ```
+
+### Multi-Drive Configuration
+
+TapeBackarr supports multiple tape drives. Configure them in the `tape.drives` array:
+
+```json
+"drives": [
+  {
+    "device_path": "/dev/nst0",
+    "display_name": "Primary LTO-8 Drive",
+    "enabled": true
+  },
+  {
+    "device_path": "/dev/nst1",
+    "display_name": "Secondary LTO-6 Drive",
+    "enabled": true
+  }
+]
+```
+
+You can also add and manage drives through the web UI under the **Drives** section.
 
 ### Telegram Notifications Setup
 
@@ -329,13 +402,30 @@ sqlite3 /var/lib/tapebackarr/tapebackarr.db "PRAGMA integrity_check"
 
 ## Documentation
 
-For detailed documentation, see:
+Documentation is available in two ways:
+
+### In-App Documentation
+
+Access documentation directly from the web interface by clicking **Documentation** in the sidebar. This provides access to all guides without leaving the application.
+
+### Document Files
 
 - [**Usage Guide**](docs/USAGE_GUIDE.md) - Complete guide for using TapeBackarr
 - [**API Reference**](docs/API_REFERENCE.md) - REST API documentation
 - [**Operator Guide**](docs/OPERATOR_GUIDE.md) - Quick reference for daily operations
+- [**Manual Recovery**](docs/MANUAL_RECOVERY.md) - Recover data without TapeBackarr
 - [**Architecture**](docs/ARCHITECTURE.md) - System design and data flows
 - [**Database Schema**](docs/DATABASE_SCHEMA.md) - Database table definitions
+
+### Disaster Recovery
+
+The [Manual Recovery Guide](docs/MANUAL_RECOVERY.md) provides detailed instructions for recovering tape data using only standard Linux commands (mt, tar), without requiring TapeBackarr. This is essential for long-term archival scenarios where the application may not be available.
+
+Key recovery capabilities:
+- Read tape labels and catalog contents
+- Restore files using raw mt/tar commands
+- Handle multi-tape spanning sets
+- Recover the TapeBackarr database from tape
 
 ## License
 

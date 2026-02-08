@@ -8,6 +8,18 @@
   },
   "tape": {
     "default_device": "/dev/nst0",
+    "drives": [
+      {
+        "device_path": "/dev/nst0",
+        "display_name": "Primary LTO Drive",
+        "enabled": true
+      },
+      {
+        "device_path": "/dev/nst1",
+        "display_name": "Secondary LTO Drive",
+        "enabled": false
+      }
+    ],
     "buffer_size_mb": 256,
     "block_size": 65536,
     "write_retries": 3,

@@ -20,11 +20,12 @@ import (
 
 // RestoreRequest represents a restore operation request
 type RestoreRequest struct {
-	BackupSetID  int64    `json:"backup_set_id"`
-	FilePaths    []string `json:"file_paths,omitempty"`    // Empty means restore all
-	DestPath     string   `json:"dest_path"`
-	Verify       bool     `json:"verify"`
-	Overwrite    bool     `json:"overwrite"`
+	BackupSetID     int64    `json:"backup_set_id"`
+	FilePaths       []string `json:"file_paths,omitempty"`    // Empty means restore all
+	DestPath        string   `json:"dest_path"`
+	DestinationType string   `json:"destination_type"`        // local, smb, nfs
+	Verify          bool     `json:"verify"`
+	Overwrite       bool     `json:"overwrite"`
 }
 
 // RestoreResult represents the result of a restore operation

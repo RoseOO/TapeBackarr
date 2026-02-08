@@ -579,14 +579,21 @@ Authorization: Bearer <token>
 Content-Type: application/json
 
 {
+  "backup_set_id": 157,
   "file_paths": [
     "/documents/report.pdf"
   ],
-  "destination": "/restore/output",
+  "dest_path": "/restore/output",
+  "destination_type": "local",
   "overwrite": false,
   "verify": true
 }
 ```
+
+**Destination Types:**
+- `local` - Local filesystem path
+- `smb` - SMB/CIFS network share (must be pre-mounted)
+- `nfs` - NFS network share (must be pre-mounted)
 
 **Response:**
 ```json
@@ -646,13 +653,69 @@ Authorization: Bearer <token>
   "drives": [
     {
       "id": 1,
-      "name": "LTO-8 Drive",
       "device_path": "/dev/nst0",
-      "status": "online",
+      "display_name": "Primary LTO Drive",
+      "serial_number": "ABC123",
+      "model": "LTO-8",
+      "status": "ready",
       "current_tape_id": 1,
-      "current_tape_label": "WEEKLY-001"
+      "enabled": true,
+      "created_at": "2024-01-01T00:00:00Z"
     }
   ]
+}
+```
+
+### Create Drive
+
+```http
+POST /api/v1/drives
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "device_path": "/dev/nst1",
+  "display_name": "Secondary LTO Drive",
+  "serial_number": "DEF456",
+  "model": "LTO-6"
+}
+```
+
+### Update Drive
+
+```http
+PUT /api/v1/drives/{id}
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "display_name": "Updated Drive Name",
+  "enabled": true
+}
+```
+
+### Delete Drive
+
+```http
+DELETE /api/v1/drives/{id}
+Authorization: Bearer <token>
+```
+
+### Select Drive
+
+Select which drive to use for operations.
+
+```http
+POST /api/v1/drives/{id}/select
+Authorization: Bearer <token>
+```
+
+**Response:**
+```json
+{
+  "status": "selected",
+  "drive_id": 1,
+  "device_path": "/dev/nst0"
 }
 ```
 
@@ -690,6 +753,136 @@ Authorization: Bearer <token>
 ```http
 POST /api/v1/drives/{id}/rewind
 Authorization: Bearer <token>
+```
+
+---
+
+## Database Backup
+
+Backup and restore the TapeBackarr database itself to tape.
+
+### List Database Backups
+
+```http
+GET /api/v1/database-backup
+Authorization: Bearer <token>
+```
+
+**Response:**
+```json
+{
+  "backups": [
+    {
+      "id": 1,
+      "tape_id": 1,
+      "tape_label": "ARCHIVE-001",
+      "backup_time": "2024-01-15T03:00:00Z",
+      "file_size": 5242880,
+      "checksum": "sha256:abc123...",
+      "status": "completed",
+      "created_at": "2024-01-15T03:00:00Z"
+    }
+  ]
+}
+```
+
+### Backup Database to Tape
+
+```http
+POST /api/v1/database-backup/backup
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "tape_id": 1
+}
+```
+
+**Response:**
+```json
+{
+  "id": 2,
+  "status": "started",
+  "message": "Database backup started"
+}
+```
+
+### Restore Database from Tape
+
+```http
+POST /api/v1/database-backup/restore
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "backup_id": 1,
+  "dest_path": "/tmp/restore"
+}
+```
+
+**Response:**
+```json
+{
+  "status": "restored",
+  "dest_path": "/tmp/restore/tapebackarr.db"
+}
+```
+
+---
+
+## Documentation
+
+Access documentation from the API.
+
+### List Available Documents
+
+```http
+GET /api/v1/docs
+Authorization: Bearer <token>
+```
+
+**Response:**
+```json
+{
+  "docs": [
+    {
+      "id": "usage",
+      "title": "Usage Guide",
+      "description": "Complete guide to using TapeBackarr"
+    },
+    {
+      "id": "api",
+      "title": "API Reference",
+      "description": "REST API documentation"
+    },
+    {
+      "id": "operator",
+      "title": "Operator Guide",
+      "description": "Quick reference for operators"
+    },
+    {
+      "id": "recovery",
+      "title": "Manual Recovery",
+      "description": "Recover data without TapeBackarr"
+    }
+  ]
+}
+```
+
+### Get Document Content
+
+```http
+GET /api/v1/docs/{id}
+Authorization: Bearer <token>
+```
+
+**Response:**
+```json
+{
+  "id": "usage",
+  "title": "USAGE_GUIDE.md",
+  "content": "# TapeBackarr Usage Guide\n\n..."
+}
 ```
 
 ---
