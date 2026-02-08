@@ -1,5 +1,7 @@
 <script lang="ts">
   import Sidebar from '$lib/components/Sidebar.svelte';
+  import ToastNotifications from '$lib/components/ToastNotifications.svelte';
+  import VirtualConsole from '$lib/components/VirtualConsole.svelte';
   import { page } from '$app/stores';
   import { auth } from '$lib/stores/auth';
 
@@ -18,6 +20,10 @@
   <main class:full-width={!showSidebar}>
     <slot />
   </main>
+  {#if showSidebar}
+    <ToastNotifications />
+    <VirtualConsole />
+  {/if}
 </div>
 
 <style>
@@ -41,6 +47,7 @@
 
   main {
     padding: 2rem;
+    padding-bottom: 3rem;
     min-height: 100vh;
   }
 
