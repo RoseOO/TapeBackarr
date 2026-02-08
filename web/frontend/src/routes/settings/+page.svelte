@@ -8,6 +8,7 @@
   let error = '';
   let successMsg = '';
   let activeTab = 'server';
+  let testingTelegram = false;
 
   // Database backup state
   let dbBackups: any[] = [];
@@ -99,6 +100,19 @@
       error = e instanceof Error ? e.message : 'Failed to save settings';
     } finally {
       saving = false;
+    }
+  }
+
+  async function handleTestTelegram() {
+    try {
+      testingTelegram = true;
+      error = '';
+      await api.testTelegramNotification();
+      showSuccess('Test message sent successfully! Check your Telegram.');
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to send test message';
+    } finally {
+      testingTelegram = false;
     }
   }
 
@@ -361,6 +375,11 @@
             <div class="form-group">
               <label for="tg-chat">Chat ID</label>
               <input type="text" id="tg-chat" bind:value={config.notifications.telegram.chat_id} />
+            </div>
+            <div class="form-group">
+              <button class="btn btn-secondary" on:click={handleTestTelegram} disabled={testingTelegram}>
+                {testingTelegram ? 'Sending...' : '📨 Send Test Message'}
+              </button>
             </div>
           {/if}
 

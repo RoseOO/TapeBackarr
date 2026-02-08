@@ -62,6 +62,17 @@ func (s *TelegramService) IsEnabled() bool {
 	return s.config.Enabled && s.config.BotToken != "" && s.config.ChatID != ""
 }
 
+// SendTestMessage sends a test notification via Telegram to verify the configuration
+func (s *TelegramService) SendTestMessage(ctx context.Context) error {
+	return s.Send(ctx, &Notification{
+		Type:      "test",
+		Title:     "Test Notification",
+		Message:   "This is a test message from TapeBackarr. Your Telegram notifications are working correctly!",
+		Priority:  "normal",
+		Timestamp: time.Now(),
+	})
+}
+
 // Send sends a notification via Telegram
 func (s *TelegramService) Send(ctx context.Context, notification *Notification) error {
 	if !s.IsEnabled() {

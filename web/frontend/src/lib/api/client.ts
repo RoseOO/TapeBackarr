@@ -388,6 +388,12 @@ export async function updateSettings(data: any) {
   });
 }
 
+export async function testTelegramNotification() {
+  return fetchApi('/settings/telegram/test', {
+    method: 'POST',
+  });
+}
+
 // Get LTO type capacity mapping
 export async function getLTOTypes(): Promise<Record<string, number>> {
   return fetchApi('/tapes/lto-types');
