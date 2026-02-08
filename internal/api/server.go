@@ -55,6 +55,7 @@ type Server struct {
 	staticDir             string
 	configPath            string
 	config                *config.Config
+	eventBus              *EventBus
 }
 
 // NewServer creates a new API server
@@ -90,6 +91,7 @@ func NewServer(
 		staticDir:             staticDir,
 		configPath:            configPath,
 		config:                cfg,
+		eventBus:              NewEventBus(),
 	}
 
 	s.setupRoutes()
@@ -130,6 +132,7 @@ func (s *Server) setupRoutes() {
 		// Tapes
 		r.Route("/api/v1/tapes", func(r chi.Router) {
 			r.Get("/", s.handleListTapes)
+			r.Get("/lto-types", s.handleGetLTOTypes)
 			r.Post("/", s.handleCreateTape)
 			r.Get("/{id}", s.handleGetTape)
 			r.Put("/{id}", s.handleUpdateTape)
@@ -161,6 +164,7 @@ func (s *Server) setupRoutes() {
 			r.Post("/{id}/eject", s.handleEjectTape)
 			r.Post("/{id}/rewind", s.handleRewindTape)
 			r.Post("/{id}/select", s.handleSelectDrive)
+			r.Post("/{id}/format-tape", s.handleFormatTapeInDrive)
 		})
 
 		// Backup Sources
@@ -227,6 +231,10 @@ func (s *Server) setupRoutes() {
 				r.Put("/", s.handleUpdateConfig)
 			})
 		})
+
+		// Events / Notifications
+		r.Get("/api/v1/events/stream", s.handleEventStream)
+		r.Get("/api/v1/events", s.handleGetNotifications)
 
 		// Documentation
 		r.Route("/api/v1/docs", func(r chi.Router) {
@@ -470,7 +478,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListTapes(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`
-		SELECT t.id, t.uuid, t.barcode, t.label, t.pool_id, tp.name as pool_name, t.status, 
+		SELECT t.id, t.uuid, t.barcode, t.label, COALESCE(t.lto_type, '') as lto_type, t.pool_id, tp.name as pool_name, t.status, 
 		       t.capacity_bytes, t.used_bytes, t.write_count, t.last_written_at, t.labeled_at, t.created_at
 		FROM tapes t
 		LEFT JOIN tape_pools tp ON t.pool_id = tp.id
@@ -486,7 +494,8 @@ func (s *Server) handleListTapes(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var t models.Tape
 		var poolName *string
-		if err := rows.Scan(&t.ID, &t.UUID, &t.Barcode, &t.Label, &t.PoolID, &poolName, &t.Status,
+		var ltoType string
+		if err := rows.Scan(&t.ID, &t.UUID, &t.Barcode, &t.Label, &ltoType, &t.PoolID, &poolName, &t.Status,
 			&t.CapacityBytes, &t.UsedBytes, &t.WriteCount, &t.LastWrittenAt, &t.LabeledAt, &t.CreatedAt); err != nil {
 			continue
 		}
@@ -495,6 +504,7 @@ func (s *Server) handleListTapes(w http.ResponseWriter, r *http.Request) {
 			"uuid":            t.UUID,
 			"barcode":         t.Barcode,
 			"label":           t.Label,
+			"lto_type":        ltoType,
 			"pool_id":         t.PoolID,
 			"pool_name":       poolName,
 			"status":          t.Status,
@@ -516,6 +526,7 @@ func (s *Server) handleCreateTape(w http.ResponseWriter, r *http.Request) {
 		Barcode       string `json:"barcode"`
 		Label         string `json:"label"`
 		PoolID        *int64 `json:"pool_id"`
+		LTOType       string `json:"lto_type"`
 		CapacityBytes int64  `json:"capacity_bytes"`
 		DriveID       *int64 `json:"drive_id"`
 		WriteLabel    bool   `json:"write_label"`
@@ -529,6 +540,15 @@ func (s *Server) handleCreateTape(w http.ResponseWriter, r *http.Request) {
 	if req.Label == "" {
 		s.respondError(w, http.StatusBadRequest, "label is required")
 		return
+	}
+
+	// Auto-infer capacity from LTO type if not manually set
+	if req.LTOType != "" {
+		if capacity, ok := models.LTOCapacities[req.LTOType]; ok {
+			if req.CapacityBytes == 0 {
+				req.CapacityBytes = capacity
+			}
+		}
 	}
 
 	// Check if a tape with the same label already exists in the database
@@ -608,15 +628,30 @@ func (s *Server) handleCreateTape(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := s.db.Exec(`
-		INSERT INTO tapes (uuid, barcode, label, pool_id, status, capacity_bytes, labeled_at)
-		VALUES (?, ?, ?, ?, 'blank', ?, CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END)
-	`, tapeUUID, req.Barcode, req.Label, req.PoolID, req.CapacityBytes, req.WriteLabel)
+		INSERT INTO tapes (uuid, barcode, label, pool_id, lto_type, status, capacity_bytes, labeled_at)
+		VALUES (?, ?, ?, ?, ?, 'blank', ?, CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END)
+	`, tapeUUID, req.Barcode, req.Label, req.PoolID, req.LTOType, req.CapacityBytes, req.WriteLabel)
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	id, _ := result.LastInsertId()
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "success",
+			Category: "tape",
+			Title:    "Tape Added",
+			Message:  fmt.Sprintf("Tape '%s' has been added to the library", req.Label),
+			Details: map[string]interface{}{
+				"label":    req.Label,
+				"uuid":     tapeUUID,
+				"lto_type": req.LTOType,
+			},
+		})
+	}
+
 	s.respondJSON(w, http.StatusCreated, map[string]interface{}{
 		"id":   id,
 		"uuid": tapeUUID,
@@ -1035,7 +1070,7 @@ func (s *Server) handleDeletePool(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListDrives(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`
 		SELECT id, device_path, COALESCE(display_name, '') as display_name, COALESCE(vendor, '') as vendor,
-		       serial_number, model, status, current_tape_id, COALESCE(enabled, 1) as enabled, created_at
+		       COALESCE(serial_number, '') as serial_number, COALESCE(model, '') as model, status, current_tape_id, COALESCE(enabled, 1) as enabled, created_at
 		FROM tape_drives ORDER BY device_path
 	`)
 	if err != nil {
@@ -1072,10 +1107,43 @@ func (s *Server) handleListDrives(w http.ResponseWriter, r *http.Request) {
 			labelCtx, labelCancel := context.WithTimeout(ctx, 5*time.Second)
 			if labelData, err := driveSvc.ReadTapeLabel(labelCtx); err == nil && labelData != nil {
 				drives[i].CurrentTape = labelData.Label
-				// Update current_tape_id from DB if we have a matching tape
+				// Try to match by UUID first, then by label
 				var tapeID int64
-				if err := s.db.QueryRow("SELECT id FROM tapes WHERE label = ?", labelData.Label).Scan(&tapeID); err == nil {
-					drives[i].CurrentTapeID = &tapeID
+				found := false
+				if labelData.UUID != "" {
+					if err := s.db.QueryRow("SELECT id FROM tapes WHERE uuid = ?", labelData.UUID).Scan(&tapeID); err == nil {
+						drives[i].CurrentTapeID = &tapeID
+						found = true
+					}
+				}
+				if !found {
+					if err := s.db.QueryRow("SELECT id FROM tapes WHERE label = ?", labelData.Label).Scan(&tapeID); err == nil {
+						drives[i].CurrentTapeID = &tapeID
+						found = true
+					}
+				}
+				if !found {
+					// Tape is loaded but not in our database - mark as unknown
+					drives[i].UnknownTape = &models.UnknownTapeInfo{
+						Label:     labelData.Label,
+						UUID:      labelData.UUID,
+						Pool:      labelData.Pool,
+						Timestamp: labelData.Timestamp,
+					}
+					if s.eventBus != nil {
+						s.eventBus.Publish(SystemEvent{
+							Type:     "warning",
+							Category: "tape",
+							Title:    "Unknown Tape Detected",
+							Message:  fmt.Sprintf("Tape '%s' (UUID: %s) is loaded in drive but not in database", labelData.Label, labelData.UUID),
+							Details: map[string]interface{}{
+								"label":    labelData.Label,
+								"uuid":     labelData.UUID,
+								"pool":     labelData.Pool,
+								"drive_id": d.ID,
+							},
+						})
+					}
 				}
 			}
 			labelCancel()
@@ -2288,6 +2356,16 @@ func (s *Server) handleCreateDrive(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id, _ := result.LastInsertId()
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "success",
+			Category: "drive",
+			Title:    "Drive Added",
+			Message:  fmt.Sprintf("Tape drive '%s' at %s has been added", req.DisplayName, req.DevicePath),
+		})
+	}
+
 	s.respondJSON(w, http.StatusCreated, map[string]int64{"id": id})
 }
 
@@ -2669,6 +2747,93 @@ func (s *Server) handleScanDrives(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.respondJSON(w, http.StatusOK, drives)
+}
+
+// handleFormatTapeInDrive formats whatever tape is loaded in a specific drive
+// This works even if the tape is not in our database
+func (s *Server) handleFormatTapeInDrive(w http.ResponseWriter, r *http.Request) {
+	driveID, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid drive id")
+		return
+	}
+
+	var req struct {
+		Confirm bool `json:"confirm"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if !req.Confirm {
+		s.respondError(w, http.StatusBadRequest, "format operation must be confirmed")
+		return
+	}
+
+	var devicePath string
+	err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", driveID).Scan(&devicePath)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "drive not found or not enabled")
+		return
+	}
+
+	ctx := r.Context()
+	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+
+	// Check if tape is loaded
+	loaded, err := driveSvc.IsTapeLoaded(ctx)
+	if err != nil || !loaded {
+		s.respondError(w, http.StatusConflict, "no tape loaded in drive")
+		return
+	}
+
+	// Read current label before formatting (for audit/notification)
+	var oldLabel, oldUUID string
+	if labelData, err := driveSvc.ReadTapeLabel(ctx); err == nil && labelData != nil {
+		oldLabel = labelData.Label
+		oldUUID = labelData.UUID
+	}
+
+	// Perform the format/erase
+	if err := driveSvc.EraseTape(ctx); err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to format tape: "+err.Error())
+		return
+	}
+
+	// If the tape was in our database, update its status
+	if oldUUID != "" {
+		s.db.Exec("UPDATE tapes SET status = 'blank', used_bytes = 0, labeled_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE uuid = ?", oldUUID)
+	}
+	if oldLabel != "" {
+		s.db.Exec("UPDATE tapes SET status = 'blank', used_bytes = 0, labeled_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE label = ?", oldLabel)
+	}
+
+	// Publish event
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "warning",
+			Category: "tape",
+			Title:    "Tape Formatted",
+			Message:  fmt.Sprintf("Tape '%s' has been formatted/erased in drive %d", oldLabel, driveID),
+			Details: map[string]interface{}{
+				"drive_id":  driveID,
+				"old_label": oldLabel,
+				"old_uuid":  oldUUID,
+			},
+		})
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"status":    "formatted",
+		"old_label": oldLabel,
+		"old_uuid":  oldUUID,
+	})
+}
+
+// handleGetLTOTypes returns the LTO capacity mapping
+func (s *Server) handleGetLTOTypes(w http.ResponseWriter, r *http.Request) {
+	s.respondJSON(w, http.StatusOK, models.LTOCapacities)
 }
 
 // handleChangePassword allows any authenticated user to change their own password
