@@ -54,8 +54,8 @@
     lto_type: '' as string,
     capacity_bytes: 12000000000000,
     drive_id: null as number | null,
-    write_label: false,
-    auto_eject: false,
+    write_label: true,
+    auto_eject: true,
   };
 
   let formatDriveId: number | null = null;
@@ -64,9 +64,33 @@
   let labelForce = false;
   let labelAutoEject = false;
   let newLabel = '';
+  let detecting = false;
+  let detectedType = '';
 
   $: if (formData.lto_type && ltoTypes[formData.lto_type]) {
     formData.capacity_bytes = ltoTypes[formData.lto_type];
+  }
+
+  async function onDriveChange(driveId: number | null) {
+    formData.drive_id = driveId;
+    detectedType = '';
+    if (driveId) {
+      detecting = true;
+      try {
+        const result = await api.detectTape(driveId);
+        if (result.loaded && result.lto_type) {
+          detectedType = result.lto_type;
+          formData.lto_type = result.lto_type;
+          if (result.capacity_bytes) {
+            formData.capacity_bytes = result.capacity_bytes;
+          }
+        }
+      } catch {
+        // Detection failed silently - user can still select manually
+      } finally {
+        detecting = false;
+      }
+    }
   }
 
   onMount(async () => {
@@ -256,10 +280,11 @@
       lto_type: '',
       capacity_bytes: 12000000000000,
       drive_id: null,
-      write_label: false,
-      auto_eject: false,
+      write_label: true,
+      auto_eject: true,
     };
     selectedTape = null;
+    detectedType = '';
   }
 
   function formatBytes(bytes: number): string {
@@ -413,7 +438,7 @@
               <option value={type}>{type} ({formatBytes(capacity)})</option>
             {/each}
           </select>
-          <small>Capacity is automatically set based on LTO generation</small>
+          <small>Auto-detected from tape density code when a drive is selected, or choose manually</small>
         </div>
         <div class="form-group">
           <label for="capacity">Capacity</label>
@@ -423,13 +448,18 @@
         {#if drives.length > 0}
           <div class="form-group">
             <label for="drive">Drive (for labeling)</label>
-            <select id="drive" bind:value={formData.drive_id}>
+            <select id="drive" on:change={(e) => onDriveChange(Number((e.target as HTMLSelectElement).value) || null)} value={formData.drive_id}>
               <option value={null}>No drive (software-only)</option>
               {#each drives as drive}
                 <option value={drive.id}>{drive.display_name || drive.device_path}</option>
               {/each}
             </select>
           </div>
+          {#if detecting}
+            <p class="detect-status">Detecting tape type...</p>
+          {:else if detectedType}
+            <p class="detect-status detect-success">Detected: {detectedType}</p>
+          {/if}
           {#if formData.drive_id}
             <div class="form-group checkbox-group">
               <label>
@@ -702,5 +732,18 @@
 
   .checkbox-group input[type="checkbox"] {
     width: auto;
+  }
+
+  .detect-status {
+    font-size: 0.8rem;
+    color: #888;
+    margin: -0.5rem 0 0.5rem;
+    font-style: italic;
+  }
+
+  .detect-success {
+    color: #28a745;
+    font-style: normal;
+    font-weight: 500;
   }
 </style>

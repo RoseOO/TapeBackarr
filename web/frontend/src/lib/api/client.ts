@@ -168,6 +168,11 @@ export async function scanDrives() {
   return fetchApi('/drives/scan');
 }
 
+// Detect tape type from density code in a drive
+export async function detectTape(driveId: number) {
+  return fetchApi(`/drives/${driveId}/detect-tape`);
+}
+
 // Sources
 export async function getSources() {
   return fetchApi('/sources');
