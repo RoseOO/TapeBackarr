@@ -182,21 +182,21 @@ const (
 
 // BackupJob represents a scheduled backup job
 type BackupJob struct {
-	ID                int64      `json:"id" db:"id"`
-	Name              string     `json:"name" db:"name"`
-	SourceID          int64      `json:"source_id" db:"source_id"`
-	PoolID            int64      `json:"pool_id" db:"pool_id"`
-	BackupType        BackupType `json:"backup_type" db:"backup_type"`
-	ScheduleCron      string     `json:"schedule_cron" db:"schedule_cron"`
-	RetentionDays     int        `json:"retention_days" db:"retention_days"`
-	Enabled           bool       `json:"enabled" db:"enabled"`
-	EncryptionEnabled bool       `json:"encryption_enabled" db:"encryption_enabled"`
+	ID                int64           `json:"id" db:"id"`
+	Name              string          `json:"name" db:"name"`
+	SourceID          int64           `json:"source_id" db:"source_id"`
+	PoolID            int64           `json:"pool_id" db:"pool_id"`
+	BackupType        BackupType      `json:"backup_type" db:"backup_type"`
+	ScheduleCron      string          `json:"schedule_cron" db:"schedule_cron"`
+	RetentionDays     int             `json:"retention_days" db:"retention_days"`
+	Enabled           bool            `json:"enabled" db:"enabled"`
+	EncryptionEnabled bool            `json:"encryption_enabled" db:"encryption_enabled"`
 	EncryptionKeyID   *int64          `json:"encryption_key_id" db:"encryption_key_id"`
 	Compression       CompressionType `json:"compression" db:"compression"`
 	LastRunAt         *time.Time      `json:"last_run_at" db:"last_run_at"`
-	NextRunAt         *time.Time `json:"next_run_at" db:"next_run_at"`
-	CreatedAt         time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt         time.Time  `json:"updated_at" db:"updated_at"`
+	NextRunAt         *time.Time      `json:"next_run_at" db:"next_run_at"`
+	CreatedAt         time.Time       `json:"created_at" db:"created_at"`
+	UpdatedAt         time.Time       `json:"updated_at" db:"updated_at"`
 }
 
 // BackupSetStatus represents the status of a backup set
@@ -378,12 +378,12 @@ type RestoreOperation struct {
 
 // APIKey represents an API key for programmatic access
 type APIKey struct {
-	ID          int64      `json:"id" db:"id"`
-	Name        string     `json:"name" db:"name"`
-	KeyHash     string     `json:"-" db:"key_hash"`
-	KeyPrefix   string     `json:"key_prefix" db:"key_prefix"` // First 8 chars for identification
-	Role        UserRole   `json:"role" db:"role"`
-	LastUsedAt  *time.Time `json:"last_used_at" db:"last_used_at"`
-	ExpiresAt   *time.Time `json:"expires_at" db:"expires_at"`
-	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
+	ID         int64      `json:"id" db:"id"`
+	Name       string     `json:"name" db:"name"`
+	KeyHash    string     `json:"-" db:"key_hash"`
+	KeyPrefix  string     `json:"key_prefix" db:"key_prefix"` // First 8 chars for identification
+	Role       UserRole   `json:"role" db:"role"`
+	LastUsedAt *time.Time `json:"last_used_at" db:"last_used_at"`
+	ExpiresAt  *time.Time `json:"expires_at" db:"expires_at"`
+	CreatedAt  time.Time  `json:"created_at" db:"created_at"`
 }

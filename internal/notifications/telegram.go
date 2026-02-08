@@ -416,7 +416,7 @@ func (s *TelegramService) StartCommandPolling(ctx context.Context, handler Comma
 }
 
 type telegramUpdate struct {
-	UpdateID int `json:"update_id"`
+	UpdateID int                      `json:"update_id"`
 	Message  *telegramIncomingMessage `json:"message"`
 }
 

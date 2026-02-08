@@ -117,9 +117,9 @@ func TestEscapeMarkdown(t *testing.T) {
 		{"hello_world", "hello\\_world"},
 		{"*bold*", "\\*bold\\*"},
 		{"test.file", "test\\.file"},
-		{"path/to/file", "path/to/file"},   // forward slash not escaped
-		{"2024-01-15", "2024\\-01\\-15"},   // dashes in dates must be escaped
-		{"TAPE-001", "TAPE\\-001"},          // dashes in tape labels must be escaped
+		{"path/to/file", "path/to/file"}, // forward slash not escaped
+		{"2024-01-15", "2024\\-01\\-15"}, // dashes in dates must be escaped
+		{"TAPE-001", "TAPE\\-001"},       // dashes in tape labels must be escaped
 	}
 
 	for _, tt := range tests {

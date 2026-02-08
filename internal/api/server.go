@@ -704,15 +704,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	var stats struct {
-		TotalTapes     int    `json:"total_tapes"`
-		ActiveTapes    int    `json:"active_tapes"`
-		TotalJobs      int    `json:"total_jobs"`
-		RunningJobs    int    `json:"running_jobs"`
-		RecentBackups  int    `json:"recent_backups"`
-		DriveStatus    string `json:"drive_status"`
-		TotalDataBytes int64  `json:"total_data_bytes"`
-		LoadedTape     string `json:"loaded_tape"`
-		LoadedTapeUUID string `json:"loaded_tape_uuid"`
+		TotalTapes            int    `json:"total_tapes"`
+		ActiveTapes           int    `json:"active_tapes"`
+		TotalJobs             int    `json:"total_jobs"`
+		RunningJobs           int    `json:"running_jobs"`
+		RecentBackups         int    `json:"recent_backups"`
+		DriveStatus           string `json:"drive_status"`
+		TotalDataBytes        int64  `json:"total_data_bytes"`
+		LoadedTape            string `json:"loaded_tape"`
+		LoadedTapeUUID        string `json:"loaded_tape_uuid"`
 		LoadedTapePool        string `json:"loaded_tape_pool"`
 		LoadedTapeEncrypted   bool   `json:"loaded_tape_encrypted"`
 		LoadedTapeEncKeyFP    string `json:"loaded_tape_enc_key_fingerprint"`
@@ -5050,9 +5050,9 @@ func (s *Server) handleBatchLabel(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		Prefix   string `json:"prefix"`       // e.g., "NAS-OFF-"
-		StartNum int    `json:"start_number"`  // e.g., 1
-		Count    int    `json:"count"`         // How many tapes to label
-		Digits   int    `json:"digits"`        // e.g., 3 for 001, 002
+		StartNum int    `json:"start_number"` // e.g., 1
+		Count    int    `json:"count"`        // How many tapes to label
+		Digits   int    `json:"digits"`       // e.g., 3 for 001, 002
 		PoolID   *int64 `json:"pool_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
