@@ -398,6 +398,18 @@ export async function formatTapeInDrive(driveId: number, confirm: boolean) {
   });
 }
 
+// Database Backup to Tape
+export async function getDatabaseBackups() {
+  return fetchApi('/database-backup');
+}
+
+export async function backupDatabaseToTape(tapeId: number) {
+  return fetchApi('/database-backup/backup', {
+    method: 'POST',
+    body: JSON.stringify({ tape_id: tapeId }),
+  });
+}
+
 // Generic API client for pages that need direct endpoint access
 export const api = {
   get: (endpoint: string) => fetchApi(endpoint),

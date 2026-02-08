@@ -867,16 +867,51 @@ func (s *Server) handleLabelTape(w http.ResponseWriter, r *http.Request) {
 	if devicePath != "" {
 		driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
 
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "info",
+				Category: "tape",
+				Title:    "Label Operation Started",
+				Message:  fmt.Sprintf("Writing label '%s' to tape on drive %s", req.Label, devicePath),
+				Details:  map[string]interface{}{"label": req.Label, "device": devicePath, "uuid": tapeUUID},
+			})
+		}
+
 		// Verify tape is loaded
 		loaded, err := driveSvc.IsTapeLoaded(ctx)
 		if err != nil || !loaded {
+			if s.eventBus != nil {
+				s.eventBus.Publish(SystemEvent{
+					Type:     "error",
+					Category: "tape",
+					Title:    "Label Operation Failed",
+					Message:  "No tape loaded in drive " + devicePath,
+				})
+			}
 			s.respondError(w, http.StatusConflict, "no tape loaded in drive")
 			return
+		}
+
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "info",
+				Category: "tape",
+				Title:    "Tape Detected",
+				Message:  fmt.Sprintf("Tape is loaded in drive %s, proceeding with label write", devicePath),
+			})
 		}
 
 		// Check if tape already has data/label before writing (unless force=true)
 		if !req.Force {
 			if existingLabel, err := driveSvc.ReadTapeLabel(ctx); err == nil && existingLabel != nil && existingLabel.Label != "" {
+				if s.eventBus != nil {
+					s.eventBus.Publish(SystemEvent{
+						Type:     "warning",
+						Category: "tape",
+						Title:    "Label Conflict",
+						Message:  fmt.Sprintf("Tape already has label '%s' (UUID: %s). Use force to overwrite.", existingLabel.Label, existingLabel.UUID),
+					})
+				}
 				s.respondError(w, http.StatusConflict, fmt.Sprintf("tape already has a label: '%s' (UUID: %s). Use force=true or format the tape first.", existingLabel.Label, existingLabel.UUID))
 				return
 			}
@@ -884,24 +919,85 @@ func (s *Server) handleLabelTape(w http.ResponseWriter, r *http.Request) {
 
 		// Write label to tape with UUID and pool info
 		if err := driveSvc.WriteTapeLabel(ctx, req.Label, tapeUUID, poolName); err != nil {
+			if s.eventBus != nil {
+				s.eventBus.Publish(SystemEvent{
+					Type:     "warning",
+					Category: "tape",
+					Title:    "Physical Label Write Failed",
+					Message:  fmt.Sprintf("Could not write label to tape: %s. Continuing with software tracking.", err.Error()),
+				})
+			}
 			s.logger.Warn("Failed to write label to physical tape, continuing with software tracking", map[string]interface{}{
 				"error": err.Error(),
+			})
+		} else if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "success",
+				Category: "tape",
+				Title:    "Label Written",
+				Message:  fmt.Sprintf("Label '%s' written to physical tape on %s", req.Label, devicePath),
 			})
 		}
 
 		// Auto-eject after labeling if requested
 		if req.AutoEject {
+			if s.eventBus != nil {
+				s.eventBus.Publish(SystemEvent{
+					Type:     "info",
+					Category: "tape",
+					Title:    "Auto-Eject",
+					Message:  fmt.Sprintf("Ejecting tape from drive %s after labeling", devicePath),
+				})
+			}
 			if err := driveSvc.Eject(ctx); err != nil {
+				if s.eventBus != nil {
+					s.eventBus.Publish(SystemEvent{
+						Type:     "warning",
+						Category: "tape",
+						Title:    "Auto-Eject Failed",
+						Message:  fmt.Sprintf("Failed to auto-eject tape: %s", err.Error()),
+					})
+				}
 				s.logger.Warn("Failed to auto-eject tape after labeling", map[string]interface{}{
 					"error": err.Error(),
+				})
+			} else if s.eventBus != nil {
+				s.eventBus.Publish(SystemEvent{
+					Type:     "success",
+					Category: "tape",
+					Title:    "Tape Ejected",
+					Message:  fmt.Sprintf("Tape ejected from drive %s", devicePath),
 				})
 			}
 		}
 	} else {
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "info",
+				Category: "tape",
+				Title:    "Label Operation Started",
+				Message:  fmt.Sprintf("Writing label '%s' to tape (default drive)", req.Label),
+			})
+		}
 		// Use default tape service
 		if err := s.tapeService.WriteTapeLabel(ctx, req.Label, tapeUUID, poolName); err != nil {
+			if s.eventBus != nil {
+				s.eventBus.Publish(SystemEvent{
+					Type:     "warning",
+					Category: "tape",
+					Title:    "Physical Label Write Failed",
+					Message:  fmt.Sprintf("Could not write label to tape: %s. Continuing with software tracking.", err.Error()),
+				})
+			}
 			s.logger.Warn("Failed to write label to physical tape, continuing with software tracking", map[string]interface{}{
 				"error": err.Error(),
+			})
+		} else if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "success",
+				Category: "tape",
+				Title:    "Label Written",
+				Message:  fmt.Sprintf("Label '%s' written to physical tape", req.Label),
 			})
 		}
 	}
@@ -911,6 +1007,16 @@ func (s *Server) handleLabelTape(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "success",
+			Category: "tape",
+			Title:    "Tape Labeled",
+			Message:  fmt.Sprintf("Tape labeled as '%s' (UUID: %s)", req.Label, tapeUUID),
+			Details:  map[string]interface{}{"label": req.Label, "uuid": tapeUUID, "pool": poolName},
+		})
 	}
 
 	s.respondJSON(w, http.StatusOK, map[string]string{"status": "labeled"})
@@ -1265,21 +1371,69 @@ func (s *Server) handleDetectTape(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleEjectTape(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "tape",
+			Title:    "Eject Started",
+			Message:  "Ejecting tape from drive...",
+		})
+	}
 	if err := s.tapeService.Eject(ctx); err != nil {
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "error",
+				Category: "tape",
+				Title:    "Eject Failed",
+				Message:  fmt.Sprintf("Failed to eject tape: %s", err.Error()),
+			})
+		}
 		s.respondError(w, http.StatusInternalServerError, "failed to eject tape: "+err.Error())
 		return
 	}
 
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "success",
+			Category: "tape",
+			Title:    "Tape Ejected",
+			Message:  "Tape has been ejected from the drive",
+		})
+	}
 	s.respondJSON(w, http.StatusOK, map[string]string{"status": "ejected"})
 }
 
 func (s *Server) handleRewindTape(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "tape",
+			Title:    "Rewind Started",
+			Message:  "Rewinding tape to beginning...",
+		})
+	}
 	if err := s.tapeService.Rewind(ctx); err != nil {
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "error",
+				Category: "tape",
+				Title:    "Rewind Failed",
+				Message:  fmt.Sprintf("Failed to rewind tape: %s", err.Error()),
+			})
+		}
 		s.respondError(w, http.StatusInternalServerError, "failed to rewind tape: "+err.Error())
 		return
 	}
 
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "success",
+			Category: "tape",
+			Title:    "Tape Rewound",
+			Message:  "Tape has been rewound to the beginning",
+		})
+	}
 	s.respondJSON(w, http.StatusOK, map[string]string{"status": "rewound"})
 }
 
@@ -2205,6 +2359,15 @@ func (s *Server) handleBackupDatabase(w http.ResponseWriter, r *http.Request) {
 func (s *Server) runDatabaseBackup(backupID, tapeID int64, devicePath string) {
 	ctx := context.Background()
 
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "system",
+			Title:    "Database Backup Started",
+			Message:  fmt.Sprintf("Starting database backup (id=%d) to tape (id=%d) on %s", backupID, tapeID, devicePath),
+		})
+	}
+
 	// Get database path from config
 	var dbPath string
 	err := s.db.QueryRow("SELECT path FROM pragma_database_list WHERE name='main'").Scan(&dbPath)
@@ -2220,9 +2383,26 @@ func (s *Server) runDatabaseBackup(backupID, tapeID int64, devicePath string) {
 
 	backupPath := tempDir + "/tapebackarr.db"
 
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "system",
+			Title:    "Database Copy",
+			Message:  fmt.Sprintf("Creating database copy using VACUUM INTO from %s", dbPath),
+		})
+	}
+
 	// Use SQLite backup command
 	_, err = s.db.Exec("VACUUM INTO ?", backupPath)
 	if err != nil {
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "error",
+				Category: "system",
+				Title:    "Database Backup Failed",
+				Message:  fmt.Sprintf("Failed to create database copy: %s", err.Error()),
+			})
+		}
 		s.db.Exec("UPDATE database_backups SET status = 'failed', error_message = ? WHERE id = ?", err.Error(), backupID)
 		return
 	}
@@ -2230,6 +2410,14 @@ func (s *Server) runDatabaseBackup(backupID, tapeID int64, devicePath string) {
 	// Get file info
 	info, err := os.Stat(backupPath)
 	if err != nil {
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "error",
+				Category: "system",
+				Title:    "Database Backup Failed",
+				Message:  fmt.Sprintf("Failed to stat backup file: %s", err.Error()),
+			})
+		}
 		s.db.Exec("UPDATE database_backups SET status = 'failed', error_message = ? WHERE id = ?", err.Error(), backupID)
 		return
 	}
@@ -2237,21 +2425,70 @@ func (s *Server) runDatabaseBackup(backupID, tapeID int64, devicePath string) {
 	// Calculate checksum
 	checksum, _ := calculateFileChecksum(backupPath)
 
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "system",
+			Title:    "Database Copy Complete",
+			Message:  fmt.Sprintf("Database copy created: %d bytes, checksum: %s", info.Size(), checksum),
+		})
+	}
+
 	// Position tape and write
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "tape",
+			Title:    "Rewinding Tape",
+			Message:  "Rewinding tape for database backup write...",
+		})
+	}
 	if err := s.tapeService.Rewind(ctx); err != nil {
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "error",
+				Category: "tape",
+				Title:    "Database Backup Failed",
+				Message:  fmt.Sprintf("Failed to rewind tape: %s", err.Error()),
+			})
+		}
 		s.db.Exec("UPDATE database_backups SET status = 'failed', error_message = ? WHERE id = ?", "failed to rewind: "+err.Error(), backupID)
 		return
 	}
 
 	// Skip past tape label to first file position
 	// Database backups are written after the label block (file 0)
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "tape",
+			Title:    "Seeking Tape",
+			Message:  "Seeking to file position 1 (after label block)...",
+		})
+	}
 	s.tapeService.SeekToFileNumber(ctx, 1)
 
 	// Stream database backup to tape using tar
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "tape",
+			Title:    "Writing to Tape",
+			Message:  fmt.Sprintf("Streaming database backup to %s using tar...", devicePath),
+		})
+	}
 	tarArgs := []string{"-c", "-f", devicePath, "-C", tempDir, "tapebackarr.db"}
 	cmd := exec.CommandContext(ctx, "tar", tarArgs...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "error",
+				Category: "tape",
+				Title:    "Database Backup Failed",
+				Message:  fmt.Sprintf("tar command failed: %s", string(output)),
+			})
+		}
 		s.db.Exec("UPDATE database_backups SET status = 'failed', error_message = ? WHERE id = ?", "tar failed: "+string(output), backupID)
 		return
 	}
@@ -2271,6 +2508,16 @@ func (s *Server) runDatabaseBackup(backupID, tapeID int64, devicePath string) {
 		INSERT INTO audit_logs (action, resource_type, resource_id, details)
 		VALUES (?, ?, ?, ?)
 	`, "database_backup", "database_backup", backupID, "Database backed up to tape")
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "success",
+			Category: "system",
+			Title:    "Database Backup Complete",
+			Message:  fmt.Sprintf("Database backup (id=%d) completed successfully: %d bytes written to tape", backupID, info.Size()),
+			Details:  map[string]interface{}{"backup_id": backupID, "file_size": info.Size(), "checksum": checksum},
+		})
+	}
 }
 
 // handleListDatabaseBackups returns list of database backups
@@ -2613,9 +2860,27 @@ func (s *Server) handleFormatTape(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
 
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "tape",
+			Title:    "Format Operation Started",
+			Message:  fmt.Sprintf("Formatting tape (id=%d) on drive %s — all data will be erased", id, devicePath),
+			Details:  map[string]interface{}{"tape_id": id, "device": devicePath},
+		})
+	}
+
 	// Verify tape is loaded
 	loaded, err := driveSvc.IsTapeLoaded(ctx)
 	if err != nil || !loaded {
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "error",
+				Category: "tape",
+				Title:    "Format Failed",
+				Message:  "No tape loaded in drive " + devicePath,
+			})
+		}
 		s.respondError(w, http.StatusConflict, "no tape loaded in drive")
 		return
 	}
@@ -2623,12 +2888,37 @@ func (s *Server) handleFormatTape(w http.ResponseWriter, r *http.Request) {
 	// Check write protection
 	driveStatus, err := driveSvc.GetStatus(ctx)
 	if err == nil && driveStatus.WriteProtect {
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "error",
+				Category: "tape",
+				Title:    "Format Failed",
+				Message:  "Tape is write-protected — cannot format",
+			})
+		}
 		s.respondError(w, http.StatusConflict, "tape is write-protected")
 		return
 	}
 
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "tape",
+			Title:    "Erasing Tape",
+			Message:  fmt.Sprintf("Running erase command on drive %s...", devicePath),
+		})
+	}
+
 	// Erase the tape
 	if err := driveSvc.EraseTape(ctx); err != nil {
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "error",
+				Category: "tape",
+				Title:    "Format Failed",
+				Message:  fmt.Sprintf("Erase command failed: %s", err.Error()),
+			})
+		}
 		s.respondError(w, http.StatusInternalServerError, "failed to format tape: "+err.Error())
 		return
 	}
@@ -2642,6 +2932,16 @@ func (s *Server) handleFormatTape(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "success",
+			Category: "tape",
+			Title:    "Tape Formatted",
+			Message:  fmt.Sprintf("Tape (id=%d) has been formatted and reset to blank state on drive %s", id, devicePath),
+			Details:  map[string]interface{}{"tape_id": id, "device": devicePath},
+		})
 	}
 
 	s.respondJSON(w, http.StatusOK, map[string]string{"status": "formatted"})
@@ -2857,9 +3157,27 @@ func (s *Server) handleFormatTapeInDrive(w http.ResponseWriter, r *http.Request)
 	ctx := r.Context()
 	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
 
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "tape",
+			Title:    "Format Started",
+			Message:  fmt.Sprintf("Formatting tape in drive %s — checking tape status...", devicePath),
+			Details:  map[string]interface{}{"drive_id": driveID, "device": devicePath},
+		})
+	}
+
 	// Check if tape is loaded
 	loaded, err := driveSvc.IsTapeLoaded(ctx)
 	if err != nil || !loaded {
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "error",
+				Category: "tape",
+				Title:    "Format Failed",
+				Message:  "No tape loaded in drive " + devicePath,
+			})
+		}
 		s.respondError(w, http.StatusConflict, "no tape loaded in drive")
 		return
 	}
@@ -2869,10 +3187,42 @@ func (s *Server) handleFormatTapeInDrive(w http.ResponseWriter, r *http.Request)
 	if labelData, err := driveSvc.ReadTapeLabel(ctx); err == nil && labelData != nil {
 		oldLabel = labelData.Label
 		oldUUID = labelData.UUID
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "info",
+				Category: "tape",
+				Title:    "Tape Identified",
+				Message:  fmt.Sprintf("Found tape '%s' (UUID: %s) — proceeding with erase", oldLabel, oldUUID),
+			})
+		}
+	} else if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "tape",
+			Title:    "Tape Label Unreadable",
+			Message:  "Could not read existing label — proceeding with erase",
+		})
+	}
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "tape",
+			Title:    "Erasing Tape",
+			Message:  fmt.Sprintf("Running erase command on drive %s...", devicePath),
+		})
 	}
 
 	// Perform the format/erase
 	if err := driveSvc.EraseTape(ctx); err != nil {
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "error",
+				Category: "tape",
+				Title:    "Format Failed",
+				Message:  fmt.Sprintf("Erase command failed on drive %s: %s", devicePath, err.Error()),
+			})
+		}
 		s.respondError(w, http.StatusInternalServerError, "failed to format tape: "+err.Error())
 		return
 	}
@@ -2892,12 +3242,13 @@ func (s *Server) handleFormatTapeInDrive(w http.ResponseWriter, r *http.Request)
 	// Publish event
 	if s.eventBus != nil {
 		s.eventBus.Publish(SystemEvent{
-			Type:     "warning",
+			Type:     "success",
 			Category: "tape",
 			Title:    "Tape Formatted",
-			Message:  fmt.Sprintf("Tape '%s' has been formatted/erased in drive %d", oldLabel, driveID),
+			Message:  fmt.Sprintf("Tape '%s' has been formatted/erased in drive %s", oldLabel, devicePath),
 			Details: map[string]interface{}{
 				"drive_id":  driveID,
+				"device":    devicePath,
 				"old_label": oldLabel,
 				"old_uuid":  oldUUID,
 			},

@@ -9,9 +9,17 @@
   let successMsg = '';
   let activeTab = 'server';
 
+  // Database backup state
+  let dbBackups: any[] = [];
+  let dbBackupLoading = false;
+  let dbBackupTapeId: number | null = null;
+  let dbBackupTapes: any[] = [];
+  let dbBackupRunning = false;
+
   const tabs = [
     { id: 'server', label: 'Server', icon: '🖥️' },
     { id: 'tape', label: 'Tape & Drives', icon: '💾' },
+    { id: 'dbbackup', label: 'Database Backup', icon: '🗄️' },
     { id: 'logging', label: 'Logging', icon: '📋' },
     { id: 'auth', label: 'Authentication', icon: '🔐' },
     { id: 'notifications', label: 'Notifications', icon: '🔔' },
@@ -23,6 +31,8 @@
   });
 
   async function loadConfig() {
+    loading = true;
+    error = '';
     try {
       config = await api.getSettings();
     } catch (e) {
@@ -35,6 +45,48 @@
   function showSuccess(msg: string) {
     successMsg = msg;
     setTimeout(() => successMsg = '', 4000);
+  }
+
+  async function loadDbBackups() {
+    dbBackupLoading = true;
+    try {
+      const [backups, tapes] = await Promise.all([
+        api.getDatabaseBackups(),
+        api.getTapes(),
+      ]);
+      dbBackups = Array.isArray(backups) ? backups : [];
+      dbBackupTapes = Array.isArray(tapes) ? tapes : [];
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to load database backups';
+    } finally {
+      dbBackupLoading = false;
+    }
+  }
+
+  async function handleDbBackup() {
+    if (!dbBackupTapeId) {
+      error = 'Please select a tape for the database backup';
+      return;
+    }
+    dbBackupRunning = true;
+    error = '';
+    try {
+      await api.backupDatabaseToTape(dbBackupTapeId);
+      showSuccess('Database backup started — check the system console for progress');
+      await loadDbBackups();
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to start database backup';
+    } finally {
+      dbBackupRunning = false;
+    }
+  }
+
+  function formatBytes(bytes: number): string {
+    if (!bytes || bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   }
 
   async function handleSave() {
@@ -175,6 +227,76 @@
             {/each}
           {/if}
           <button class="btn btn-secondary" on:click={addDrive}>+ Add Drive</button>
+        </div>
+
+      {:else if activeTab === 'dbbackup'}
+        <div class="settings-section">
+          <h2>Database Backup to Tape</h2>
+          <p class="section-desc">Back up the TapeBackarr database to tape for disaster recovery. The database contains all tape catalog entries, job configurations, and system settings.</p>
+
+          <div class="db-backup-action">
+            <h3>Run Database Backup</h3>
+            {#if dbBackupTapes.length === 0 && !dbBackupLoading}
+              <button class="btn btn-secondary" on:click={loadDbBackups}>Load Tapes</button>
+            {:else}
+              <div class="form-row">
+                <div class="form-group">
+                  <label for="db-tape">Target Tape</label>
+                  <select id="db-tape" bind:value={dbBackupTapeId}>
+                    <option value={null} disabled>Select a tape...</option>
+                    {#each dbBackupTapes as tape}
+                      <option value={tape.id}>{tape.label} ({tape.status})</option>
+                    {/each}
+                  </select>
+                  <small>The tape must be loaded in a drive. The backup will be written to file position 1.</small>
+                </div>
+                <div class="form-group" style="align-self: end;">
+                  <button class="btn btn-primary" on:click={handleDbBackup} disabled={dbBackupRunning || !dbBackupTapeId}>
+                    {dbBackupRunning ? 'Backing up...' : '🗄️ Backup Database to Tape'}
+                  </button>
+                </div>
+              </div>
+            {/if}
+          </div>
+
+          <h3>Backup History</h3>
+          {#if dbBackupLoading}
+            <p>Loading...</p>
+          {:else if dbBackups.length === 0}
+            <p class="no-data-text">No database backups yet. Run a backup to protect your catalog data.</p>
+            {#if dbBackupTapes.length === 0}
+              <button class="btn btn-secondary" on:click={loadDbBackups}>Load Backup History</button>
+            {/if}
+          {:else}
+            <table>
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Tape</th>
+                  <th>Time</th>
+                  <th>Size</th>
+                  <th>Checksum</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each dbBackups as backup}
+                  <tr>
+                    <td>{backup.id}</td>
+                    <td>{backup.tape_id}</td>
+                    <td>{backup.backup_time ? new Date(backup.backup_time).toLocaleString() : '-'}</td>
+                    <td>{formatBytes(backup.file_size || 0)}</td>
+                    <td class="checksum-cell">{backup.checksum ? backup.checksum.substring(0, 12) + '...' : '-'}</td>
+                    <td>
+                      <span class="badge {backup.status === 'completed' ? 'badge-success' : backup.status === 'failed' ? 'badge-danger' : 'badge-warning'}">
+                        {backup.status}
+                      </span>
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          {/if}
         </div>
 
       {:else if activeTab === 'logging'}
@@ -503,5 +625,27 @@
     color: #888;
     font-size: 0.75rem;
     margin-top: 0.25rem;
+  }
+
+  .section-desc {
+    color: #666;
+    font-size: 0.875rem;
+    margin-bottom: 1.5rem;
+  }
+
+  .db-backup-action {
+    margin-bottom: 2rem;
+  }
+
+  .no-data-text {
+    color: #888;
+    font-style: italic;
+    margin-bottom: 1rem;
+  }
+
+  .checksum-cell {
+    font-family: monospace;
+    font-size: 0.75rem;
+    color: #888;
   }
 </style>
