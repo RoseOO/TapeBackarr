@@ -22,7 +22,7 @@ TapeBackarr is a disk-light, tape-first backup system designed to run on Debian 
 
 ### Tape Management
 - Tape labeling and pool assignment (DAILY, WEEKLY, MONTHLY, ARCHIVE)
-- Status tracking (blank, active, full, retired, offsite)
+- Status tracking (blank, active, full, expired, retired, exported)
 - Capacity and usage monitoring
 - Write count tracking
 - Offsite location tracking
@@ -78,7 +78,7 @@ TapeBackarr is a disk-light, tape-first backup system designed to run on Debian 
 - **OS**: Debian 12+ or Ubuntu 22.04+ (systemd-native)
 - **Hardware**: LTO tape drive (/dev/st0, /dev/nst0)
 - **Software**: 
-  - Go 1.21+
+  - Go 1.24+
   - Node.js 18+ (for frontend build)
   - mt-st package
   - tar
@@ -306,23 +306,80 @@ Default credentials:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/v1/auth/login` | POST | Authenticate user |
+| `/api/v1/auth/change-password` | POST | Change password |
 | `/api/v1/dashboard` | GET | Dashboard statistics |
 | `/api/v1/tapes` | GET/POST | List/create tapes |
 | `/api/v1/tapes/{id}` | GET/PUT/DELETE | Manage tape |
+| `/api/v1/tapes/{id}/label` | POST | Write tape label |
+| `/api/v1/tapes/{id}/format` | POST | Format tape |
+| `/api/v1/tapes/{id}/export` | POST | Export tape |
+| `/api/v1/tapes/{id}/import` | POST | Import tape |
+| `/api/v1/tapes/{id}/read-label` | GET | Read tape label |
+| `/api/v1/tapes/lto-types` | GET | List LTO types |
 | `/api/v1/pools` | GET/POST | List/create pools |
+| `/api/v1/pools/{id}` | GET/PUT/DELETE | Manage pool |
+| `/api/v1/drives` | GET/POST | List/create drives |
+| `/api/v1/drives/scan` | GET | Scan for drives |
+| `/api/v1/drives/{id}` | PUT/DELETE | Manage drive |
+| `/api/v1/drives/{id}/status` | GET | Drive status |
+| `/api/v1/drives/{id}/select` | POST | Select active drive |
+| `/api/v1/drives/{id}/eject` | POST | Eject tape |
+| `/api/v1/drives/{id}/rewind` | POST | Rewind tape |
+| `/api/v1/drives/{id}/inspect-tape` | GET | Inspect tape contents |
+| `/api/v1/drives/{id}/detect-tape` | GET | Detect tape in drive |
+| `/api/v1/drives/{id}/scan-for-db-backup` | GET | Scan tape for database backup |
+| `/api/v1/drives/{id}/batch-label` | POST | Batch label tapes |
 | `/api/v1/sources` | GET/POST | List/create sources |
+| `/api/v1/sources/{id}` | GET/PUT/DELETE | Manage source |
 | `/api/v1/jobs` | GET/POST | List/create jobs |
+| `/api/v1/jobs/active` | GET | List active jobs |
+| `/api/v1/jobs/{id}` | GET/PUT/DELETE | Manage job |
 | `/api/v1/jobs/{id}/run` | POST | Run backup job |
+| `/api/v1/jobs/{id}/cancel` | POST | Cancel running job |
+| `/api/v1/jobs/{id}/pause` | POST | Pause running job |
+| `/api/v1/jobs/{id}/resume` | POST | Resume paused job |
+| `/api/v1/jobs/{id}/recommend-tape` | GET | Get tape recommendation |
 | `/api/v1/backup-sets` | GET | List backup sets |
+| `/api/v1/backup-sets/{id}` | GET | Get backup set details |
+| `/api/v1/backup-sets/{id}/files` | GET | List backup set files |
 | `/api/v1/catalog/search` | GET | Search catalog |
+| `/api/v1/catalog/browse/{backupSetId}` | GET | Browse catalog |
 | `/api/v1/restore/plan` | POST | Plan restore |
 | `/api/v1/restore/run` | POST | Execute restore |
 | `/api/v1/logs/audit` | GET | Audit logs |
+| `/api/v1/logs/export` | GET | Export logs |
+| `/api/v1/users` | GET/POST | List/create users (admin) |
+| `/api/v1/users/{id}` | DELETE | Delete user (admin) |
+| `/api/v1/settings` | GET/PUT | Get/update settings |
+| `/api/v1/settings/telegram/test` | POST | Test Telegram notification |
+| `/api/v1/settings/restart` | POST | Restart service |
+| `/api/v1/encryption-keys` | GET/POST | List/create encryption keys |
+| `/api/v1/encryption-keys/keysheet` | GET | Get encryption key sheet |
+| `/api/v1/encryption-keys/keysheet/text` | GET | Get key sheet as text |
+| `/api/v1/encryption-keys/{id}` | DELETE | Delete encryption key |
+| `/api/v1/api-keys` | GET/POST | List/create API keys (admin) |
+| `/api/v1/api-keys/{id}` | DELETE | Delete API key (admin) |
+| `/api/v1/database-backup` | GET | List database backups |
+| `/api/v1/database-backup/backup` | POST | Backup database to tape |
+| `/api/v1/database-backup/restore` | POST | Restore database from tape |
+| `/api/v1/events/stream` | GET | Server-sent events stream |
+| `/api/v1/events` | GET | Get notifications |
+| `/api/v1/docs` | GET | List documentation |
+| `/api/v1/docs/{id}` | GET | Get document content |
+| `/api/v1/health` | GET | Health check |
 | `/api/v1/proxmox/nodes` | GET | List Proxmox nodes |
 | `/api/v1/proxmox/guests` | GET | List VMs and LXCs |
+| `/api/v1/proxmox/guests/{vmid}` | GET | Get guest details |
+| `/api/v1/proxmox/guests/{vmid}/config` | GET | Get guest configuration |
+| `/api/v1/proxmox/cluster/status` | GET | Cluster status |
 | `/api/v1/proxmox/backups` | GET/POST | List/create Proxmox backups |
+| `/api/v1/proxmox/backups/{id}` | GET | Get Proxmox backup details |
+| `/api/v1/proxmox/backups/all` | POST | Backup all guests |
 | `/api/v1/proxmox/restores` | GET/POST | List/create Proxmox restores |
+| `/api/v1/proxmox/restores/plan` | POST | Plan Proxmox restore |
 | `/api/v1/proxmox/jobs` | GET/POST | List/create Proxmox backup jobs |
+| `/api/v1/proxmox/jobs/{id}` | GET/PUT/DELETE | Manage Proxmox job |
+| `/api/v1/proxmox/jobs/{id}/run` | POST | Run Proxmox job manually |
 
 ### CLI Commands Used Internally
 
@@ -354,18 +411,34 @@ tar -xv -b 128 -f /dev/nst0 -C /restore/path
 ### Main Tables
 - **users**: User accounts with roles
 - **tape_pools**: Tape groupings (DAILY, WEEKLY, etc.)
-- **tapes**: Individual tape media
+- **tapes**: Individual tape media with UUID tracking
+- **tape_drives**: Physical tape drive tracking
 - **backup_sources**: Configured backup paths
 - **backup_jobs**: Scheduled backup jobs
 - **backup_sets**: Individual backup runs
 - **catalog_entries**: File-level catalog
+- **job_executions**: Job execution tracking with resume support
+- **snapshots**: Filesystem snapshots for incremental backups
 - **audit_logs**: Operation audit trail
+- **encryption_keys**: Encryption key management
+- **api_keys**: API key authentication
+- **database_backups**: Database backup tracking
+- **restore_operations**: Restore operation tracking
+- **tape_spanning_sets**: Multi-tape backup sets
+- **tape_spanning_members**: Individual tapes in spanning sets
+- **tape_change_requests**: Pending tape change requests
+- **proxmox_nodes**: Proxmox VE node tracking
+- **proxmox_guests**: VM and LXC container tracking
+- **proxmox_backups**: Proxmox backup records
+- **proxmox_restores**: Proxmox restore records
+- **proxmox_backup_jobs**: Scheduled Proxmox backup jobs
+- **proxmox_job_executions**: Proxmox job execution tracking
 
 ### Tape Status Flow
 ```
-blank → active → full → retired
+blank → active → full → expired → retired
                   ↓
-               offsite
+               exported
 ```
 
 ## Incremental Backup Algorithm

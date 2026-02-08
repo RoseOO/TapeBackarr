@@ -23,7 +23,7 @@ The fastest way to install TapeBackarr on a Debian-based system:
 git clone https://github.com/RoseOO/TapeBackarr.git
 cd TapeBackarr
 
-# Build (requires Go 1.21+ and Node.js 18+)
+# Build (requires Go 1.24+ and Node.js 18+)
 make build
 
 # Run installer
@@ -44,7 +44,7 @@ The installer will:
 ### Prerequisites
 
 - Debian 12+ or Ubuntu 22.04+
-- Go 1.21+
+- Go 1.24+
 - Node.js 18+
 - Root access
 
