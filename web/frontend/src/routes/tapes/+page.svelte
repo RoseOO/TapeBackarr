@@ -52,11 +52,14 @@
     capacity_bytes: 12000000000000,
     drive_id: null as number | null,
     write_label: false,
+    auto_eject: false,
   };
 
   let formatDriveId: number | null = null;
   let exportLocation = '';
   let labelDriveId: number | null = null;
+  let labelForce = false;
+  let labelAutoEject = false;
   let newLabel = '';
 
   onMount(async () => {
@@ -100,6 +103,8 @@
         ...formData,
         pool_id: formData.pool_id ?? undefined,
         drive_id: formData.drive_id ?? undefined,
+        write_label: formData.write_label,
+        auto_eject: formData.auto_eject,
       } as any);
       showCreateModal = false;
       resetForm();
@@ -191,7 +196,7 @@
     if (!selectedTape || !newLabel) return;
     try {
       error = '';
-      await api.labelTape(selectedTape.id, newLabel);
+      await api.labelTape(selectedTape.id, newLabel, labelDriveId ?? undefined, labelForce, labelAutoEject);
       showLabelModal = false;
       showSuccess('Tape labeled');
       await loadData();
@@ -229,6 +234,8 @@
     selectedTape = tape;
     newLabel = tape.label;
     labelDriveId = drives.length > 0 ? drives[0].id : null;
+    labelForce = false;
+    labelAutoEject = false;
     showLabelModal = true;
   }
 
@@ -240,6 +247,7 @@
       capacity_bytes: 12000000000000,
       drive_id: null,
       write_label: false,
+      auto_eject: false,
     };
     selectedTape = null;
   }
@@ -408,6 +416,15 @@
               </label>
               <small>Writes label data to the tape in the selected drive</small>
             </div>
+            {#if formData.write_label}
+              <div class="form-group checkbox-group">
+                <label>
+                  <input type="checkbox" bind:checked={formData.auto_eject} />
+                  Auto-eject tape after labeling
+                </label>
+                <small>Automatically ejects the tape from the drive after writing the label</small>
+              </div>
+            {/if}
           {/if}
         {/if}
         <div class="modal-actions">
@@ -500,6 +517,30 @@
         <div class="form-group">
           <label for="new-label">Label</label>
           <input type="text" id="new-label" bind:value={newLabel} required />
+        </div>
+        {#if drives.length > 0}
+          <div class="form-group">
+            <label for="label-drive">Drive</label>
+            <select id="label-drive" bind:value={labelDriveId}>
+              {#each drives as drive}
+                <option value={drive.id}>{drive.display_name || drive.device_path}</option>
+              {/each}
+            </select>
+            <small>The tape must be loaded in the selected drive</small>
+          </div>
+        {/if}
+        <div class="form-group checkbox-group">
+          <label>
+            <input type="checkbox" bind:checked={labelForce} />
+            Force overwrite existing label
+          </label>
+          <small>If the tape already has a label, overwrite it without formatting</small>
+        </div>
+        <div class="form-group checkbox-group">
+          <label>
+            <input type="checkbox" bind:checked={labelAutoEject} />
+            Auto-eject tape after labeling
+          </label>
         </div>
         <div class="modal-actions">
           <button type="button" class="btn btn-secondary" on:click={() => showLabelModal = false}>Cancel</button>
