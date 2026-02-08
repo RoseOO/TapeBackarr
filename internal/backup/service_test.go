@@ -235,7 +235,7 @@ func TestScanSourceContextCancellation(t *testing.T) {
 
 	// Create some files
 	for i := 0; i < 5; i++ {
-		dir := filepath.Join(tmpDir, filepath.Join("dir", string(rune('a'+i))))
+		dir := filepath.Join(tmpDir, "dir", string(rune('a'+i)))
 		os.MkdirAll(dir, 0755)
 		os.WriteFile(filepath.Join(dir, "file.txt"), []byte("data"), 0644)
 	}
