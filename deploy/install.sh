@@ -91,6 +91,27 @@ else
     echo "Then: sudo cp tapebackarr $INSTALL_DIR/"
 fi
 
+# Copy frontend static files
+FRONTEND_BUILD=""
+if [ -d "$PROJECT_ROOT/web/frontend/build" ]; then
+    FRONTEND_BUILD="$PROJECT_ROOT/web/frontend/build"
+elif [ -d "./web/frontend/build" ]; then
+    FRONTEND_BUILD="./web/frontend/build"
+fi
+
+if [ -n "$FRONTEND_BUILD" ]; then
+    step "Installing frontend static files..."
+    rm -rf "$INSTALL_DIR/static"
+    cp -r "$FRONTEND_BUILD" "$INSTALL_DIR/static"
+    substep "Frontend files installed to $INSTALL_DIR/static"
+else
+    if [ ! -d "$INSTALL_DIR/static" ]; then
+        echo -e "${YELLOW}Warning: Frontend build not found. You will need to build and copy it manually.${NC}"
+        echo "Run: cd web/frontend && npm install && npm run build"
+        echo "Then: sudo cp -r web/frontend/build $INSTALL_DIR/static"
+    fi
+fi
+
 # Create configuration file if it doesn't exist
 if [ ! -f "$CONFIG_DIR/config.json" ]; then
     step "Creating configuration file..."
