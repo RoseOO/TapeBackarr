@@ -19,8 +19,9 @@ type Config struct {
 
 // ServerConfig holds HTTP server configuration
 type ServerConfig struct {
-	Host string `json:"host"`
-	Port int    `json:"port"`
+	Host      string `json:"host"`
+	Port      int    `json:"port"`
+	StaticDir string `json:"static_dir"`
 }
 
 // DatabaseConfig holds database configuration
@@ -109,8 +110,9 @@ type ProxmoxConfig struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Server: ServerConfig{
-			Host: "0.0.0.0",
-			Port: 8080,
+			Host:      "0.0.0.0",
+			Port:      8080,
+			StaticDir: "/opt/tapebackarr/static",
 		},
 		Database: DatabaseConfig{
 			Path: "/var/lib/tapebackarr/tapebackarr.db",

@@ -213,6 +213,7 @@ func main() {
 		proxmoxClient,
 		proxmoxBackupService,
 		proxmoxRestoreService,
+		cfg.Server.StaticDir,
 	)
 
 	// Start scheduler
