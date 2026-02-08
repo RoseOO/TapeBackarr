@@ -250,10 +250,14 @@ func (s *Server) setupRoutes() {
 		})
 	})
 
-	// Health check
+	// Health check endpoints
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
+
+	// Detailed health check for API v1
+	r.Get("/api/v1/health", s.handleHealthCheck)
 }
 
 // Handler returns the HTTP handler
@@ -2876,4 +2880,73 @@ func (s *Server) handleGetKeySheetText(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", "attachment; filename=tapebackarr-keysheet.txt")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(text))
+}
+
+// handleHealthCheck returns detailed health status
+func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
+	health := map[string]interface{}{
+		"status":    "ok",
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+		"components": map[string]interface{}{
+			"database": s.checkDatabaseHealth(),
+			"tape":     s.checkTapeHealth(),
+		},
+	}
+
+	// Check if any component is unhealthy
+	components := health["components"].(map[string]interface{})
+	for _, v := range components {
+		if comp, ok := v.(map[string]interface{}); ok {
+			if status, ok := comp["status"].(string); ok && status != "ok" {
+				health["status"] = "degraded"
+				break
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if health["status"] == "ok" {
+		w.WriteHeader(http.StatusOK)
+	} else {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+	json.NewEncoder(w).Encode(health)
+}
+
+// checkDatabaseHealth verifies database connectivity
+func (s *Server) checkDatabaseHealth() map[string]interface{} {
+	result := map[string]interface{}{
+		"status": "ok",
+	}
+
+	// Try a simple query
+	var count int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM users").Scan(&count)
+	if err != nil {
+		result["status"] = "error"
+		result["error"] = "database query failed"
+		return result
+	}
+
+	result["users"] = count
+	return result
+}
+
+// checkTapeHealth returns tape drive status
+func (s *Server) checkTapeHealth() map[string]interface{} {
+	result := map[string]interface{}{
+		"status": "ok",
+	}
+
+	// Get configured drives count
+	var driveCount int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM tape_drives").Scan(&driveCount)
+	if err != nil {
+		result["status"] = "unknown"
+		result["drives"] = 0
+		return result
+	}
+
+	result["drives"] = driveCount
+	return result
 }
