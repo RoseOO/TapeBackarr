@@ -25,6 +25,8 @@ import (
 	"github.com/RoseOO/TapeBackarr/internal/scheduler"
 	"github.com/RoseOO/TapeBackarr/internal/tape"
 
+	embeddedDocs "github.com/RoseOO/TapeBackarr/docs"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
@@ -437,7 +439,7 @@ func (s *Server) handleListTapes(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var tapes []map[string]interface{}
+	tapes := make([]map[string]interface{}, 0)
 	for rows.Next() {
 		var t models.Tape
 		var poolName *string
@@ -627,7 +629,7 @@ func (s *Server) handleListPools(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var pools []models.TapePool
+	pools := make([]models.TapePool, 0)
 	for rows.Next() {
 		var p models.TapePool
 		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.RetentionDays, &p.CreatedAt); err != nil {
@@ -763,7 +765,7 @@ func (s *Server) handleListDrives(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var drives []models.TapeDrive
+	drives := make([]models.TapeDrive, 0)
 	for rows.Next() {
 		var d models.TapeDrive
 		if err := rows.Scan(&d.ID, &d.DevicePath, &d.SerialNumber, &d.Model, &d.Status, &d.CurrentTapeID, &d.CreatedAt); err != nil {
@@ -819,7 +821,7 @@ func (s *Server) handleListSources(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var sources []models.BackupSource
+	sources := make([]models.BackupSource, 0)
 	for rows.Next() {
 		var src models.BackupSource
 		if err := rows.Scan(&src.ID, &src.Name, &src.SourceType, &src.Path, &src.IncludePatterns, &src.ExcludePatterns, &src.Enabled, &src.CreatedAt); err != nil {
@@ -976,7 +978,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var jobs []map[string]interface{}
+	jobs := make([]map[string]interface{}, 0)
 	for rows.Next() {
 		var j models.BackupJob
 		var sourceName, poolName *string
@@ -1262,7 +1264,7 @@ func (s *Server) handleListBackupSets(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var sets []map[string]interface{}
+	sets := make([]map[string]interface{}, 0)
 	for rows.Next() {
 		var bs models.BackupSet
 		var jobName, tapeLabel *string
@@ -1436,7 +1438,7 @@ func (s *Server) handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var logs []map[string]interface{}
+	logs := make([]map[string]interface{}, 0)
 	for rows.Next() {
 		var al models.AuditLog
 		var username *string
@@ -1492,7 +1494,7 @@ func (s *Server) handleExportLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var logs []map[string]interface{}
+	logs := make([]map[string]interface{}, 0)
 	for rows.Next() {
 		var al models.AuditLog
 		var username *string
@@ -1627,6 +1629,12 @@ func (s *Server) readDocFile(filename string) (string, error) {
 		if err == nil {
 			return string(content), nil
 		}
+	}
+
+	// Fall back to embedded documentation
+	content, err := embeddedDocs.Content.ReadFile(filepath.Base(filename))
+	if err == nil {
+		return string(content), nil
 	}
 
 	return "", os.ErrNotExist
