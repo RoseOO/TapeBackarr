@@ -71,7 +71,7 @@ var DensityToLTOType = map[string]string{
 	"0x58": "LTO-5",
 	"0x5a": "LTO-6",
 	"0x5c": "LTO-7",
-	"0x5d": "LTO-7",  // LTO-7 Type M (M8)
+	"0x5d": "LTO-7", // LTO-7 Type M (M8)
 	"0x5e": "LTO-8",
 	"0x60": "LTO-9",
 	"0x62": "LTO-10",
@@ -126,19 +126,19 @@ const (
 
 // TapeDrive represents a physical tape drive
 type TapeDrive struct {
-	ID            int64       `json:"id" db:"id"`
-	DevicePath    string      `json:"device_path" db:"device_path"`
-	DisplayName   string      `json:"display_name" db:"display_name"`
-	Vendor        string      `json:"vendor" db:"vendor"`
-	SerialNumber  string      `json:"serial_number" db:"serial_number"`
-	Model         string      `json:"model" db:"model"`
-	Status        DriveStatus `json:"status" db:"status"`
-	CurrentTapeID *int64      `json:"current_tape_id" db:"current_tape_id"`
+	ID            int64            `json:"id" db:"id"`
+	DevicePath    string           `json:"device_path" db:"device_path"`
+	DisplayName   string           `json:"display_name" db:"display_name"`
+	Vendor        string           `json:"vendor" db:"vendor"`
+	SerialNumber  string           `json:"serial_number" db:"serial_number"`
+	Model         string           `json:"model" db:"model"`
+	Status        DriveStatus      `json:"status" db:"status"`
+	CurrentTapeID *int64           `json:"current_tape_id" db:"current_tape_id"`
 	CurrentTape   string           `json:"current_tape" db:"-"`
 	UnknownTape   *UnknownTapeInfo `json:"unknown_tape,omitempty" db:"-"`
 	Enabled       bool             `json:"enabled" db:"enabled"`
-	CreatedAt     time.Time   `json:"created_at" db:"created_at"`
-	UpdatedAt     time.Time   `json:"updated_at" db:"updated_at"`
+	CreatedAt     time.Time        `json:"created_at" db:"created_at"`
+	UpdatedAt     time.Time        `json:"updated_at" db:"updated_at"`
 }
 
 // SourceType represents the type of backup source

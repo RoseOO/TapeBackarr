@@ -10,9 +10,9 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"runtime"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,25 +36,25 @@ type FileInfo struct {
 
 // JobProgress tracks the progress of a running backup job
 type JobProgress struct {
-	JobID                   int64     `json:"job_id"`
-	JobName                 string    `json:"job_name"`
-	BackupSetID             int64     `json:"backup_set_id"`
-	Phase                   string    `json:"phase"`
-	Message                 string    `json:"message"`
-	Status                  string    `json:"status"` // running, paused, cancelled
-	FileCount               int64     `json:"file_count"`
-	TotalFiles              int64     `json:"total_files"`
-	TotalBytes              int64     `json:"total_bytes"`
-	BytesWritten            int64     `json:"bytes_written"`
-	WriteSpeed              float64   `json:"write_speed"`   // bytes per second (recent average)
-	TapeLabel               string    `json:"tape_label"`
-	TapeCapacityBytes       int64     `json:"tape_capacity_bytes"`
-	TapeUsedBytes           int64     `json:"tape_used_bytes"` // used before this backup
-	DevicePath              string    `json:"device_path"`
-	EstimatedSecondsRemaining float64 `json:"estimated_seconds_remaining"`
-	StartTime               time.Time `json:"start_time"`
-	UpdatedAt               time.Time `json:"updated_at"`
-	LogLines                []string  `json:"log_lines"`
+	JobID                     int64     `json:"job_id"`
+	JobName                   string    `json:"job_name"`
+	BackupSetID               int64     `json:"backup_set_id"`
+	Phase                     string    `json:"phase"`
+	Message                   string    `json:"message"`
+	Status                    string    `json:"status"` // running, paused, cancelled
+	FileCount                 int64     `json:"file_count"`
+	TotalFiles                int64     `json:"total_files"`
+	TotalBytes                int64     `json:"total_bytes"`
+	BytesWritten              int64     `json:"bytes_written"`
+	WriteSpeed                float64   `json:"write_speed"` // bytes per second (recent average)
+	TapeLabel                 string    `json:"tape_label"`
+	TapeCapacityBytes         int64     `json:"tape_capacity_bytes"`
+	TapeUsedBytes             int64     `json:"tape_used_bytes"` // used before this backup
+	DevicePath                string    `json:"device_path"`
+	EstimatedSecondsRemaining float64   `json:"estimated_seconds_remaining"`
+	StartTime                 time.Time `json:"start_time"`
+	UpdatedAt                 time.Time `json:"updated_at"`
+	LogLines                  []string  `json:"log_lines"`
 }
 
 // EventCallback is called when backup progress events occur (for SSE/console)

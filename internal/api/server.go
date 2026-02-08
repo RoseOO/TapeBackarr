@@ -848,10 +848,10 @@ func (s *Server) handleLabelTape(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Label      string `json:"label"`
-		DriveID    *int64 `json:"drive_id"`
-		Force      bool   `json:"force"`
-		AutoEject  bool   `json:"auto_eject"`
+		Label     string `json:"label"`
+		DriveID   *int64 `json:"drive_id"`
+		Force     bool   `json:"force"`
+		AutoEject bool   `json:"auto_eject"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.respondError(w, http.StatusBadRequest, "invalid request body")
@@ -3355,9 +3355,9 @@ func (s *Server) handleReadTapeLabel(w http.ResponseWriter, r *http.Request) {
 
 	if labelData == nil {
 		s.respondJSON(w, http.StatusOK, map[string]interface{}{
-			"tape_id":  id,
-			"labeled":  false,
-			"message":  "no TapeBackarr label found on tape",
+			"tape_id": id,
+			"labeled": false,
+			"message": "no TapeBackarr label found on tape",
 		})
 		return
 	}
