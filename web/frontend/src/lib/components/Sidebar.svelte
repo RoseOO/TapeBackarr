@@ -11,6 +11,7 @@
     { href: '/sources', label: 'Sources', icon: '📁' },
     { href: '/restore', label: 'Restore', icon: '🔄' },
     { href: '/logs', label: 'Logs', icon: '📋' },
+    { href: '/encryption', label: 'Encryption', icon: '🔒' },
     { href: '/settings', label: 'Settings', icon: '⚙️' },
     { href: '/docs', label: 'Documentation', icon: '📖' },
   ];

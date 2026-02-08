@@ -306,6 +306,49 @@ export async function changePassword(oldPassword: string, newPassword: string) {
   });
 }
 
+// Encryption Keys
+export async function getEncryptionKeys() {
+  return fetchApi('/encryption-keys');
+}
+
+export async function createEncryptionKey(data: { name: string; description?: string }) {
+  return fetchApi('/encryption-keys', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function importEncryptionKey(data: { name: string; key_base64: string; description?: string }) {
+  return fetchApi('/encryption-keys/import', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteEncryptionKey(id: number) {
+  return fetchApi(`/encryption-keys/${id}`, {
+    method: 'DELETE',
+  });
+}
+
+export async function getKeySheet() {
+  return fetchApi('/encryption-keys/keysheet');
+}
+
+export async function getKeySheetText() {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+  const headers: HeadersInit = {};
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+  const response = await fetch(`${API_BASE}/encryption-keys/keysheet/text`, { headers });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Request failed' }));
+    throw new Error(error.error || 'Request failed');
+  }
+  return response.text();
+}
+
 // Settings/Config
 export async function getSettings() {
   return fetchApi('/settings');
