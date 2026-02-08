@@ -158,6 +158,11 @@ export async function readTapeLabel(id: number, driveId: number) {
   return fetchApi(`/tapes/${id}/read-label?drive_id=${driveId}`);
 }
 
+// Active/running jobs
+export async function getActiveJobs() {
+  return fetchApi('/jobs/active');
+}
+
 // Scan for available tape drives
 export async function scanDrives() {
   return fetchApi('/drives/scan');

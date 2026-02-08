@@ -6,10 +6,12 @@
     id: number;
     device_path: string;
     display_name: string;
+    vendor: string;
     serial_number: string;
     model: string;
     status: string;
     current_tape_id: number | null;
+    current_tape: string;
     enabled: boolean;
     created_at: string;
   }
@@ -76,6 +78,7 @@
       await api.api.post('/drives', {
         device_path: scanned.device_path,
         display_name: scanned.model ? `${scanned.vendor || ''} ${scanned.model}`.trim() : scanned.device_path,
+        vendor: scanned.vendor || '',
         serial_number: scanned.serial_number || '',
         model: scanned.model || '',
       });
@@ -189,6 +192,7 @@
         <tr>
           <th>Name</th>
           <th>Device Path</th>
+          <th>Vendor</th>
           <th>Model</th>
           <th>Status</th>
           <th>Enabled</th>
@@ -201,10 +205,11 @@
           <tr>
             <td>{drive.display_name || drive.device_path}</td>
             <td><code>{drive.device_path}</code></td>
+            <td>{drive.vendor || '-'}</td>
             <td>{drive.model || '-'}</td>
             <td><span class="badge {getStatusBadge(drive.status)}">{drive.status}</span></td>
             <td>{drive.enabled ? '✅' : '❌'}</td>
-            <td>{drive.current_tape_id ? `Tape #${drive.current_tape_id}` : 'No tape'}</td>
+            <td>{drive.current_tape || (drive.current_tape_id ? `Tape #${drive.current_tape_id}` : 'No tape')}</td>
             <td>
               <button class="btn btn-secondary btn-sm" on:click={() => selectDrive(drive.id)}>Select</button>
               <button class="btn btn-secondary btn-sm" on:click={() => rewindTape(drive.id)}>Rewind</button>
@@ -214,7 +219,7 @@
           </tr>
         {:else}
           <tr>
-            <td colspan="7">No drives configured. Use "Scan Drives" to detect drives or add one manually.</td>
+            <td colspan="8">No drives configured. Use "Scan Drives" to detect drives or add one manually.</td>
           </tr>
         {/each}
       </tbody>

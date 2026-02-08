@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/RoseOO/TapeBackarr/internal/database"
@@ -32,12 +33,29 @@ type FileInfo struct {
 	Hash    string    `json:"hash,omitempty"`
 }
 
+// JobProgress tracks the progress of a running backup job
+type JobProgress struct {
+	JobID       int64     `json:"job_id"`
+	JobName     string    `json:"job_name"`
+	BackupSetID int64     `json:"backup_set_id"`
+	Phase       string    `json:"phase"`
+	Message     string    `json:"message"`
+	FileCount   int64     `json:"file_count"`
+	TotalFiles  int64     `json:"total_files"`
+	TotalBytes  int64     `json:"total_bytes"`
+	StartTime   time.Time `json:"start_time"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	LogLines    []string  `json:"log_lines"`
+}
+
 // Service handles backup operations
 type Service struct {
 	db          *database.DB
 	tapeService *tape.Service
 	logger      *logging.Logger
 	blockSize   int
+	mu          sync.Mutex
+	activeJobs  map[int64]*JobProgress
 }
 
 // NewService creates a new backup service
@@ -47,6 +65,33 @@ func NewService(db *database.DB, tapeService *tape.Service, logger *logging.Logg
 		tapeService: tapeService,
 		logger:      logger,
 		blockSize:   blockSize,
+		activeJobs:  make(map[int64]*JobProgress),
+	}
+}
+
+// GetActiveJobs returns all currently running backup jobs with progress
+func (s *Service) GetActiveJobs() []*JobProgress {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	jobs := make([]*JobProgress, 0, len(s.activeJobs))
+	for _, j := range s.activeJobs {
+		jobs = append(jobs, j)
+	}
+	return jobs
+}
+
+func (s *Service) updateProgress(jobID int64, phase, message string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p, ok := s.activeJobs[jobID]; ok {
+		p.Phase = phase
+		p.Message = message
+		p.UpdatedAt = time.Now()
+		p.LogLines = append(p.LogLines, fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), message))
+		// Keep last 100 log lines
+		if len(p.LogLines) > 100 {
+			p.LogLines = p.LogLines[len(p.LogLines)-100:]
+		}
 	}
 }
 
@@ -403,6 +448,24 @@ func (s *Service) CreateSnapshot(files []FileInfo) ([]byte, error) {
 func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *models.BackupSource, tapeID int64, backupType models.BackupType) (*models.BackupSet, error) {
 	startTime := time.Now()
 
+	// Register active job progress
+	s.mu.Lock()
+	s.activeJobs[job.ID] = &JobProgress{
+		JobID:     job.ID,
+		JobName:   job.Name,
+		Phase:     "initializing",
+		Message:   "Starting backup job...",
+		StartTime: startTime,
+		UpdatedAt: startTime,
+		LogLines:  []string{fmt.Sprintf("[%s] Starting backup job: %s", startTime.Format("15:04:05"), job.Name)},
+	}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.activeJobs, job.ID)
+		s.mu.Unlock()
+	}()
+
 	s.logger.Info("Starting backup job", map[string]interface{}{
 		"job_id":      job.ID,
 		"job_name":    job.Name,
@@ -420,15 +483,23 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 	}
 
 	backupSetID, _ := result.LastInsertId()
+	s.mu.Lock()
+	if p, ok := s.activeJobs[job.ID]; ok {
+		p.BackupSetID = backupSetID
+	}
+	s.mu.Unlock()
 
 	// Scan source
+	s.updateProgress(job.ID, "scanning", fmt.Sprintf("Scanning source: %s", source.Path))
 	s.logger.Info("Scanning source", map[string]interface{}{"path": source.Path})
 	files, err := s.ScanSource(ctx, source)
 	if err != nil {
+		s.updateProgress(job.ID, "failed", fmt.Sprintf("Failed to scan source: %s", err.Error()))
 		s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
 		return nil, fmt.Errorf("failed to scan source: %w", err)
 	}
 
+	s.updateProgress(job.ID, "scanning", fmt.Sprintf("Scan complete: found %d files", len(files)))
 	s.logger.Info("Scan complete", map[string]interface{}{
 		"file_count": len(files),
 	})
@@ -462,15 +533,25 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		totalBytes += f.Size
 	}
 
+	// Update progress with file/byte totals
+	s.mu.Lock()
+	if p, ok := s.activeJobs[job.ID]; ok {
+		p.TotalFiles = int64(len(files))
+		p.TotalBytes = totalBytes
+	}
+	s.mu.Unlock()
+
 	// Get tape device path
 	var devicePath string
 	err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE current_tape_id = ?", tapeID).Scan(&devicePath)
 	if err != nil {
+		s.updateProgress(job.ID, "failed", "No drive found with specified tape")
 		s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "no drive found with tape")
 		return nil, fmt.Errorf("no drive found with specified tape: %w", err)
 	}
 
 	// Stream to tape
+	s.updateProgress(job.ID, "streaming", fmt.Sprintf("Streaming %d files (%d bytes) to tape device %s", len(files), totalBytes, devicePath))
 	s.logger.Info("Streaming to tape", map[string]interface{}{
 		"device":      devicePath,
 		"file_count":  len(files),
@@ -485,15 +566,18 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		// Get encryption key
 		encKey, err := s.GetEncryptionKey(ctx, *job.EncryptionKeyID)
 		if err != nil {
+			s.updateProgress(job.ID, "failed", "Encryption key not found: "+err.Error())
 			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "encryption key not found: "+err.Error())
 			return nil, fmt.Errorf("failed to get encryption key: %w", err)
 		}
 
+		s.updateProgress(job.ID, "streaming", "Encrypting and streaming to tape...")
 		s.logger.Info("Encrypting backup with key", map[string]interface{}{
 			"key_id": *job.EncryptionKeyID,
 		})
 
 		if err := s.StreamToTapeEncrypted(ctx, source.Path, files, devicePath, encKey, nil); err != nil {
+			s.updateProgress(job.ID, "failed", "Stream failed: "+err.Error())
 			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
 			return nil, fmt.Errorf("failed to stream encrypted backup to tape: %w", err)
 		}
@@ -501,22 +585,32 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		encryptionKeyID = job.EncryptionKeyID
 	} else {
 		if err := s.StreamToTape(ctx, source.Path, files, devicePath, nil); err != nil {
+			s.updateProgress(job.ID, "failed", "Stream failed: "+err.Error())
 			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
 			return nil, fmt.Errorf("failed to stream to tape: %w", err)
 		}
 	}
 
+	s.updateProgress(job.ID, "cataloging", "Writing file mark...")
 	// Write file mark
 	if err := s.tapeService.WriteFileMark(ctx); err != nil {
 		s.logger.Warn("Failed to write file mark", map[string]interface{}{"error": err.Error()})
 	}
 
 	// Update catalog entries with checksums for data integrity
+	s.updateProgress(job.ID, "cataloging", fmt.Sprintf("Cataloging %d files and calculating checksums...", len(files)))
 	s.logger.Info("Calculating file checksums for data integrity", map[string]interface{}{
 		"file_count": len(files),
 	})
-	for _, f := range files {
+	for i, f := range files {
 		relPath, _ := filepath.Rel(source.Path, f.Path)
+
+		// Update file counter in progress
+		s.mu.Lock()
+		if p, ok := s.activeJobs[job.ID]; ok {
+			p.FileCount = int64(i + 1)
+		}
+		s.mu.Unlock()
 
 		// Calculate SHA256 checksum for data integrity verification
 		checksum, checksumErr := s.CalculateChecksum(f.Path)
@@ -573,6 +667,7 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 	// Update job last run
 	s.db.Exec("UPDATE backup_jobs SET last_run_at = ? WHERE id = ?", endTime, job.ID)
 
+	s.updateProgress(job.ID, "completed", fmt.Sprintf("Backup completed: %d files, %d bytes in %s", len(files), totalBytes, endTime.Sub(startTime).String()))
 	s.logger.Info("Backup completed", map[string]interface{}{
 		"job_id":      job.ID,
 		"file_count":  len(files),
