@@ -128,14 +128,23 @@ func main() {
 
 		// Get an available tape from the pool
 		var tapeID int64
+		var tapeLabel string
 		err = db.QueryRow(`
-			SELECT id FROM tapes 
+			SELECT id, label FROM tapes 
 			WHERE pool_id = ? AND status IN ('blank', 'active')
 			ORDER BY used_bytes ASC LIMIT 1
-		`, job.PoolID).Scan(&tapeID)
+		`, job.PoolID).Scan(&tapeID, &tapeLabel)
 		if err != nil {
-			// Notify that tape change is required
-			telegramService.NotifyTapeChangeRequired(ctx, job.Name, "", "no available tape in pool")
+			// Look up the next candidate tape label for the notification
+			var nextTapeLabel string
+			db.QueryRow(`
+				SELECT label FROM tapes 
+				WHERE pool_id = ? AND status = 'blank'
+				ORDER BY label ASC LIMIT 1
+			`, job.PoolID).Scan(&nextTapeLabel)
+
+			// Notify that tape change is required, including the next expected tape
+			telegramService.NotifyTapeChangeRequired(ctx, job.Name, "", "no available tape in pool", nextTapeLabel)
 			return fmt.Errorf("no available tape in pool: %w", err)
 		}
 
@@ -214,6 +223,8 @@ func main() {
 		proxmoxBackupService,
 		proxmoxRestoreService,
 		cfg.Server.StaticDir,
+		*configPath,
+		cfg,
 	)
 
 	// Start scheduler

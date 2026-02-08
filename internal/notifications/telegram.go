@@ -190,35 +190,57 @@ func (s *TelegramService) sendMessage(ctx context.Context, text string) error {
 }
 
 // NotifyTapeChangeRequired sends a tape change notification
-func (s *TelegramService) NotifyTapeChangeRequired(ctx context.Context, jobName string, currentTape string, reason string) error {
+func (s *TelegramService) NotifyTapeChangeRequired(ctx context.Context, jobName string, currentTape string, reason string, nextTape string) error {
+	msg := fmt.Sprintf("Job '%s' requires a tape change.\n\nCurrent tape: %s\nReason: %s", jobName, currentTape, reason)
+	if nextTape != "" {
+		msg += fmt.Sprintf("\n\n📌 Next tape needed: %s", nextTape)
+	}
+	msg += "\n\nPlease insert the required tape and acknowledge in the web interface."
+
+	data := map[string]interface{}{
+		"Job":         jobName,
+		"CurrentTape": currentTape,
+		"Reason":      reason,
+	}
+	if nextTape != "" {
+		data["NextTape"] = nextTape
+	}
+
 	return s.Send(ctx, &Notification{
 		Type:      NotifyTapeChange,
 		Title:     "Tape Change Required",
-		Message:   fmt.Sprintf("Job '%s' requires a tape change.\n\nCurrent tape: %s\nReason: %s\n\nPlease insert a new tape and acknowledge in the web interface.", jobName, currentTape, reason),
+		Message:   msg,
 		Priority:  "high",
 		Timestamp: time.Now(),
-		Data: map[string]interface{}{
-			"Job":         jobName,
-			"CurrentTape": currentTape,
-			"Reason":      reason,
-		},
+		Data:      data,
 	})
 }
 
 // NotifyTapeFull sends a tape full notification
-func (s *TelegramService) NotifyTapeFull(ctx context.Context, tapeLabel string, usedBytes int64, jobName string) error {
+func (s *TelegramService) NotifyTapeFull(ctx context.Context, tapeLabel string, usedBytes int64, jobName string, nextTape string) error {
 	usedGB := float64(usedBytes) / (1024 * 1024 * 1024)
+	msg := fmt.Sprintf("Tape '%s' is full (%.2f GB used).\n\nJob: %s", tapeLabel, usedGB, jobName)
+	if nextTape != "" {
+		msg += fmt.Sprintf("\n\n📌 Next tape needed: %s", nextTape)
+	}
+	msg += "\n\nPlease insert the required tape to continue."
+
+	data := map[string]interface{}{
+		"Tape":   tapeLabel,
+		"UsedGB": fmt.Sprintf("%.2f", usedGB),
+		"Job":    jobName,
+	}
+	if nextTape != "" {
+		data["NextTape"] = nextTape
+	}
+
 	return s.Send(ctx, &Notification{
 		Type:      NotifyTapeFull,
 		Title:     "Tape Full",
-		Message:   fmt.Sprintf("Tape '%s' is full (%.2f GB used).\n\nJob: %s\n\nPlease insert a new tape to continue.", tapeLabel, usedGB, jobName),
+		Message:   msg,
 		Priority:  "urgent",
 		Timestamp: time.Now(),
-		Data: map[string]interface{}{
-			"Tape":   tapeLabel,
-			"UsedGB": fmt.Sprintf("%.2f", usedGB),
-			"Job":    jobName,
-		},
+		Data:      data,
 	})
 }
 

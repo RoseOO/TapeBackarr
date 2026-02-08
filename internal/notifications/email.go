@@ -268,18 +268,29 @@ func (s *EmailService) sendEmailTLS(addr string, auth smtp.Auth, from string, to
 }
 
 // NotifyTapeChangeRequired sends a tape change notification via email
-func (s *EmailService) NotifyTapeChangeRequired(ctx context.Context, jobName string, currentTape string, reason string) error {
+func (s *EmailService) NotifyTapeChangeRequired(ctx context.Context, jobName string, currentTape string, reason string, nextTape string) error {
+	msg := fmt.Sprintf("Job '%s' requires a tape change. Current tape: %s. Reason: %s.", jobName, currentTape, reason)
+	if nextTape != "" {
+		msg += fmt.Sprintf(" Next tape needed: %s.", nextTape)
+	}
+	msg += " Please insert the required tape and acknowledge in the web interface."
+
+	data := map[string]interface{}{
+		"Job":          jobName,
+		"Current Tape": currentTape,
+		"Reason":       reason,
+	}
+	if nextTape != "" {
+		data["Next Tape"] = nextTape
+	}
+
 	return s.Send(ctx, &Notification{
 		Type:      NotifyTapeChange,
 		Title:     "Tape Change Required",
-		Message:   fmt.Sprintf("Job '%s' requires a tape change. Current tape: %s. Reason: %s. Please insert a new tape and acknowledge in the web interface.", jobName, currentTape, reason),
+		Message:   msg,
 		Priority:  "high",
 		Timestamp: time.Now(),
-		Data: map[string]interface{}{
-			"Job":          jobName,
-			"Current Tape": currentTape,
-			"Reason":       reason,
-		},
+		Data:      data,
 	})
 }
 

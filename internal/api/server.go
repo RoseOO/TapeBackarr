@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/RoseOO/TapeBackarr/internal/auth"
 	"github.com/RoseOO/TapeBackarr/internal/backup"
+	"github.com/RoseOO/TapeBackarr/internal/config"
 	"github.com/RoseOO/TapeBackarr/internal/database"
 	"github.com/RoseOO/TapeBackarr/internal/encryption"
 	"github.com/RoseOO/TapeBackarr/internal/logging"
@@ -51,6 +53,8 @@ type Server struct {
 	proxmoxRestoreService *proxmox.RestoreService
 	proxmoxClient         *proxmox.Client
 	staticDir             string
+	configPath            string
+	config                *config.Config
 }
 
 // NewServer creates a new API server
@@ -67,6 +71,8 @@ func NewServer(
 	proxmoxBackupService *proxmox.BackupService,
 	proxmoxRestoreService *proxmox.RestoreService,
 	staticDir string,
+	configPath string,
+	cfg *config.Config,
 ) *Server {
 	s := &Server{
 		router:                chi.NewRouter(),
@@ -82,6 +88,8 @@ func NewServer(
 		proxmoxBackupService:  proxmoxBackupService,
 		proxmoxRestoreService: proxmoxRestoreService,
 		staticDir:             staticDir,
+		configPath:            configPath,
+		config:                cfg,
 	}
 
 	s.setupRoutes()
@@ -205,6 +213,18 @@ func (s *Server) setupRoutes() {
 			r.Get("/", s.handleListUsers)
 			r.Post("/", s.handleCreateUser)
 			r.Delete("/{id}", s.handleDeleteUser)
+		})
+
+		// Password change (any authenticated user)
+		r.Post("/api/v1/auth/change-password", s.handleChangePassword)
+
+		// Settings/Config (admin only for write, all authenticated for read)
+		r.Route("/api/v1/settings", func(r chi.Router) {
+			r.Get("/", s.handleGetConfig)
+			r.Group(func(r chi.Router) {
+				r.Use(s.adminOnlyMiddleware)
+				r.Put("/", s.handleUpdateConfig)
+			})
 		})
 
 		// Documentation
@@ -409,6 +429,9 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		RecentBackups  int    `json:"recent_backups"`
 		DriveStatus    string `json:"drive_status"`
 		TotalDataBytes int64  `json:"total_data_bytes"`
+		LoadedTape     string `json:"loaded_tape"`
+		LoadedTapeUUID string `json:"loaded_tape_uuid"`
+		LoadedTapePool string `json:"loaded_tape_pool"`
 	}
 
 	s.db.QueryRow("SELECT COUNT(*) FROM tapes").Scan(&stats.TotalTapes)
@@ -418,13 +441,19 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	s.db.QueryRow("SELECT COUNT(*) FROM backup_sets WHERE start_time > datetime('now', '-24 hours')").Scan(&stats.RecentBackups)
 	s.db.QueryRow("SELECT COALESCE(SUM(total_bytes), 0) FROM backup_sets WHERE status = 'completed'").Scan(&stats.TotalDataBytes)
 
-	// Get drive status
+	// Get drive status and loaded tape label
 	ctx := r.Context()
 	status, err := s.tapeService.GetStatus(ctx)
 	if err != nil {
 		stats.DriveStatus = "error"
 	} else if status.Online {
 		stats.DriveStatus = "online"
+		// Try to read the label from the loaded tape
+		if labelData, err := s.tapeService.ReadTapeLabel(ctx); err == nil && labelData != nil {
+			stats.LoadedTape = labelData.Label
+			stats.LoadedTapeUUID = labelData.UUID
+			stats.LoadedTapePool = labelData.Pool
+		}
 	} else {
 		stats.DriveStatus = "offline"
 	}
@@ -485,6 +514,7 @@ func (s *Server) handleCreateTape(w http.ResponseWriter, r *http.Request) {
 		CapacityBytes int64  `json:"capacity_bytes"`
 		DriveID       *int64 `json:"drive_id"`
 		WriteLabel    bool   `json:"write_label"`
+		AutoEject     bool   `json:"auto_eject"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.respondError(w, http.StatusBadRequest, "invalid request body")
@@ -494,6 +524,23 @@ func (s *Server) handleCreateTape(w http.ResponseWriter, r *http.Request) {
 	if req.Label == "" {
 		s.respondError(w, http.StatusBadRequest, "label is required")
 		return
+	}
+
+	// Check if a tape with the same label already exists in the database
+	var existingCount int
+	s.db.QueryRow("SELECT COUNT(*) FROM tapes WHERE label = ?", req.Label).Scan(&existingCount)
+	if existingCount > 0 {
+		s.respondError(w, http.StatusConflict, "a tape with this label already exists in the database")
+		return
+	}
+
+	// Check if a tape with the same barcode already exists (if barcode provided)
+	if req.Barcode != "" {
+		s.db.QueryRow("SELECT COUNT(*) FROM tapes WHERE barcode = ? AND barcode != ''", req.Barcode).Scan(&existingCount)
+		if existingCount > 0 {
+			s.respondError(w, http.StatusConflict, "a tape with this barcode already exists in the database")
+			return
+		}
 	}
 
 	// Generate UUID for the tape
@@ -531,12 +578,27 @@ func (s *Server) handleCreateTape(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Check if tape already has data/label before writing
+		if existingLabel, err := driveSvc.ReadTapeLabel(ctx); err == nil && existingLabel != nil && existingLabel.Label != "" {
+			s.respondError(w, http.StatusConflict, fmt.Sprintf("tape already has a label: '%s' (UUID: %s). Format the tape first to re-label it.", existingLabel.Label, existingLabel.UUID))
+			return
+		}
+
 		// Write label to physical tape
 		if err := driveSvc.WriteTapeLabel(ctx, req.Label, tapeUUID, poolName); err != nil {
 			s.logger.Warn("Failed to write label to physical tape, continuing with software tracking", map[string]interface{}{
 				"error": err.Error(),
 				"label": req.Label,
 			})
+		}
+
+		// Auto-eject after labeling if requested
+		if req.AutoEject {
+			if err := driveSvc.Eject(ctx); err != nil {
+				s.logger.Warn("Failed to auto-eject tape after labeling", map[string]interface{}{
+					"error": err.Error(),
+				})
+			}
 		}
 	}
 
@@ -551,8 +613,9 @@ func (s *Server) handleCreateTape(w http.ResponseWriter, r *http.Request) {
 
 	id, _ := result.LastInsertId()
 	s.respondJSON(w, http.StatusCreated, map[string]interface{}{
-		"id":   id,
-		"uuid": tapeUUID,
+		"id":          id,
+		"uuid":        tapeUUID,
+		"auto_ejected": req.AutoEject && req.WriteLabel && req.DriveID != nil,
 	})
 }
 
@@ -705,8 +768,10 @@ func (s *Server) handleLabelTape(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Label   string `json:"label"`
-		DriveID *int64 `json:"drive_id"`
+		Label      string `json:"label"`
+		DriveID    *int64 `json:"drive_id"`
+		Force      bool   `json:"force"`
+		AutoEject  bool   `json:"auto_eject"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.respondError(w, http.StatusBadRequest, "invalid request body")
@@ -749,11 +814,28 @@ func (s *Server) handleLabelTape(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Check if tape already has data/label before writing (unless force=true)
+		if !req.Force {
+			if existingLabel, err := driveSvc.ReadTapeLabel(ctx); err == nil && existingLabel != nil && existingLabel.Label != "" {
+				s.respondError(w, http.StatusConflict, fmt.Sprintf("tape already has a label: '%s' (UUID: %s). Use force=true or format the tape first.", existingLabel.Label, existingLabel.UUID))
+				return
+			}
+		}
+
 		// Write label to tape with UUID and pool info
 		if err := driveSvc.WriteTapeLabel(ctx, req.Label, tapeUUID, poolName); err != nil {
 			s.logger.Warn("Failed to write label to physical tape, continuing with software tracking", map[string]interface{}{
 				"error": err.Error(),
 			})
+		}
+
+		// Auto-eject after labeling if requested
+		if req.AutoEject {
+			if err := driveSvc.Eject(ctx); err != nil {
+				s.logger.Warn("Failed to auto-eject tape after labeling", map[string]interface{}{
+					"error": err.Error(),
+				})
+			}
 		}
 	} else {
 		// Use default tape service
@@ -1752,6 +1834,10 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.authService.DeleteUser(id); err != nil {
+		if errors.Is(err, auth.ErrCannotDeleteAdmin) {
+			s.respondError(w, http.StatusForbidden, "cannot delete the default admin account")
+			return
+		}
 		s.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -2458,6 +2544,111 @@ func (s *Server) handleScanDrives(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.respondJSON(w, http.StatusOK, drives)
+}
+
+// handleChangePassword allows any authenticated user to change their own password
+func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	claims := r.Context().Value("claims").(*auth.Claims)
+
+	var req struct {
+		OldPassword string `json:"old_password"`
+		NewPassword string `json:"new_password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.OldPassword == "" || req.NewPassword == "" {
+		s.respondError(w, http.StatusBadRequest, "old_password and new_password are required")
+		return
+	}
+
+	if len(req.NewPassword) < 6 {
+		s.respondError(w, http.StatusBadRequest, "new password must be at least 6 characters")
+		return
+	}
+
+	if err := s.authService.UpdatePassword(claims.UserID, req.OldPassword, req.NewPassword); err != nil {
+		if errors.Is(err, auth.ErrInvalidCredentials) {
+			s.respondError(w, http.StatusUnauthorized, "current password is incorrect")
+			return
+		}
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]string{"status": "password changed"})
+}
+
+// handleGetConfig returns the current application configuration (sensitive fields masked)
+func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
+	if s.config == nil {
+		s.respondError(w, http.StatusInternalServerError, "configuration not available")
+		return
+	}
+
+	// Return config with sensitive fields masked
+	safeConfig := *s.config
+	if safeConfig.Auth.JWTSecret != "" {
+		safeConfig.Auth.JWTSecret = "********"
+	}
+	if safeConfig.Notifications.Telegram.BotToken != "" {
+		safeConfig.Notifications.Telegram.BotToken = "********"
+	}
+	if safeConfig.Notifications.Email.Password != "" {
+		safeConfig.Notifications.Email.Password = "********"
+	}
+	if safeConfig.Proxmox.Password != "" {
+		safeConfig.Proxmox.Password = "********"
+	}
+	if safeConfig.Proxmox.TokenSecret != "" {
+		safeConfig.Proxmox.TokenSecret = "********"
+	}
+
+	s.respondJSON(w, http.StatusOK, safeConfig)
+}
+
+// handleUpdateConfig updates the application configuration
+func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
+	if s.config == nil || s.configPath == "" {
+		s.respondError(w, http.StatusInternalServerError, "configuration not available")
+		return
+	}
+
+	var newCfg config.Config
+	if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Preserve sensitive fields if they were masked (not changed)
+	if newCfg.Auth.JWTSecret == "********" || newCfg.Auth.JWTSecret == "" {
+		newCfg.Auth.JWTSecret = s.config.Auth.JWTSecret
+	}
+	if newCfg.Notifications.Telegram.BotToken == "********" || newCfg.Notifications.Telegram.BotToken == "" {
+		newCfg.Notifications.Telegram.BotToken = s.config.Notifications.Telegram.BotToken
+	}
+	if newCfg.Notifications.Email.Password == "********" || newCfg.Notifications.Email.Password == "" {
+		newCfg.Notifications.Email.Password = s.config.Notifications.Email.Password
+	}
+	if newCfg.Proxmox.Password == "********" || newCfg.Proxmox.Password == "" {
+		newCfg.Proxmox.Password = s.config.Proxmox.Password
+	}
+	if newCfg.Proxmox.TokenSecret == "********" || newCfg.Proxmox.TokenSecret == "" {
+		newCfg.Proxmox.TokenSecret = s.config.Proxmox.TokenSecret
+	}
+
+	// Save to disk
+	if err := newCfg.Save(s.configPath); err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to save configuration: "+err.Error())
+		return
+	}
+
+	// Update in-memory config
+	*s.config = newCfg
+
+	s.respondJSON(w, http.StatusOK, map[string]string{"status": "configuration saved", "note": "some changes require a restart to take effect"})
 }
 
 // ==================== Proxmox Handlers ====================

@@ -175,10 +175,10 @@ func TestNotificationHelpers(t *testing.T) {
 		fn   func() error
 	}{
 		{"TapeChangeRequired", func() error {
-			return svc.NotifyTapeChangeRequired(ctx, "TestJob", "TAPE-001", "tape full")
+			return svc.NotifyTapeChangeRequired(ctx, "TestJob", "TAPE-001", "tape full", "TAPE-002")
 		}},
 		{"TapeFull", func() error {
-			return svc.NotifyTapeFull(ctx, "TAPE-001", 12000000000000, "TestJob")
+			return svc.NotifyTapeFull(ctx, "TAPE-001", 12000000000000, "TestJob", "TAPE-002")
 		}},
 		{"BackupStarted", func() error {
 			return svc.NotifyBackupStarted(ctx, "TestJob", 1000, "full")
