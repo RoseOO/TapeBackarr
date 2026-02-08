@@ -239,9 +239,7 @@
     if (!unknownTapeTarget?.tape) return;
     try {
       error = '';
-      const capacity = addTapeFormData.lto_type && ltoTypes[addTapeFormData.lto_type] 
-        ? ltoTypes[addTapeFormData.lto_type] 
-        : 0;
+      const capacity = ltoTypes[addTapeFormData.lto_type] || 0;
       await api.createTape({
         barcode: addTapeFormData.barcode,
         label: unknownTapeTarget.tape.label,

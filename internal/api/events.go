@@ -27,6 +27,11 @@ type EventBus struct {
 	maxHistory  int
 }
 
+const (
+	// eventChannelBufferSize is the buffer size for subscriber event channels
+	eventChannelBufferSize = 50
+)
+
 // NewEventBus creates a new event bus
 func NewEventBus() *EventBus {
 	return &EventBus{
@@ -38,7 +43,7 @@ func NewEventBus() *EventBus {
 
 // Subscribe creates a new subscription channel
 func (eb *EventBus) Subscribe() chan SystemEvent {
-	ch := make(chan SystemEvent, 50)
+	ch := make(chan SystemEvent, eventChannelBufferSize)
 	eb.mu.Lock()
 	eb.subscribers[ch] = struct{}{}
 	eb.mu.Unlock()

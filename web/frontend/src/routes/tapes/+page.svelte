@@ -110,11 +110,8 @@
       }
       await api.createTape({
         ...formData,
-        lto_type: formData.lto_type,
         pool_id: formData.pool_id ?? undefined,
         drive_id: formData.drive_id ?? undefined,
-        write_label: formData.write_label,
-        auto_eject: formData.auto_eject,
       } as any);
       showCreateModal = false;
       resetForm();
