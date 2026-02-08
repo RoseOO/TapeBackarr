@@ -839,7 +839,7 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		errMsg := fmt.Sprintf("tape label mismatch: expected %q but drive has %q", expectedLabel, actualLabel)
 		s.updateProgress(job.ID, "failed", errMsg)
 		s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, errMsg)
-		return nil, fmt.Errorf(errMsg)
+		return nil, fmt.Errorf("%s", errMsg)
 	}
 
 	s.updateProgress(job.ID, "positioning", "Tape label verified, positioning past label...")
