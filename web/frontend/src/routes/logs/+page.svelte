@@ -55,10 +55,11 @@
   }
 
   function getActionBadgeClass(action: string): string {
-    if (action.includes('delete')) return 'badge-danger';
-    if (action.includes('create')) return 'badge-success';
-    if (action.includes('update')) return 'badge-warning';
-    if (action.includes('login')) return 'badge-info';
+    const lower = action.toLowerCase();
+    if (lower.includes('delete')) return 'badge-danger';
+    if (lower.includes('create')) return 'badge-success';
+    if (lower.includes('update')) return 'badge-warning';
+    if (lower.includes('login')) return 'badge-info';
     return '';
   }
 </script>

@@ -1632,7 +1632,7 @@ func (s *Server) readDocFile(filename string) (string, error) {
 	}
 
 	// Fall back to embedded documentation
-	content, err := embeddedDocs.Content.ReadFile(filename)
+	content, err := embeddedDocs.Content.ReadFile(filepath.Base(filename))
 	if err == nil {
 		return string(content), nil
 	}
