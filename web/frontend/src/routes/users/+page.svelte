@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import * as api from '$lib/api/client';
+  import { auth } from '$lib/stores/auth';
 
   interface User {
     id: number;
@@ -12,13 +13,23 @@
   let users: User[] = [];
   let loading = true;
   let error = '';
+  let successMsg = '';
   let showCreateModal = false;
+  let showPasswordModal = false;
 
   let formData = {
     username: '',
     password: '',
     role: 'operator',
   };
+
+  let passwordForm = {
+    old_password: '',
+    new_password: '',
+    confirm_password: '',
+  };
+
+  $: currentUser = $auth.user;
 
   onMount(async () => {
     await loadUsers();
@@ -34,11 +45,18 @@
     }
   }
 
+  function showSuccess(msg: string) {
+    successMsg = msg;
+    setTimeout(() => successMsg = '', 3000);
+  }
+
   async function handleCreate() {
     try {
+      error = '';
       await api.createUser(formData);
       showCreateModal = false;
       resetForm();
+      showSuccess('User created successfully');
       await loadUsers();
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to create user';
@@ -46,12 +64,38 @@
   }
 
   async function handleDelete(user: User) {
+    if (user.username === 'admin') {
+      error = 'Cannot delete the default admin account';
+      return;
+    }
     if (!confirm(`Delete user "${user.username}"? This cannot be undone.`)) return;
     try {
+      error = '';
       await api.deleteUser(user.id);
+      showSuccess('User deleted');
       await loadUsers();
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to delete user';
+    }
+  }
+
+  async function handleChangePassword() {
+    try {
+      error = '';
+      if (passwordForm.new_password !== passwordForm.confirm_password) {
+        error = 'New passwords do not match';
+        return;
+      }
+      if (passwordForm.new_password.length < 6) {
+        error = 'New password must be at least 6 characters';
+        return;
+      }
+      await api.changePassword(passwordForm.old_password, passwordForm.new_password);
+      showPasswordModal = false;
+      passwordForm = { old_password: '', new_password: '', confirm_password: '' };
+      showSuccess('Password changed successfully');
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to change password';
     }
   }
 
@@ -79,15 +123,26 @@
 
 <div class="page-header">
   <h1>User Management</h1>
-  <button class="btn btn-primary" on:click={() => { showCreateModal = true; resetForm(); }}>
-    + Add User
-  </button>
+  <div class="header-actions">
+    <button class="btn btn-secondary" on:click={() => { showPasswordModal = true; passwordForm = { old_password: '', new_password: '', confirm_password: '' }; }}>
+      🔑 Change Password
+    </button>
+    <button class="btn btn-primary" on:click={() => { showCreateModal = true; resetForm(); }}>
+      + Add User
+    </button>
+  </div>
 </div>
 
 {#if error}
   <div class="card error-card">
     <p>{error}</p>
     <button class="btn btn-secondary" on:click={() => error = ''}>Dismiss</button>
+  </div>
+{/if}
+
+{#if successMsg}
+  <div class="card success-card">
+    <p>{successMsg}</p>
   </div>
 {/if}
 
@@ -107,7 +162,12 @@
       <tbody>
         {#each users as user}
           <tr>
-            <td><strong>{user.username}</strong></td>
+            <td>
+              <strong>{user.username}</strong>
+              {#if currentUser && user.username === currentUser.username}
+                <span class="badge badge-info" style="margin-left: 0.5rem; font-size: 0.65rem;">You</span>
+              {/if}
+            </td>
             <td>
               <span class="badge {getRoleBadgeClass(user.role)}">{user.role}</span>
             </td>
@@ -117,6 +177,7 @@
                 class="btn btn-danger" 
                 on:click={() => handleDelete(user)}
                 disabled={user.username === 'admin'}
+                title={user.username === 'admin' ? 'Cannot delete the default admin account' : ''}
               >
                 Delete
               </button>
@@ -182,13 +243,54 @@
   </div>
 {/if}
 
+<!-- Change Password Modal -->
+{#if showPasswordModal}
+  <div class="modal-overlay" on:click={() => showPasswordModal = false} role="presentation">
+    <div class="modal" on:click|stopPropagation role="dialog" aria-modal="true" tabindex="-1">
+      <h2>Change Password</h2>
+      <p class="modal-desc">Change the password for your account ({currentUser?.username}).</p>
+      <form on:submit|preventDefault={handleChangePassword}>
+        <div class="form-group">
+          <label for="old-password">Current Password</label>
+          <input type="password" id="old-password" bind:value={passwordForm.old_password} required placeholder="Enter current password" />
+        </div>
+        <div class="form-group">
+          <label for="new-password">New Password</label>
+          <input type="password" id="new-password" bind:value={passwordForm.new_password} required placeholder="Enter new password (min 6 chars)" />
+        </div>
+        <div class="form-group">
+          <label for="confirm-password">Confirm New Password</label>
+          <input type="password" id="confirm-password" bind:value={passwordForm.confirm_password} required placeholder="Confirm new password" />
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" on:click={() => showPasswordModal = false}>Cancel</button>
+          <button type="submit" class="btn btn-primary">Change Password</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{/if}
+
 <style>
+  .header-actions {
+    display: flex;
+    gap: 0.75rem;
+  }
+
   .error-card {
     background: #f8d7da;
     color: #721c24;
     display: flex;
     justify-content: space-between;
     align-items: center;
+  }
+
+  .success-card {
+    background: #d4edda;
+    color: #155724;
+    padding: 0.75rem 1rem;
+    border-radius: 8px;
+    margin-bottom: 1rem;
   }
 
   .no-data {
@@ -250,6 +352,12 @@
   }
 
   .modal h2 {
+    margin: 0 0 0.5rem;
+  }
+
+  .modal-desc {
+    color: #666;
+    font-size: 0.875rem;
     margin: 0 0 1.5rem;
   }
 

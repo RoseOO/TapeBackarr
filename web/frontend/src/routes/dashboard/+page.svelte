@@ -10,6 +10,9 @@
     recent_backups: number;
     drive_status: string;
     total_data_bytes: number;
+    loaded_tape: string;
+    loaded_tape_uuid: string;
+    loaded_tape_pool: string;
   }
 
   let stats: DashboardStats | null = null;
@@ -103,6 +106,22 @@
         <span class="status-indicator"></span>
         <span class="status-text">{stats.drive_status}</span>
       </div>
+      {#if stats.loaded_tape}
+        <div class="loaded-tape-info">
+          <h3>Loaded Tape</h3>
+          <div class="tape-detail"><strong>Label:</strong> {stats.loaded_tape}</div>
+          {#if stats.loaded_tape_uuid}
+            <div class="tape-detail"><strong>UUID:</strong> <span class="uuid">{stats.loaded_tape_uuid}</span></div>
+          {/if}
+          {#if stats.loaded_tape_pool}
+            <div class="tape-detail"><strong>Pool:</strong> {stats.loaded_tape_pool}</div>
+          {/if}
+        </div>
+      {:else if stats.drive_status === 'online'}
+        <div class="loaded-tape-info">
+          <p class="no-tape">No labeled tape detected in drive</p>
+        </div>
+      {/if}
     </div>
 
     <div class="card quick-actions">
@@ -196,6 +215,37 @@
   .status-text {
     font-weight: 600;
     text-transform: capitalize;
+  }
+
+  .loaded-tape-info {
+    margin-top: 1rem;
+    padding: 0.75rem;
+    background: #f0f0f5;
+    border-radius: 8px;
+  }
+
+  .loaded-tape-info h3 {
+    margin: 0 0 0.5rem;
+    font-size: 0.875rem;
+    color: #555;
+  }
+
+  .tape-detail {
+    font-size: 0.875rem;
+    margin-bottom: 0.25rem;
+  }
+
+  .tape-detail .uuid {
+    font-family: monospace;
+    font-size: 0.75rem;
+    color: #888;
+  }
+
+  .no-tape {
+    font-size: 0.875rem;
+    color: #888;
+    margin: 0;
+    font-style: italic;
   }
 
   .action-buttons {

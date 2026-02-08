@@ -2,9 +2,12 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -16,6 +19,7 @@ import (
 
 	"github.com/RoseOO/TapeBackarr/internal/auth"
 	"github.com/RoseOO/TapeBackarr/internal/backup"
+	"github.com/RoseOO/TapeBackarr/internal/config"
 	"github.com/RoseOO/TapeBackarr/internal/database"
 	"github.com/RoseOO/TapeBackarr/internal/encryption"
 	"github.com/RoseOO/TapeBackarr/internal/logging"
@@ -32,6 +36,8 @@ import (
 	"github.com/go-chi/cors"
 )
 
+var cryptoRand io.Reader = rand.Reader
+
 // Server represents the API server
 type Server struct {
 	router                *chi.Mux
@@ -47,6 +53,8 @@ type Server struct {
 	proxmoxRestoreService *proxmox.RestoreService
 	proxmoxClient         *proxmox.Client
 	staticDir             string
+	configPath            string
+	config                *config.Config
 }
 
 // NewServer creates a new API server
@@ -63,6 +71,8 @@ func NewServer(
 	proxmoxBackupService *proxmox.BackupService,
 	proxmoxRestoreService *proxmox.RestoreService,
 	staticDir string,
+	configPath string,
+	cfg *config.Config,
 ) *Server {
 	s := &Server{
 		router:                chi.NewRouter(),
@@ -78,6 +88,8 @@ func NewServer(
 		proxmoxBackupService:  proxmoxBackupService,
 		proxmoxRestoreService: proxmoxRestoreService,
 		staticDir:             staticDir,
+		configPath:            configPath,
+		config:                cfg,
 	}
 
 	s.setupRoutes()
@@ -123,6 +135,10 @@ func (s *Server) setupRoutes() {
 			r.Put("/{id}", s.handleUpdateTape)
 			r.Delete("/{id}", s.handleDeleteTape)
 			r.Post("/{id}/label", s.handleLabelTape)
+			r.Post("/{id}/format", s.handleFormatTape)
+			r.Post("/{id}/export", s.handleExportTape)
+			r.Post("/{id}/import", s.handleImportTape)
+			r.Get("/{id}/read-label", s.handleReadTapeLabel)
 		})
 
 		// Tape Pools
@@ -138,6 +154,7 @@ func (s *Server) setupRoutes() {
 		r.Route("/api/v1/drives", func(r chi.Router) {
 			r.Get("/", s.handleListDrives)
 			r.Post("/", s.handleCreateDrive)
+			r.Get("/scan", s.handleScanDrives)
 			r.Get("/{id}/status", s.handleDriveStatus)
 			r.Put("/{id}", s.handleUpdateDrive)
 			r.Delete("/{id}", s.handleDeleteDrive)
@@ -196,6 +213,18 @@ func (s *Server) setupRoutes() {
 			r.Get("/", s.handleListUsers)
 			r.Post("/", s.handleCreateUser)
 			r.Delete("/{id}", s.handleDeleteUser)
+		})
+
+		// Password change (any authenticated user)
+		r.Post("/api/v1/auth/change-password", s.handleChangePassword)
+
+		// Settings/Config (admin only for write, all authenticated for read)
+		r.Route("/api/v1/settings", func(r chi.Router) {
+			r.Get("/", s.handleGetConfig)
+			r.Group(func(r chi.Router) {
+				r.Use(s.adminOnlyMiddleware)
+				r.Put("/", s.handleUpdateConfig)
+			})
 		})
 
 		// Documentation
@@ -400,6 +429,9 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		RecentBackups  int    `json:"recent_backups"`
 		DriveStatus    string `json:"drive_status"`
 		TotalDataBytes int64  `json:"total_data_bytes"`
+		LoadedTape     string `json:"loaded_tape"`
+		LoadedTapeUUID string `json:"loaded_tape_uuid"`
+		LoadedTapePool string `json:"loaded_tape_pool"`
 	}
 
 	s.db.QueryRow("SELECT COUNT(*) FROM tapes").Scan(&stats.TotalTapes)
@@ -409,13 +441,19 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	s.db.QueryRow("SELECT COUNT(*) FROM backup_sets WHERE start_time > datetime('now', '-24 hours')").Scan(&stats.RecentBackups)
 	s.db.QueryRow("SELECT COALESCE(SUM(total_bytes), 0) FROM backup_sets WHERE status = 'completed'").Scan(&stats.TotalDataBytes)
 
-	// Get drive status
+	// Get drive status and loaded tape label
 	ctx := r.Context()
 	status, err := s.tapeService.GetStatus(ctx)
 	if err != nil {
 		stats.DriveStatus = "error"
 	} else if status.Online {
 		stats.DriveStatus = "online"
+		// Try to read the label from the loaded tape
+		if labelData, err := s.tapeService.ReadTapeLabel(ctx); err == nil && labelData != nil {
+			stats.LoadedTape = labelData.Label
+			stats.LoadedTapeUUID = labelData.UUID
+			stats.LoadedTapePool = labelData.Pool
+		}
 	} else {
 		stats.DriveStatus = "offline"
 	}
@@ -427,8 +465,8 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListTapes(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`
-		SELECT t.id, t.barcode, t.label, t.pool_id, tp.name as pool_name, t.status, 
-		       t.capacity_bytes, t.used_bytes, t.write_count, t.last_written_at, t.created_at
+		SELECT t.id, t.uuid, t.barcode, t.label, t.pool_id, tp.name as pool_name, t.status, 
+		       t.capacity_bytes, t.used_bytes, t.write_count, t.last_written_at, t.labeled_at, t.created_at
 		FROM tapes t
 		LEFT JOIN tape_pools tp ON t.pool_id = tp.id
 		ORDER BY t.label
@@ -443,12 +481,13 @@ func (s *Server) handleListTapes(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var t models.Tape
 		var poolName *string
-		if err := rows.Scan(&t.ID, &t.Barcode, &t.Label, &t.PoolID, &poolName, &t.Status,
-			&t.CapacityBytes, &t.UsedBytes, &t.WriteCount, &t.LastWrittenAt, &t.CreatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.UUID, &t.Barcode, &t.Label, &t.PoolID, &poolName, &t.Status,
+			&t.CapacityBytes, &t.UsedBytes, &t.WriteCount, &t.LastWrittenAt, &t.LabeledAt, &t.CreatedAt); err != nil {
 			continue
 		}
 		tape := map[string]interface{}{
 			"id":              t.ID,
+			"uuid":            t.UUID,
 			"barcode":         t.Barcode,
 			"label":           t.Label,
 			"pool_id":         t.PoolID,
@@ -458,6 +497,7 @@ func (s *Server) handleListTapes(w http.ResponseWriter, r *http.Request) {
 			"used_bytes":      t.UsedBytes,
 			"write_count":     t.WriteCount,
 			"last_written_at": t.LastWrittenAt,
+			"labeled_at":      t.LabeledAt,
 			"created_at":      t.CreatedAt,
 		}
 		tapes = append(tapes, tape)
@@ -472,23 +512,110 @@ func (s *Server) handleCreateTape(w http.ResponseWriter, r *http.Request) {
 		Label         string `json:"label"`
 		PoolID        *int64 `json:"pool_id"`
 		CapacityBytes int64  `json:"capacity_bytes"`
+		DriveID       *int64 `json:"drive_id"`
+		WriteLabel    bool   `json:"write_label"`
+		AutoEject     bool   `json:"auto_eject"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.respondError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
+	if req.Label == "" {
+		s.respondError(w, http.StatusBadRequest, "label is required")
+		return
+	}
+
+	// Check if a tape with the same label already exists in the database
+	var existingCount int
+	s.db.QueryRow("SELECT COUNT(*) FROM tapes WHERE label = ?", req.Label).Scan(&existingCount)
+	if existingCount > 0 {
+		s.respondError(w, http.StatusConflict, "a tape with this label already exists in the database")
+		return
+	}
+
+	// Check if a tape with the same barcode already exists (if barcode provided)
+	if req.Barcode != "" {
+		s.db.QueryRow("SELECT COUNT(*) FROM tapes WHERE barcode = ? AND barcode != ''", req.Barcode).Scan(&existingCount)
+		if existingCount > 0 {
+			s.respondError(w, http.StatusConflict, "a tape with this barcode already exists in the database")
+			return
+		}
+	}
+
+	// Generate UUID for the tape
+	tapeUUID := generateUUID()
+
+	// Get pool name if pool assigned
+	poolName := ""
+	if req.PoolID != nil {
+		_ = s.db.QueryRow("SELECT name FROM tape_pools WHERE id = ?", *req.PoolID).Scan(&poolName)
+	}
+
+	// If write_label is requested and a drive is specified, write to physical tape
+	if req.WriteLabel && req.DriveID != nil {
+		var devicePath string
+		err := s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", *req.DriveID).Scan(&devicePath)
+		if err != nil {
+			s.respondError(w, http.StatusBadRequest, "drive not found or not enabled")
+			return
+		}
+
+		ctx := r.Context()
+		driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+
+		// Verify tape is loaded
+		loaded, err := driveSvc.IsTapeLoaded(ctx)
+		if err != nil || !loaded {
+			s.respondError(w, http.StatusConflict, "no tape loaded in drive - please insert a tape first")
+			return
+		}
+
+		// Check write protection
+		status, err := driveSvc.GetStatus(ctx)
+		if err == nil && status.WriteProtect {
+			s.respondError(w, http.StatusConflict, "tape is write-protected")
+			return
+		}
+
+		// Check if tape already has data/label before writing
+		if existingLabel, err := driveSvc.ReadTapeLabel(ctx); err == nil && existingLabel != nil && existingLabel.Label != "" {
+			s.respondError(w, http.StatusConflict, fmt.Sprintf("tape already has a label: '%s' (UUID: %s). Format the tape first to re-label it.", existingLabel.Label, existingLabel.UUID))
+			return
+		}
+
+		// Write label to physical tape
+		if err := driveSvc.WriteTapeLabel(ctx, req.Label, tapeUUID, poolName); err != nil {
+			s.logger.Warn("Failed to write label to physical tape, continuing with software tracking", map[string]interface{}{
+				"error": err.Error(),
+				"label": req.Label,
+			})
+		}
+
+		// Auto-eject after labeling if requested
+		if req.AutoEject {
+			if err := driveSvc.Eject(ctx); err != nil {
+				s.logger.Warn("Failed to auto-eject tape after labeling", map[string]interface{}{
+					"error": err.Error(),
+				})
+			}
+		}
+	}
+
 	result, err := s.db.Exec(`
-		INSERT INTO tapes (barcode, label, pool_id, status, capacity_bytes)
-		VALUES (?, ?, ?, 'blank', ?)
-	`, req.Barcode, req.Label, req.PoolID, req.CapacityBytes)
+		INSERT INTO tapes (uuid, barcode, label, pool_id, status, capacity_bytes, labeled_at)
+		VALUES (?, ?, ?, ?, 'blank', ?, CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END)
+	`, tapeUUID, req.Barcode, req.Label, req.PoolID, req.CapacityBytes, req.WriteLabel)
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	id, _ := result.LastInsertId()
-	s.respondJSON(w, http.StatusCreated, map[string]int64{"id": id})
+	s.respondJSON(w, http.StatusCreated, map[string]interface{}{
+		"id":   id,
+		"uuid": tapeUUID,
+	})
 }
 
 func (s *Server) handleGetTape(w http.ResponseWriter, r *http.Request) {
@@ -500,11 +627,11 @@ func (s *Server) handleGetTape(w http.ResponseWriter, r *http.Request) {
 
 	var t models.Tape
 	err = s.db.QueryRow(`
-		SELECT id, barcode, label, pool_id, status, capacity_bytes, used_bytes, 
-		       write_count, last_written_at, offsite_location, created_at, updated_at
+		SELECT id, uuid, barcode, label, pool_id, status, capacity_bytes, used_bytes, 
+		       write_count, last_written_at, offsite_location, export_time, import_time, labeled_at, created_at, updated_at
 		FROM tapes WHERE id = ?
-	`, id).Scan(&t.ID, &t.Barcode, &t.Label, &t.PoolID, &t.Status, &t.CapacityBytes, &t.UsedBytes,
-		&t.WriteCount, &t.LastWrittenAt, &t.OffsiteLocation, &t.CreatedAt, &t.UpdatedAt)
+	`, id).Scan(&t.ID, &t.UUID, &t.Barcode, &t.Label, &t.PoolID, &t.Status, &t.CapacityBytes, &t.UsedBytes,
+		&t.WriteCount, &t.LastWrittenAt, &t.OffsiteLocation, &t.ExportTime, &t.ImportTime, &t.LabeledAt, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		s.respondError(w, http.StatusNotFound, "tape not found")
 		return
@@ -529,6 +656,40 @@ func (s *Server) handleUpdateTape(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.respondError(w, http.StatusBadRequest, "invalid request body")
 		return
+	}
+
+	// Get current tape state for lifecycle safeguards
+	var currentStatus string
+	var currentPoolID *int64
+	err = s.db.QueryRow("SELECT status, pool_id FROM tapes WHERE id = ?", id).Scan(&currentStatus, &currentPoolID)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "tape not found")
+		return
+	}
+
+	// Lifecycle safeguards
+	if req.Status != nil {
+		newStatus := string(*req.Status)
+
+		// Refuse to overwrite exported tapes
+		if currentStatus == "exported" && newStatus != "exported" {
+			s.respondError(w, http.StatusConflict, "tape is exported/offsite - import it first before changing status")
+			return
+		}
+
+		// Refuse to reuse active or unexpired tapes by setting them to blank
+		if newStatus == "blank" && (currentStatus == "active" || currentStatus == "full") {
+			s.respondError(w, http.StatusConflict, "cannot set active or full tape to blank - use the format/erase endpoint instead")
+			return
+		}
+	}
+
+	// Pool mismatch detection - refuse to change pool if tape has data
+	if req.PoolID != nil && currentPoolID != nil && *req.PoolID != *currentPoolID {
+		if currentStatus == "active" || currentStatus == "full" {
+			s.respondError(w, http.StatusConflict, "cannot change pool of a tape that contains data")
+			return
+		}
 	}
 
 	// Build dynamic update query
@@ -577,6 +738,18 @@ func (s *Server) handleDeleteTape(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Safety: refuse to delete tapes that are active or exported
+	var status string
+	err = s.db.QueryRow("SELECT status FROM tapes WHERE id = ?", id).Scan(&status)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "tape not found")
+		return
+	}
+	if status == "active" || status == "exported" {
+		s.respondError(w, http.StatusConflict, "cannot delete tape with status '"+status+"' - retire or format it first")
+		return
+	}
+
 	_, err = s.db.Exec("DELETE FROM tapes WHERE id = ?", id)
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
@@ -594,23 +767,86 @@ func (s *Server) handleLabelTape(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Label string `json:"label"`
+		Label      string `json:"label"`
+		DriveID    *int64 `json:"drive_id"`
+		Force      bool   `json:"force"`
+		AutoEject  bool   `json:"auto_eject"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.respondError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
-	ctx := r.Context()
-
-	// Write label to tape
-	if err := s.tapeService.WriteTapeLabel(ctx, req.Label); err != nil {
-		s.respondError(w, http.StatusInternalServerError, "failed to write tape label: "+err.Error())
+	// Get tape UUID and pool
+	var tapeUUID string
+	var poolID *int64
+	err = s.db.QueryRow("SELECT uuid, pool_id FROM tapes WHERE id = ?", id).Scan(&tapeUUID, &poolID)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "tape not found")
 		return
 	}
 
+	poolName := ""
+	if poolID != nil {
+		_ = s.db.QueryRow("SELECT name FROM tape_pools WHERE id = ?", *poolID).Scan(&poolName)
+	}
+
+	// Determine which drive to use
+	devicePath := ""
+	if req.DriveID != nil {
+		err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", *req.DriveID).Scan(&devicePath)
+		if err != nil {
+			s.respondError(w, http.StatusBadRequest, "drive not found or not enabled")
+			return
+		}
+	}
+
+	ctx := r.Context()
+
+	if devicePath != "" {
+		driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+
+		// Verify tape is loaded
+		loaded, err := driveSvc.IsTapeLoaded(ctx)
+		if err != nil || !loaded {
+			s.respondError(w, http.StatusConflict, "no tape loaded in drive")
+			return
+		}
+
+		// Check if tape already has data/label before writing (unless force=true)
+		if !req.Force {
+			if existingLabel, err := driveSvc.ReadTapeLabel(ctx); err == nil && existingLabel != nil && existingLabel.Label != "" {
+				s.respondError(w, http.StatusConflict, fmt.Sprintf("tape already has a label: '%s' (UUID: %s). Use force=true or format the tape first.", existingLabel.Label, existingLabel.UUID))
+				return
+			}
+		}
+
+		// Write label to tape with UUID and pool info
+		if err := driveSvc.WriteTapeLabel(ctx, req.Label, tapeUUID, poolName); err != nil {
+			s.logger.Warn("Failed to write label to physical tape, continuing with software tracking", map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+
+		// Auto-eject after labeling if requested
+		if req.AutoEject {
+			if err := driveSvc.Eject(ctx); err != nil {
+				s.logger.Warn("Failed to auto-eject tape after labeling", map[string]interface{}{
+					"error": err.Error(),
+				})
+			}
+		}
+	} else {
+		// Use default tape service
+		if err := s.tapeService.WriteTapeLabel(ctx, req.Label, tapeUUID, poolName); err != nil {
+			s.logger.Warn("Failed to write label to physical tape, continuing with software tracking", map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+	}
+
 	// Update database
-	_, err = s.db.Exec("UPDATE tapes SET label = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", req.Label, id)
+	_, err = s.db.Exec("UPDATE tapes SET label = ?, labeled_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?", req.Label, id)
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -622,20 +858,37 @@ func (s *Server) handleLabelTape(w http.ResponseWriter, r *http.Request) {
 // Pool handlers
 
 func (s *Server) handleListPools(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.Query("SELECT id, name, description, retention_days, created_at FROM tape_pools ORDER BY name")
+	rows, err := s.db.Query(`
+		SELECT tp.id, tp.name, tp.description, tp.retention_days, tp.allow_reuse, tp.allocation_policy, tp.created_at,
+		       COUNT(t.id) as tape_count
+		FROM tape_pools tp
+		LEFT JOIN tapes t ON t.pool_id = tp.id
+		GROUP BY tp.id
+		ORDER BY tp.name
+	`)
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	defer rows.Close()
 
-	pools := make([]models.TapePool, 0)
+	pools := make([]map[string]interface{}, 0)
 	for rows.Next() {
 		var p models.TapePool
-		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.RetentionDays, &p.CreatedAt); err != nil {
+		var tapeCount int
+		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.RetentionDays, &p.AllowReuse, &p.AllocationPolicy, &p.CreatedAt, &tapeCount); err != nil {
 			continue
 		}
-		pools = append(pools, p)
+		pools = append(pools, map[string]interface{}{
+			"id":                p.ID,
+			"name":              p.Name,
+			"description":       p.Description,
+			"retention_days":    p.RetentionDays,
+			"allow_reuse":       p.AllowReuse,
+			"allocation_policy": p.AllocationPolicy,
+			"tape_count":        tapeCount,
+			"created_at":        p.CreatedAt,
+		})
 	}
 
 	s.respondJSON(w, http.StatusOK, pools)
@@ -643,19 +896,29 @@ func (s *Server) handleListPools(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreatePool(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name          string `json:"name"`
-		Description   string `json:"description"`
-		RetentionDays int    `json:"retention_days"`
+		Name             string `json:"name"`
+		Description      string `json:"description"`
+		RetentionDays    int    `json:"retention_days"`
+		AllowReuse       *bool  `json:"allow_reuse"`
+		AllocationPolicy string `json:"allocation_policy"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.respondError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
+	allowReuse := true
+	if req.AllowReuse != nil {
+		allowReuse = *req.AllowReuse
+	}
+	if req.AllocationPolicy == "" {
+		req.AllocationPolicy = "continue"
+	}
+
 	result, err := s.db.Exec(`
-		INSERT INTO tape_pools (name, description, retention_days)
-		VALUES (?, ?, ?)
-	`, req.Name, req.Description, req.RetentionDays)
+		INSERT INTO tape_pools (name, description, retention_days, allow_reuse, allocation_policy)
+		VALUES (?, ?, ?, ?, ?)
+	`, req.Name, req.Description, req.RetentionDays, allowReuse, req.AllocationPolicy)
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -674,9 +937,9 @@ func (s *Server) handleGetPool(w http.ResponseWriter, r *http.Request) {
 
 	var p models.TapePool
 	err = s.db.QueryRow(`
-		SELECT id, name, description, retention_days, created_at, updated_at
+		SELECT id, name, description, retention_days, allow_reuse, allocation_policy, created_at, updated_at
 		FROM tape_pools WHERE id = ?
-	`, id).Scan(&p.ID, &p.Name, &p.Description, &p.RetentionDays, &p.CreatedAt, &p.UpdatedAt)
+	`, id).Scan(&p.ID, &p.Name, &p.Description, &p.RetentionDays, &p.AllowReuse, &p.AllocationPolicy, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		s.respondError(w, http.StatusNotFound, "pool not found")
 		return
@@ -693,9 +956,11 @@ func (s *Server) handleUpdatePool(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Name          *string `json:"name"`
-		Description   *string `json:"description"`
-		RetentionDays *int    `json:"retention_days"`
+		Name             *string `json:"name"`
+		Description      *string `json:"description"`
+		RetentionDays    *int    `json:"retention_days"`
+		AllowReuse       *bool   `json:"allow_reuse"`
+		AllocationPolicy *string `json:"allocation_policy"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.respondError(w, http.StatusBadRequest, "invalid request body")
@@ -716,6 +981,14 @@ func (s *Server) handleUpdatePool(w http.ResponseWriter, r *http.Request) {
 	if req.RetentionDays != nil {
 		updates = append(updates, "retention_days = ?")
 		args = append(args, *req.RetentionDays)
+	}
+	if req.AllowReuse != nil {
+		updates = append(updates, "allow_reuse = ?")
+		args = append(args, *req.AllowReuse)
+	}
+	if req.AllocationPolicy != nil {
+		updates = append(updates, "allocation_policy = ?")
+		args = append(args, *req.AllocationPolicy)
 	}
 
 	if len(updates) == 0 {
@@ -756,7 +1029,7 @@ func (s *Server) handleDeletePool(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListDrives(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`
-		SELECT id, device_path, serial_number, model, status, current_tape_id, created_at
+		SELECT id, device_path, COALESCE(display_name, '') as display_name, serial_number, model, status, current_tape_id, COALESCE(enabled, 1) as enabled, created_at
 		FROM tape_drives ORDER BY device_path
 	`)
 	if err != nil {
@@ -768,7 +1041,7 @@ func (s *Server) handleListDrives(w http.ResponseWriter, r *http.Request) {
 	drives := make([]models.TapeDrive, 0)
 	for rows.Next() {
 		var d models.TapeDrive
-		if err := rows.Scan(&d.ID, &d.DevicePath, &d.SerialNumber, &d.Model, &d.Status, &d.CurrentTapeID, &d.CreatedAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.DevicePath, &d.DisplayName, &d.SerialNumber, &d.Model, &d.Status, &d.CurrentTapeID, &d.Enabled, &d.CreatedAt); err != nil {
 			continue
 		}
 		drives = append(drives, d)
@@ -1560,6 +1833,10 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.authService.DeleteUser(id); err != nil {
+		if errors.Is(err, auth.ErrCannotDeleteAdmin) {
+			s.respondError(w, http.StatusForbidden, "cannot delete the default admin account")
+			return
+		}
 		s.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -1992,6 +2269,385 @@ func calculateFileChecksum(path string) (string, error) {
 	}
 
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// generateUUID generates a random UUID v4
+func generateUUID() string {
+	b := make([]byte, 16)
+	if _, err := io.ReadFull(cryptoRand, b); err != nil {
+		// Fallback: use timestamp-based pseudo-UUID if crypto/rand fails
+		ts := time.Now().UnixNano()
+		for i := range b {
+			b[i] = byte(ts >> (i * 4))
+		}
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // Version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // Variant 10
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%12x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// handleFormatTape erases/formats a tape, removing all data including labels
+func (s *Server) handleFormatTape(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid tape id")
+		return
+	}
+
+	var req struct {
+		DriveID int64 `json:"drive_id"`
+		Confirm bool  `json:"confirm"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Require explicit confirmation for destructive action
+	if !req.Confirm {
+		s.respondError(w, http.StatusBadRequest, "destructive action requires confirm=true")
+		return
+	}
+
+	// Check tape status - refuse to format exported tapes
+	var status string
+	err = s.db.QueryRow("SELECT status FROM tapes WHERE id = ?", id).Scan(&status)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "tape not found")
+		return
+	}
+	if status == "exported" {
+		s.respondError(w, http.StatusConflict, "cannot format exported tape - import it first")
+		return
+	}
+
+	// Get drive device path
+	var devicePath string
+	err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", req.DriveID).Scan(&devicePath)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "drive not found or not enabled")
+		return
+	}
+
+	ctx := r.Context()
+	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+
+	// Verify tape is loaded
+	loaded, err := driveSvc.IsTapeLoaded(ctx)
+	if err != nil || !loaded {
+		s.respondError(w, http.StatusConflict, "no tape loaded in drive")
+		return
+	}
+
+	// Check write protection
+	driveStatus, err := driveSvc.GetStatus(ctx)
+	if err == nil && driveStatus.WriteProtect {
+		s.respondError(w, http.StatusConflict, "tape is write-protected")
+		return
+	}
+
+	// Erase the tape
+	if err := driveSvc.EraseTape(ctx); err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to format tape: "+err.Error())
+		return
+	}
+
+	// Reset tape in database to blank state
+	_, err = s.db.Exec(`
+		UPDATE tapes SET status = 'blank', used_bytes = 0, write_count = 0,
+		       last_written_at = NULL, labeled_at = NULL, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, id)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]string{"status": "formatted"})
+}
+
+// handleExportTape marks a tape as exported/offsite
+func (s *Server) handleExportTape(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid tape id")
+		return
+	}
+
+	var req struct {
+		OffsiteLocation string `json:"offsite_location"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Verify tape exists and is not already exported
+	var status string
+	err = s.db.QueryRow("SELECT status FROM tapes WHERE id = ?", id).Scan(&status)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "tape not found")
+		return
+	}
+	if status == "exported" {
+		s.respondError(w, http.StatusConflict, "tape is already exported")
+		return
+	}
+	if status == "blank" {
+		s.respondError(w, http.StatusConflict, "cannot export a blank tape")
+		return
+	}
+
+	_, err = s.db.Exec(`
+		UPDATE tapes SET status = 'exported', offsite_location = ?, export_time = CURRENT_TIMESTAMP,
+		       updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, req.OffsiteLocation, id)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]string{"status": "exported"})
+}
+
+// handleImportTape imports an exported tape back into the system
+func (s *Server) handleImportTape(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid tape id")
+		return
+	}
+
+	var req struct {
+		DriveID *int64 `json:"drive_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Verify tape is exported
+	var status string
+	var tapeUUID, tapeLabel string
+	var poolID *int64
+	err = s.db.QueryRow("SELECT status, uuid, label, pool_id FROM tapes WHERE id = ?", id).Scan(&status, &tapeUUID, &tapeLabel, &poolID)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "tape not found")
+		return
+	}
+	if status != "exported" {
+		s.respondError(w, http.StatusConflict, "tape is not exported")
+		return
+	}
+
+	// If drive is specified, verify label on physical tape matches
+	if req.DriveID != nil {
+		var devicePath string
+		err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", *req.DriveID).Scan(&devicePath)
+		if err != nil {
+			s.respondError(w, http.StatusBadRequest, "drive not found or not enabled")
+			return
+		}
+
+		ctx := r.Context()
+		driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+
+		labelData, err := driveSvc.ReadTapeLabel(ctx)
+		if err != nil {
+			s.logger.Warn("Could not read tape label during import", map[string]interface{}{"error": err.Error()})
+		} else if labelData != nil && labelData.UUID != "" && strings.ToLower(labelData.UUID) != strings.ToLower(tapeUUID) {
+			s.respondError(w, http.StatusConflict, "tape label UUID mismatch - loaded tape does not match database record")
+			return
+		}
+	}
+
+	// Restore tape to previous usable state (full if it had data, active otherwise)
+	newStatus := "full"
+
+	_, err = s.db.Exec(`
+		UPDATE tapes SET status = ?, import_time = CURRENT_TIMESTAMP,
+		       updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, newStatus, id)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]string{"status": "imported", "new_status": newStatus})
+}
+
+// handleReadTapeLabel reads the label from a physical tape in the drive
+func (s *Server) handleReadTapeLabel(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid tape id")
+		return
+	}
+
+	driveIDStr := r.URL.Query().Get("drive_id")
+	if driveIDStr == "" {
+		s.respondError(w, http.StatusBadRequest, "drive_id query parameter is required")
+		return
+	}
+	driveID, err := strconv.ParseInt(driveIDStr, 10, 64)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid drive_id")
+		return
+	}
+
+	var devicePath string
+	err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", driveID).Scan(&devicePath)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "drive not found or not enabled")
+		return
+	}
+
+	ctx := r.Context()
+	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+
+	labelData, err := driveSvc.ReadTapeLabel(ctx)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to read tape label: "+err.Error())
+		return
+	}
+
+	if labelData == nil {
+		s.respondJSON(w, http.StatusOK, map[string]interface{}{
+			"tape_id":  id,
+			"labeled":  false,
+			"message":  "no TapeBackarr label found on tape",
+		})
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"tape_id":   id,
+		"labeled":   true,
+		"label":     labelData.Label,
+		"uuid":      labelData.UUID,
+		"pool":      labelData.Pool,
+		"timestamp": labelData.Timestamp,
+	})
+}
+
+// handleScanDrives scans the system for available tape drives
+func (s *Server) handleScanDrives(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	drives, err := tape.ScanDrives(ctx)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to scan drives: "+err.Error())
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, drives)
+}
+
+// handleChangePassword allows any authenticated user to change their own password
+func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	claims := r.Context().Value("claims").(*auth.Claims)
+
+	var req struct {
+		OldPassword string `json:"old_password"`
+		NewPassword string `json:"new_password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.OldPassword == "" || req.NewPassword == "" {
+		s.respondError(w, http.StatusBadRequest, "old_password and new_password are required")
+		return
+	}
+
+	if len(req.NewPassword) < 6 {
+		s.respondError(w, http.StatusBadRequest, "new password must be at least 6 characters")
+		return
+	}
+
+	if err := s.authService.UpdatePassword(claims.UserID, req.OldPassword, req.NewPassword); err != nil {
+		if errors.Is(err, auth.ErrInvalidCredentials) {
+			s.respondError(w, http.StatusUnauthorized, "current password is incorrect")
+			return
+		}
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]string{"status": "password changed"})
+}
+
+// handleGetConfig returns the current application configuration (sensitive fields masked)
+func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
+	if s.config == nil {
+		s.respondError(w, http.StatusInternalServerError, "configuration not available")
+		return
+	}
+
+	// Return config with sensitive fields masked
+	safeConfig := *s.config
+	if safeConfig.Auth.JWTSecret != "" {
+		safeConfig.Auth.JWTSecret = "********"
+	}
+	if safeConfig.Notifications.Telegram.BotToken != "" {
+		safeConfig.Notifications.Telegram.BotToken = "********"
+	}
+	if safeConfig.Notifications.Email.Password != "" {
+		safeConfig.Notifications.Email.Password = "********"
+	}
+	if safeConfig.Proxmox.Password != "" {
+		safeConfig.Proxmox.Password = "********"
+	}
+	if safeConfig.Proxmox.TokenSecret != "" {
+		safeConfig.Proxmox.TokenSecret = "********"
+	}
+
+	s.respondJSON(w, http.StatusOK, safeConfig)
+}
+
+// handleUpdateConfig updates the application configuration
+func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
+	if s.config == nil || s.configPath == "" {
+		s.respondError(w, http.StatusInternalServerError, "configuration not available")
+		return
+	}
+
+	var newCfg config.Config
+	if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Preserve sensitive fields if they were masked (not changed)
+	if newCfg.Auth.JWTSecret == "********" {
+		newCfg.Auth.JWTSecret = s.config.Auth.JWTSecret
+	}
+	if newCfg.Notifications.Telegram.BotToken == "********" {
+		newCfg.Notifications.Telegram.BotToken = s.config.Notifications.Telegram.BotToken
+	}
+	if newCfg.Notifications.Email.Password == "********" {
+		newCfg.Notifications.Email.Password = s.config.Notifications.Email.Password
+	}
+	if newCfg.Proxmox.Password == "********" {
+		newCfg.Proxmox.Password = s.config.Proxmox.Password
+	}
+	if newCfg.Proxmox.TokenSecret == "********" {
+		newCfg.Proxmox.TokenSecret = s.config.Proxmox.TokenSecret
+	}
+
+	// Save to disk
+	if err := newCfg.Save(s.configPath); err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to save configuration: "+err.Error())
+		return
+	}
+
+	// Update in-memory config
+	*s.config = newCfg
+
+	s.respondJSON(w, http.StatusOK, map[string]string{"status": "configuration saved", "note": "some changes require a restart to take effect"})
 }
 
 // ==================== Proxmox Handlers ====================

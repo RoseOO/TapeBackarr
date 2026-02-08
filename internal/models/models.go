@@ -25,28 +25,32 @@ type User struct {
 
 // TapePool represents a group of tapes with similar policies
 type TapePool struct {
-	ID            int64     `json:"id" db:"id"`
-	Name          string    `json:"name" db:"name"`
-	Description   string    `json:"description" db:"description"`
-	RetentionDays int       `json:"retention_days" db:"retention_days"`
-	CreatedAt     time.Time `json:"created_at" db:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at" db:"updated_at"`
+	ID               int64     `json:"id" db:"id"`
+	Name             string    `json:"name" db:"name"`
+	Description      string    `json:"description" db:"description"`
+	RetentionDays    int       `json:"retention_days" db:"retention_days"`
+	AllowReuse       bool      `json:"allow_reuse" db:"allow_reuse"`
+	AllocationPolicy string    `json:"allocation_policy" db:"allocation_policy"`
+	CreatedAt        time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at" db:"updated_at"`
 }
 
 // TapeStatus represents the state of a tape
 type TapeStatus string
 
 const (
-	TapeStatusBlank   TapeStatus = "blank"
-	TapeStatusActive  TapeStatus = "active"
-	TapeStatusFull    TapeStatus = "full"
-	TapeStatusRetired TapeStatus = "retired"
-	TapeStatusOffsite TapeStatus = "offsite"
+	TapeStatusBlank    TapeStatus = "blank"
+	TapeStatusActive   TapeStatus = "active"
+	TapeStatusFull     TapeStatus = "full"
+	TapeStatusExpired  TapeStatus = "expired"
+	TapeStatusRetired  TapeStatus = "retired"
+	TapeStatusExported TapeStatus = "exported"
 )
 
 // Tape represents a physical tape media
 type Tape struct {
 	ID              int64      `json:"id" db:"id"`
+	UUID            string     `json:"uuid" db:"uuid"`
 	Barcode         string     `json:"barcode" db:"barcode"`
 	Label           string     `json:"label" db:"label"`
 	PoolID          *int64     `json:"pool_id" db:"pool_id"`
@@ -56,6 +60,9 @@ type Tape struct {
 	WriteCount      int        `json:"write_count" db:"write_count"`
 	LastWrittenAt   *time.Time `json:"last_written_at" db:"last_written_at"`
 	OffsiteLocation string     `json:"offsite_location" db:"offsite_location"`
+	ExportTime      *time.Time `json:"export_time" db:"export_time"`
+	ImportTime      *time.Time `json:"import_time" db:"import_time"`
+	LabeledAt       *time.Time `json:"labeled_at" db:"labeled_at"`
 	CreatedAt       time.Time  `json:"created_at" db:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at" db:"updated_at"`
 }
@@ -74,10 +81,12 @@ const (
 type TapeDrive struct {
 	ID            int64       `json:"id" db:"id"`
 	DevicePath    string      `json:"device_path" db:"device_path"`
+	DisplayName   string      `json:"display_name" db:"display_name"`
 	SerialNumber  string      `json:"serial_number" db:"serial_number"`
 	Model         string      `json:"model" db:"model"`
 	Status        DriveStatus `json:"status" db:"status"`
 	CurrentTapeID *int64      `json:"current_tape_id" db:"current_tape_id"`
+	Enabled       bool        `json:"enabled" db:"enabled"`
 	CreatedAt     time.Time   `json:"created_at" db:"created_at"`
 	UpdatedAt     time.Time   `json:"updated_at" db:"updated_at"`
 }

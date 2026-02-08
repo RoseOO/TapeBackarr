@@ -225,8 +225,21 @@ func (s *Service) ListUsers() ([]models.User, error) {
 	return users, nil
 }
 
+// ErrCannotDeleteAdmin is returned when trying to delete the default admin account
+var ErrCannotDeleteAdmin = errors.New("cannot delete the default admin account")
+
 // DeleteUser deletes a user
 func (s *Service) DeleteUser(userID int64) error {
+	// Prevent deleting the default admin account
+	var username string
+	err := s.db.QueryRow("SELECT username FROM users WHERE id = ?", userID).Scan(&username)
+	if err != nil {
+		return ErrUserNotFound
+	}
+	if username == "admin" {
+		return ErrCannotDeleteAdmin
+	}
+
 	result, err := s.db.Exec("DELETE FROM users WHERE id = ?", userID)
 	if err != nil {
 		return err

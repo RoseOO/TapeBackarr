@@ -5,11 +5,13 @@
   const navItems = [
     { href: '/dashboard', label: 'Dashboard', icon: '📊' },
     { href: '/tapes', label: 'Tapes', icon: '💾' },
+    { href: '/pools', label: 'Media Pools', icon: '🗂️' },
     { href: '/drives', label: 'Drives', icon: '🔌' },
     { href: '/jobs', label: 'Backup Jobs', icon: '📦' },
     { href: '/sources', label: 'Sources', icon: '📁' },
     { href: '/restore', label: 'Restore', icon: '🔄' },
     { href: '/logs', label: 'Logs', icon: '📋' },
+    { href: '/settings', label: 'Settings', icon: '⚙️' },
     { href: '/docs', label: 'Documentation', icon: '📖' },
   ];
 

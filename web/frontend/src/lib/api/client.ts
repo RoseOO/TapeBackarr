@@ -56,7 +56,7 @@ export async function getTape(id: number) {
   return fetchApi(`/tapes/${id}`);
 }
 
-export async function createTape(data: { barcode: string; label: string; pool_id?: number; capacity_bytes: number }) {
+export async function createTape(data: { barcode: string; label: string; pool_id?: number; capacity_bytes: number; drive_id?: number; write_label?: boolean; auto_eject?: boolean }) {
   return fetchApi('/tapes', {
     method: 'POST',
     body: JSON.stringify(data),
@@ -76,10 +76,10 @@ export async function deleteTape(id: number) {
   });
 }
 
-export async function labelTape(id: number, label: string) {
+export async function labelTape(id: number, label: string, driveId?: number, force?: boolean, autoEject?: boolean) {
   return fetchApi(`/tapes/${id}/label`, {
     method: 'POST',
-    body: JSON.stringify({ label }),
+    body: JSON.stringify({ label, drive_id: driveId, force, auto_eject: autoEject }),
   });
 }
 
@@ -127,6 +127,40 @@ export async function rewindTape(driveId: number) {
   return fetchApi(`/drives/${driveId}/rewind`, {
     method: 'POST',
   });
+}
+
+// Tape format/erase
+export async function formatTape(id: number, driveId: number, confirm: boolean) {
+  return fetchApi(`/tapes/${id}/format`, {
+    method: 'POST',
+    body: JSON.stringify({ drive_id: driveId, confirm }),
+  });
+}
+
+// Tape export (mark offsite)
+export async function exportTape(id: number, offsiteLocation: string) {
+  return fetchApi(`/tapes/${id}/export`, {
+    method: 'POST',
+    body: JSON.stringify({ offsite_location: offsiteLocation }),
+  });
+}
+
+// Tape import (bring back from offsite)
+export async function importTape(id: number, driveId?: number) {
+  return fetchApi(`/tapes/${id}/import`, {
+    method: 'POST',
+    body: JSON.stringify({ drive_id: driveId }),
+  });
+}
+
+// Read tape label from physical tape
+export async function readTapeLabel(id: number, driveId: number) {
+  return fetchApi(`/tapes/${id}/read-label?drive_id=${driveId}`);
+}
+
+// Scan for available tape drives
+export async function scanDrives() {
+  return fetchApi('/drives/scan');
 }
 
 // Sources
@@ -261,6 +295,26 @@ export async function createUser(data: { username: string; password: string; rol
 export async function deleteUser(id: number) {
   return fetchApi(`/users/${id}`, {
     method: 'DELETE',
+  });
+}
+
+// Change password
+export async function changePassword(oldPassword: string, newPassword: string) {
+  return fetchApi('/auth/change-password', {
+    method: 'POST',
+    body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
+  });
+}
+
+// Settings/Config
+export async function getSettings() {
+  return fetchApi('/settings');
+}
+
+export async function updateSettings(data: any) {
+  return fetchApi('/settings', {
+    method: 'PUT',
+    body: JSON.stringify(data),
   });
 }
 
