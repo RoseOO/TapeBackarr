@@ -141,6 +141,15 @@ type TapeDrive struct {
 	UpdatedAt     time.Time        `json:"updated_at" db:"updated_at"`
 }
 
+// CompressionType represents the compression algorithm used
+type CompressionType string
+
+const (
+	CompressionNone CompressionType = "none"
+	CompressionGzip CompressionType = "gzip"
+	CompressionZstd CompressionType = "zstd"
+)
+
 // SourceType represents the type of backup source
 type SourceType string
 
@@ -182,8 +191,9 @@ type BackupJob struct {
 	RetentionDays     int        `json:"retention_days" db:"retention_days"`
 	Enabled           bool       `json:"enabled" db:"enabled"`
 	EncryptionEnabled bool       `json:"encryption_enabled" db:"encryption_enabled"`
-	EncryptionKeyID   *int64     `json:"encryption_key_id" db:"encryption_key_id"`
-	LastRunAt         *time.Time `json:"last_run_at" db:"last_run_at"`
+	EncryptionKeyID   *int64          `json:"encryption_key_id" db:"encryption_key_id"`
+	Compression       CompressionType `json:"compression" db:"compression"`
+	LastRunAt         *time.Time      `json:"last_run_at" db:"last_run_at"`
 	NextRunAt         *time.Time `json:"next_run_at" db:"next_run_at"`
 	CreatedAt         time.Time  `json:"created_at" db:"created_at"`
 	UpdatedAt         time.Time  `json:"updated_at" db:"updated_at"`
@@ -216,6 +226,8 @@ type BackupSet struct {
 	Checksum        string          `json:"checksum" db:"checksum"`
 	Encrypted       bool            `json:"encrypted" db:"encrypted"`
 	EncryptionKeyID *int64          `json:"encryption_key_id" db:"encryption_key_id"`
+	Compressed      bool            `json:"compressed" db:"compressed"`
+	CompressionType CompressionType `json:"compression_type" db:"compression_type"`
 	ParentSetID     *int64          `json:"parent_set_id" db:"parent_set_id"`
 	CreatedAt       time.Time       `json:"created_at" db:"created_at"`
 	UpdatedAt       time.Time       `json:"updated_at" db:"updated_at"`
@@ -362,4 +374,16 @@ type RestoreOperation struct {
 	StartedAt       *time.Time             `json:"started_at" db:"started_at"`
 	CompletedAt     *time.Time             `json:"completed_at" db:"completed_at"`
 	CreatedAt       time.Time              `json:"created_at" db:"created_at"`
+}
+
+// APIKey represents an API key for programmatic access
+type APIKey struct {
+	ID          int64      `json:"id" db:"id"`
+	Name        string     `json:"name" db:"name"`
+	KeyHash     string     `json:"-" db:"key_hash"`
+	KeyPrefix   string     `json:"key_prefix" db:"key_prefix"` // First 8 chars for identification
+	Role        UserRole   `json:"role" db:"role"`
+	LastUsedAt  *time.Time `json:"last_used_at" db:"last_used_at"`
+	ExpiresAt   *time.Time `json:"expires_at" db:"expires_at"`
+	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
 }

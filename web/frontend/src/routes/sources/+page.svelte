@@ -352,8 +352,8 @@
 
 <style>
   .error-card {
-    background: #f8d7da;
-    color: #721c24;
+    background: var(--badge-danger-bg);
+    color: var(--badge-danger-text);
   }
 
   .sources-grid {
@@ -388,12 +388,12 @@
 
   .source-type {
     font-size: 0.75rem;
-    color: #666;
+    color: var(--text-muted);
     text-transform: uppercase;
   }
 
   .source-path {
-    background: #f5f5f5;
+    background: var(--bg-input);
     padding: 0.5rem 0.75rem;
     border-radius: 6px;
     margin-bottom: 1rem;
@@ -418,7 +418,7 @@
 
   .pattern-label {
     font-size: 0.75rem;
-    color: #666;
+    color: var(--text-muted);
     font-weight: 500;
   }
 
@@ -426,16 +426,16 @@
     display: inline-flex;
     align-items: center;
     gap: 0.25rem;
-    background: #e0e7ff;
-    color: #4a4aff;
+    background: var(--badge-info-bg);
+    color: var(--badge-info-text);
     padding: 0.2rem 0.5rem;
     border-radius: 4px;
     font-size: 0.75rem;
   }
 
   .pattern-tag.exclude {
-    background: #fee2e2;
-    color: #dc2626;
+    background: var(--badge-danger-bg);
+    color: var(--badge-danger-text);
   }
 
   .pattern-tag button {
@@ -459,7 +459,7 @@
 
   .no-data {
     text-align: center;
-    color: #666;
+    color: var(--text-muted);
     padding: 2rem;
   }
 
@@ -477,7 +477,7 @@
   }
 
   .modal {
-    background: white;
+    background: var(--bg-card);
     padding: 2rem;
     border-radius: 12px;
     width: 100%;

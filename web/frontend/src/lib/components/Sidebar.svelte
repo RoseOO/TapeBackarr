@@ -1,17 +1,21 @@
 <script lang="ts">
   import { page } from '$app/stores';
   import { auth } from '$lib/stores/auth';
+  import { theme } from '$lib/stores/theme';
 
   const navItems = [
     { href: '/dashboard', label: 'Dashboard', icon: '📊' },
     { href: '/tapes', label: 'Tapes', icon: '💾' },
     { href: '/pools', label: 'Media Pools', icon: '🗂️' },
     { href: '/drives', label: 'Drives', icon: '🔌' },
+    { href: '/inspect', label: 'Inspect Tape', icon: '🔍' },
     { href: '/jobs', label: 'Backup Jobs', icon: '📦' },
     { href: '/sources', label: 'Sources', icon: '📁' },
     { href: '/restore', label: 'Restore', icon: '🔄' },
     { href: '/logs', label: 'Logs', icon: '📋' },
     { href: '/encryption', label: 'Encryption', icon: '🔒' },
+    { href: '/api-keys', label: 'API Keys', icon: '🔑' },
+    { href: '/proxmox', label: 'Proxmox', icon: '🖥️' },
     { href: '/settings', label: 'Settings', icon: '⚙️' },
     { href: '/docs', label: 'Documentation', icon: '📖' },
   ];
@@ -55,6 +59,9 @@
         <span class="username">{$auth.user.username}</span>
         <span class="role">{$auth.user.role}</span>
       </div>
+      <button class="theme-btn" on:click={theme.toggle}>
+        {$theme === 'dark' ? '☀️ Light Mode' : '🌙 Dark Mode'}
+      </button>
       <button class="logout-btn" on:click={handleLogout}>Logout</button>
     {/if}
   </div>
@@ -139,6 +146,24 @@
     font-size: 0.75rem;
     color: #a0a0b0;
     text-transform: capitalize;
+  }
+
+  .theme-btn {
+    width: 100%;
+    padding: 0.5rem;
+    background: var(--bg-input, #2d2d44);
+    color: var(--text-secondary, #a0a0b0);
+    border: 1px solid var(--border-color, #3d3d54);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.2s ease;
+    margin-bottom: 0.5rem;
+    font-size: 0.8rem;
+  }
+
+  .theme-btn:hover {
+    background: var(--bg-card-hover, #3d3d54);
+    color: var(--text-primary, white);
   }
 
   .logout-btn {

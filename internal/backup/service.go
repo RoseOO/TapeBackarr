@@ -51,7 +51,8 @@ type JobProgress struct {
 	TapeCapacityBytes         int64     `json:"tape_capacity_bytes"`
 	TapeUsedBytes             int64     `json:"tape_used_bytes"` // used before this backup
 	DevicePath                string    `json:"device_path"`
-	EstimatedSecondsRemaining float64   `json:"estimated_seconds_remaining"`
+	EstimatedSecondsRemaining     float64   `json:"estimated_seconds_remaining"`
+	TapeEstimatedSecondsRemaining float64   `json:"tape_estimated_seconds_remaining"`
 	StartTime                 time.Time `json:"start_time"`
 	UpdatedAt                 time.Time `json:"updated_at"`
 	LogLines                  []string  `json:"log_lines"`
@@ -202,7 +203,7 @@ func (s *Service) updateProgress(jobID int64, phase, message string) {
 		}
 		// Update write speed and ETA
 		elapsed := time.Since(p.StartTime).Seconds()
-		if elapsed > 0 && p.BytesWritten > 0 {
+		if elapsed > 30 && p.BytesWritten > 0 {
 			p.WriteSpeed = float64(p.BytesWritten) / elapsed
 			remainingBytes := p.TotalBytes - p.BytesWritten
 			if p.WriteSpeed > 0 && remainingBytes > 0 {
@@ -615,6 +616,280 @@ func (s *Service) StreamToTapeEncrypted(ctx context.Context, sourcePath string, 
 	return nil
 }
 
+// StreamToTapeCompressed streams files to tape with compression
+func (s *Service) StreamToTapeCompressed(ctx context.Context, sourcePath string, files []FileInfo, devicePath string, compression models.CompressionType, progressCb func(bytesWritten int64), pauseFlag *int32) error {
+	if len(files) == 0 {
+		return nil
+	}
+
+	// Create a file list for tar
+	fileListPath := fmt.Sprintf("/tmp/tapebackarr-filelist-%d.txt", time.Now().UnixNano())
+	fileList, err := os.Create(fileListPath)
+	if err != nil {
+		return fmt.Errorf("failed to create file list: %w", err)
+	}
+	defer os.Remove(fileListPath)
+
+	for _, f := range files {
+		relPath, _ := filepath.Rel(sourcePath, f.Path)
+		fmt.Fprintln(fileList, relPath)
+	}
+	fileList.Close()
+
+	// Build tar command
+	tarArgs := []string{
+		"-c",
+		"-b", fmt.Sprintf("%d", s.blockSize/512),
+		"-C", sourcePath,
+		"-T", fileListPath,
+	}
+
+	tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
+	tarCmd.Dir = sourcePath
+
+	// Determine compression command
+	var compCmd *exec.Cmd
+	switch compression {
+	case models.CompressionGzip:
+		compCmd = exec.CommandContext(ctx, "gzip", "-c")
+	case models.CompressionZstd:
+		compCmd = exec.CommandContext(ctx, "zstd", "-c", "--no-progress")
+	default:
+		return fmt.Errorf("unsupported compression type: %s", compression)
+	}
+
+	// Set up pipeline: tar -> countingReader -> compression -> tape
+	tarPipe, err := tarCmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create tar pipe: %w", err)
+	}
+	cr := &countingReader{reader: tarPipe, callback: progressCb, paused: pauseFlag}
+	compCmd.Stdin = cr
+
+	// Check if mbuffer is available
+	_, mbufferErr := exec.LookPath("mbuffer")
+
+	if mbufferErr == nil {
+		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", "256M", "-o", devicePath)
+		compPipe, err := compCmd.StdoutPipe()
+		if err != nil {
+			return fmt.Errorf("failed to create compression pipe: %w", err)
+		}
+		mbufferCmd.Stdin = compPipe
+
+		if err := tarCmd.Start(); err != nil {
+			return fmt.Errorf("failed to start tar: %w", err)
+		}
+		if err := compCmd.Start(); err != nil {
+			tarCmd.Process.Kill()
+			return fmt.Errorf("failed to start compression: %w", err)
+		}
+		if err := mbufferCmd.Start(); err != nil {
+			tarCmd.Process.Kill()
+			compCmd.Process.Kill()
+			return fmt.Errorf("failed to start mbuffer: %w", err)
+		}
+
+		tarErr := tarCmd.Wait()
+		compErr := compCmd.Wait()
+		mbufErr := mbufferCmd.Wait()
+
+		if ctx.Err() != nil {
+			return fmt.Errorf("backup cancelled: %w", ctx.Err())
+		}
+		if tarErr != nil {
+			return fmt.Errorf("tar failed: %w", tarErr)
+		}
+		if compErr != nil {
+			return fmt.Errorf("compression failed: %w", compErr)
+		}
+		if mbufErr != nil {
+			return fmt.Errorf("mbuffer failed: %w", mbufErr)
+		}
+	} else {
+		tapeFile, err := os.OpenFile(devicePath, os.O_WRONLY, 0)
+		if err != nil {
+			return fmt.Errorf("failed to open tape device: %w", err)
+		}
+		defer tapeFile.Close()
+
+		compCmd.Stdout = tapeFile
+
+		if err := tarCmd.Start(); err != nil {
+			return fmt.Errorf("failed to start tar: %w", err)
+		}
+		if err := compCmd.Start(); err != nil {
+			tarCmd.Process.Kill()
+			return fmt.Errorf("failed to start compression: %w", err)
+		}
+
+		tarErr := tarCmd.Wait()
+		compErr := compCmd.Wait()
+
+		if ctx.Err() != nil {
+			return fmt.Errorf("backup cancelled: %w", ctx.Err())
+		}
+		if tarErr != nil {
+			return fmt.Errorf("tar failed: %w", tarErr)
+		}
+		if compErr != nil {
+			return fmt.Errorf("compression failed: %w", compErr)
+		}
+	}
+
+	return nil
+}
+
+// StreamToTapeCompressedEncrypted streams files to tape with both compression and encryption
+func (s *Service) StreamToTapeCompressedEncrypted(ctx context.Context, sourcePath string, files []FileInfo, devicePath string, compression models.CompressionType, encryptionKey string, progressCb func(bytesWritten int64), pauseFlag *int32) error {
+	if len(files) == 0 {
+		return nil
+	}
+
+	fileListPath := fmt.Sprintf("/tmp/tapebackarr-filelist-%d.txt", time.Now().UnixNano())
+	fileList, err := os.Create(fileListPath)
+	if err != nil {
+		return fmt.Errorf("failed to create file list: %w", err)
+	}
+	defer os.Remove(fileListPath)
+
+	for _, f := range files {
+		relPath, _ := filepath.Rel(sourcePath, f.Path)
+		fmt.Fprintln(fileList, relPath)
+	}
+	fileList.Close()
+
+	tarArgs := []string{
+		"-c",
+		"-b", fmt.Sprintf("%d", s.blockSize/512),
+		"-C", sourcePath,
+		"-T", fileListPath,
+	}
+
+	tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
+	tarCmd.Dir = sourcePath
+
+	var compCmd *exec.Cmd
+	switch compression {
+	case models.CompressionGzip:
+		compCmd = exec.CommandContext(ctx, "gzip", "-c")
+	case models.CompressionZstd:
+		compCmd = exec.CommandContext(ctx, "zstd", "-c", "--no-progress")
+	default:
+		return fmt.Errorf("unsupported compression type: %s", compression)
+	}
+
+	opensslCmd := exec.CommandContext(ctx, "openssl", "enc",
+		"-aes-256-cbc", "-salt", "-pbkdf2", "-iter", "100000",
+		"-pass", "pass:"+encryptionKey,
+	)
+
+	// Pipeline: tar -> countingReader -> compress -> encrypt -> tape
+	tarPipe, err := tarCmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create tar pipe: %w", err)
+	}
+	cr := &countingReader{reader: tarPipe, callback: progressCb, paused: pauseFlag}
+	compCmd.Stdin = cr
+
+	compPipe, err := compCmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create compression pipe: %w", err)
+	}
+	opensslCmd.Stdin = compPipe
+
+	_, mbufferErr := exec.LookPath("mbuffer")
+
+	if mbufferErr == nil {
+		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", "256M", "-o", devicePath)
+		opensslPipe, err := opensslCmd.StdoutPipe()
+		if err != nil {
+			return fmt.Errorf("failed to create openssl pipe: %w", err)
+		}
+		mbufferCmd.Stdin = opensslPipe
+
+		if err := tarCmd.Start(); err != nil {
+			return fmt.Errorf("failed to start tar: %w", err)
+		}
+		if err := compCmd.Start(); err != nil {
+			tarCmd.Process.Kill()
+			return fmt.Errorf("failed to start compression: %w", err)
+		}
+		if err := opensslCmd.Start(); err != nil {
+			tarCmd.Process.Kill()
+			compCmd.Process.Kill()
+			return fmt.Errorf("failed to start openssl: %w", err)
+		}
+		if err := mbufferCmd.Start(); err != nil {
+			tarCmd.Process.Kill()
+			compCmd.Process.Kill()
+			opensslCmd.Process.Kill()
+			return fmt.Errorf("failed to start mbuffer: %w", err)
+		}
+
+		tarErr := tarCmd.Wait()
+		compErr := compCmd.Wait()
+		opensslErr := opensslCmd.Wait()
+		mbufErr := mbufferCmd.Wait()
+
+		if ctx.Err() != nil {
+			return fmt.Errorf("backup cancelled: %w", ctx.Err())
+		}
+		if tarErr != nil {
+			return fmt.Errorf("tar failed: %w", tarErr)
+		}
+		if compErr != nil {
+			return fmt.Errorf("compression failed: %w", compErr)
+		}
+		if opensslErr != nil {
+			return fmt.Errorf("openssl encryption failed: %w", opensslErr)
+		}
+		if mbufErr != nil {
+			return fmt.Errorf("mbuffer failed: %w", mbufErr)
+		}
+	} else {
+		tapeFile, err := os.OpenFile(devicePath, os.O_WRONLY, 0)
+		if err != nil {
+			return fmt.Errorf("failed to open tape device: %w", err)
+		}
+		defer tapeFile.Close()
+
+		opensslCmd.Stdout = tapeFile
+
+		if err := tarCmd.Start(); err != nil {
+			return fmt.Errorf("failed to start tar: %w", err)
+		}
+		if err := compCmd.Start(); err != nil {
+			tarCmd.Process.Kill()
+			return fmt.Errorf("failed to start compression: %w", err)
+		}
+		if err := opensslCmd.Start(); err != nil {
+			tarCmd.Process.Kill()
+			compCmd.Process.Kill()
+			return fmt.Errorf("failed to start openssl: %w", err)
+		}
+
+		tarErr := tarCmd.Wait()
+		compErr := compCmd.Wait()
+		opensslErr := opensslCmd.Wait()
+
+		if ctx.Err() != nil {
+			return fmt.Errorf("backup cancelled: %w", ctx.Err())
+		}
+		if tarErr != nil {
+			return fmt.Errorf("tar failed: %w", tarErr)
+		}
+		if compErr != nil {
+			return fmt.Errorf("compression failed: %w", compErr)
+		}
+		if opensslErr != nil {
+			return fmt.Errorf("openssl encryption failed: %w", opensslErr)
+		}
+	}
+
+	return nil
+}
+
 // GetEncryptionKey retrieves the base64 encryption key for a given key ID
 func (s *Service) GetEncryptionKey(ctx context.Context, keyID int64) (string, error) {
 	var keyData string
@@ -797,8 +1072,17 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		s.mu.Lock()
 		if p, ok := s.activeJobs[job.ID]; ok {
 			p.BytesWritten = bytesWritten
+			// Estimate file count from bytes written for live progress display.
+			// Assumes linear relationship between bytes and files (approximate when file sizes vary).
+			if p.TotalFiles > 0 && p.TotalBytes > 0 {
+				estimatedFiles := int64(float64(p.TotalFiles) * float64(bytesWritten) / float64(p.TotalBytes))
+				if estimatedFiles > p.TotalFiles {
+					estimatedFiles = p.TotalFiles
+				}
+				p.FileCount = estimatedFiles
+			}
 			elapsed := time.Since(p.StartTime).Seconds()
-			if elapsed > 0 {
+			if elapsed > 30 {
 				p.WriteSpeed = float64(bytesWritten) / elapsed
 				remainingBytes := p.TotalBytes - bytesWritten
 				if p.WriteSpeed > 0 && remainingBytes > 0 {
@@ -806,28 +1090,63 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 				} else {
 					p.EstimatedSecondsRemaining = 0
 				}
+				// Calculate per-tape ETA
+				if p.TapeCapacityBytes > 0 && p.WriteSpeed > 0 {
+					tapeRemaining := p.TapeCapacityBytes - p.TapeUsedBytes - bytesWritten
+					if tapeRemaining > 0 {
+						p.TapeEstimatedSecondsRemaining = float64(tapeRemaining) / p.WriteSpeed
+					} else {
+						p.TapeEstimatedSecondsRemaining = 0
+					}
+				}
 			}
 			p.UpdatedAt = time.Now()
 		}
 		s.mu.Unlock()
 	}
 
-	// Position tape past the label before writing data.
-	// The tape label occupies file position 0 followed by a file mark.
-	// We must seek to file position 1 so that backup data does not overwrite the label.
-	s.updateProgress(job.ID, "positioning", "Positioning tape past label...")
+	// Verify tape label before writing
+	s.updateProgress(job.ID, "positioning", "Verifying tape label...")
 	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
-	if err := driveSvc.Rewind(ctx); err != nil {
-		s.logger.Warn("Failed to rewind tape before positioning", map[string]interface{}{"error": err.Error()})
+
+	// Read expected tape info from DB
+	var expectedLabel, expectedUUID string
+	if err := s.db.QueryRow("SELECT label, uuid FROM tapes WHERE id = ?", tapeID).Scan(&expectedLabel, &expectedUUID); err != nil {
+		s.updateProgress(job.ID, "failed", "Failed to look up tape info: "+err.Error())
+		s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "failed to look up tape info")
+		return nil, fmt.Errorf("failed to look up tape info: %w", err)
 	}
-	if err := driveSvc.SeekToFileNumber(ctx, 1); err != nil {
-		// If seek fails (e.g. no file mark yet on a blank tape), rewind and write a label first
-		s.logger.Warn("Failed to seek past label, tape may be unlabeled", map[string]interface{}{"error": err.Error()})
-		if rewindErr := driveSvc.Rewind(ctx); rewindErr != nil {
-			s.updateProgress(job.ID, "failed", "Failed to position tape: "+rewindErr.Error())
-			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "failed to position tape")
-			return nil, fmt.Errorf("failed to rewind tape: %w", rewindErr)
+
+	// Read the physical tape label
+	physicalLabel, readErr := driveSvc.ReadTapeLabel(ctx)
+	if readErr != nil {
+		s.updateProgress(job.ID, "failed", "Failed to read tape label: "+readErr.Error())
+		s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "failed to read tape label")
+		return nil, fmt.Errorf("failed to read tape label: %w", readErr)
+	}
+	if physicalLabel == nil || physicalLabel.Label != expectedLabel {
+		actualLabel := "unlabeled"
+		if physicalLabel != nil {
+			actualLabel = physicalLabel.Label
 		}
+		errMsg := fmt.Sprintf("tape label mismatch: expected %q but drive has %q", expectedLabel, actualLabel)
+		s.updateProgress(job.ID, "failed", errMsg)
+		s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, errMsg)
+		return nil, fmt.Errorf("%s", errMsg)
+	}
+
+	s.updateProgress(job.ID, "positioning", "Tape label verified, positioning past label...")
+
+	// Position tape past the label. ReadTapeLabel already rewound, so we seek forward.
+	if err := driveSvc.SeekToFileNumber(ctx, 1); err != nil {
+		// Seek failed - re-write the label to ensure label + file mark exist, then position is correct
+		s.logger.Warn("Failed to seek past label, re-writing label to ensure file mark exists", map[string]interface{}{"error": err.Error()})
+		if writeErr := driveSvc.WriteTapeLabel(ctx, expectedLabel, expectedUUID, physicalLabel.Pool, physicalLabel.EncryptionKeyFingerprint, physicalLabel.CompressionType); writeErr != nil {
+			s.updateProgress(job.ID, "failed", "Failed to re-write tape label: "+writeErr.Error())
+			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "failed to re-write tape label")
+			return nil, fmt.Errorf("failed to re-write tape label: %w", writeErr)
+		}
+		s.updateProgress(job.ID, "positioning", "Re-wrote tape label with file mark, positioned for backup")
 	}
 
 	// Stream to tape
@@ -841,6 +1160,9 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 
 	var encrypted bool
 	var encryptionKeyID *int64
+	var compressed bool
+	var compressionType models.CompressionType
+	useCompression := job.Compression != "" && job.Compression != models.CompressionNone
 
 	if job.EncryptionEnabled && job.EncryptionKeyID != nil {
 		// Get encryption key
@@ -851,19 +1173,41 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 			return nil, fmt.Errorf("failed to get encryption key: %w", err)
 		}
 
-		s.updateProgress(job.ID, "streaming", "Encrypting and streaming to tape...")
 		s.logger.Info("Encrypting backup with key", map[string]interface{}{
 			"key_id": *job.EncryptionKeyID,
 		})
 
-		if err := s.StreamToTapeEncrypted(ctx, source.Path, files, devicePath, encKey, progressCb, &pauseFlag); err != nil {
-			s.updateProgress(job.ID, "failed", "Stream failed: "+err.Error())
-			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
-			s.emitEvent("error", "backup", "Backup Failed", fmt.Sprintf("Job %s failed: %s", job.Name, err.Error()))
-			return nil, fmt.Errorf("failed to stream encrypted backup to tape: %w", err)
+		if useCompression {
+			s.updateProgress(job.ID, "streaming", fmt.Sprintf("Compressing (%s), encrypting and streaming to tape...", job.Compression))
+			if err := s.StreamToTapeCompressedEncrypted(ctx, source.Path, files, devicePath, job.Compression, encKey, progressCb, &pauseFlag); err != nil {
+				s.updateProgress(job.ID, "failed", "Stream failed: "+err.Error())
+				s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
+				s.emitEvent("error", "backup", "Backup Failed", fmt.Sprintf("Job %s failed: %s", job.Name, err.Error()))
+				return nil, fmt.Errorf("failed to stream compressed encrypted backup to tape: %w", err)
+			}
+			compressed = true
+			compressionType = job.Compression
+		} else {
+			s.updateProgress(job.ID, "streaming", "Encrypting and streaming to tape...")
+			if err := s.StreamToTapeEncrypted(ctx, source.Path, files, devicePath, encKey, progressCb, &pauseFlag); err != nil {
+				s.updateProgress(job.ID, "failed", "Stream failed: "+err.Error())
+				s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
+				s.emitEvent("error", "backup", "Backup Failed", fmt.Sprintf("Job %s failed: %s", job.Name, err.Error()))
+				return nil, fmt.Errorf("failed to stream encrypted backup to tape: %w", err)
+			}
 		}
 		encrypted = true
 		encryptionKeyID = job.EncryptionKeyID
+	} else if useCompression {
+		s.updateProgress(job.ID, "streaming", fmt.Sprintf("Compressing (%s) and streaming to tape...", job.Compression))
+		if err := s.StreamToTapeCompressed(ctx, source.Path, files, devicePath, job.Compression, progressCb, &pauseFlag); err != nil {
+			s.updateProgress(job.ID, "failed", "Stream failed: "+err.Error())
+			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
+			s.emitEvent("error", "backup", "Backup Failed", fmt.Sprintf("Job %s failed: %s", job.Name, err.Error()))
+			return nil, fmt.Errorf("failed to stream compressed backup to tape: %w", err)
+		}
+		compressed = true
+		compressionType = job.Compression
 	} else {
 		if err := s.StreamToTape(ctx, source.Path, files, devicePath, progressCb, &pauseFlag); err != nil {
 			s.updateProgress(job.ID, "failed", "Stream failed: "+err.Error())
@@ -932,9 +1276,11 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 			file_count = ?, 
 			total_bytes = ?,
 			encrypted = ?,
-			encryption_key_id = ?
+			encryption_key_id = ?,
+			compressed = ?,
+			compression_type = ?
 		WHERE id = ?
-	`, endTime, models.BackupSetStatusCompleted, len(files), totalBytes, encrypted, encryptionKeyID, backupSetID)
+	`, endTime, models.BackupSetStatusCompleted, len(files), totalBytes, encrypted, encryptionKeyID, compressed, compressionType, backupSetID)
 
 	// Update tape usage
 	s.db.Exec(`
@@ -975,6 +1321,8 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		"total_bytes": totalBytes,
 		"duration":    endTime.Sub(startTime).String(),
 		"encrypted":   encrypted,
+		"compressed":  compressed,
+		"compression": compressionType,
 	})
 
 	return &models.BackupSet{
@@ -989,6 +1337,8 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		TotalBytes:      totalBytes,
 		Encrypted:       encrypted,
 		EncryptionKeyID: encryptionKeyID,
+		Compressed:      compressed,
+		CompressionType: compressionType,
 	}, nil
 }
 

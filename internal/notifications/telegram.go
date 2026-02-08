@@ -333,3 +333,150 @@ func (s *TelegramService) NotifyWrongTapeInserted(ctx context.Context, expectedL
 		},
 	})
 }
+
+// CommandHandler is called when a Telegram command is received
+type CommandHandler func(command string, args string) string
+
+// RegisterCommands registers bot commands with Telegram's BotFather API
+func (s *TelegramService) RegisterCommands(ctx context.Context) error {
+	if !s.IsEnabled() {
+		return nil
+	}
+
+	commands := []map[string]string{
+		{"command": "status", "description": "Show current system status, loaded tape, and running jobs"},
+		{"command": "jobs", "description": "List backup jobs and their status"},
+		{"command": "tapes", "description": "List tapes and their status"},
+		{"command": "drives", "description": "Show tape drive status"},
+		{"command": "active", "description": "Show active/running backup operations"},
+		{"command": "help", "description": "Show available commands"},
+	}
+
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/setMyCommands", s.config.BotToken)
+	body, _ := json.Marshal(map[string]interface{}{"commands": commands})
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
+}
+
+// StartCommandPolling starts polling for Telegram commands and dispatches to the handler
+func (s *TelegramService) StartCommandPolling(ctx context.Context, handler CommandHandler) {
+	if !s.IsEnabled() {
+		return
+	}
+
+	go func() {
+		offset := 0
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			updates, err := s.getUpdates(ctx, offset, 30)
+			if err != nil {
+				time.Sleep(5 * time.Second)
+				continue
+			}
+
+			for _, update := range updates {
+				if update.Message != nil && update.Message.Text != "" {
+					text := update.Message.Text
+					// Parse command
+					if len(text) > 0 && text[0] == '/' {
+						parts := splitFirst(text[1:], " ")
+						cmd := parts[0]
+						args := ""
+						if len(parts) > 1 {
+							args = parts[1]
+						}
+						// Only respond if from the configured chat
+						chatIDStr := fmt.Sprintf("%d", update.Message.Chat.ID)
+						if chatIDStr == s.config.ChatID {
+							response := handler(cmd, args)
+							if response != "" {
+								s.sendPlainMessage(ctx, response)
+							}
+						}
+					}
+				}
+				offset = update.UpdateID + 1
+			}
+		}
+	}()
+}
+
+type telegramUpdate struct {
+	UpdateID int `json:"update_id"`
+	Message  *telegramIncomingMessage `json:"message"`
+}
+
+type telegramIncomingMessage struct {
+	Text string `json:"text"`
+	Chat struct {
+		ID int64 `json:"id"`
+	} `json:"chat"`
+}
+
+func (s *TelegramService) getUpdates(ctx context.Context, offset, timeout int) ([]telegramUpdate, error) {
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=%d", s.config.BotToken, offset, timeout)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		OK     bool             `json:"ok"`
+		Result []telegramUpdate `json:"result"`
+	}
+	json.NewDecoder(resp.Body).Decode(&result)
+	return result.Result, nil
+}
+
+func (s *TelegramService) sendPlainMessage(ctx context.Context, text string) error {
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", s.config.BotToken)
+	msg := map[string]string{
+		"chat_id": s.config.ChatID,
+		"text":    text,
+	}
+	body, _ := json.Marshal(msg)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
+}
+
+func splitFirst(s string, sep string) []string {
+	idx := -1
+	for i := 0; i < len(s); i++ {
+		if string(s[i]) == sep {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return []string{s}
+	}
+	return []string{s[:idx], s[idx+1:]}
+}

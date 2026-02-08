@@ -13,6 +13,9 @@
     loaded_tape: string;
     loaded_tape_uuid: string;
     loaded_tape_pool: string;
+    loaded_tape_encrypted: boolean;
+    loaded_tape_enc_key_fingerprint: string;
+    loaded_tape_compression: string;
   }
 
   interface ActiveJob {
@@ -182,6 +185,12 @@
         <div class="loaded-tape-info">
           <h3>Loaded Tape</h3>
           <div class="tape-detail"><strong>Label:</strong> {stats.loaded_tape}</div>
+          {#if stats.loaded_tape_encrypted}
+            <span class="badge badge-warning">🔒 Encrypted</span>
+          {/if}
+          {#if stats.loaded_tape_compression && stats.loaded_tape_compression !== 'none' && stats.loaded_tape_compression !== ''}
+            <span class="badge badge-info">📦 {stats.loaded_tape_compression}</span>
+          {/if}
           {#if stats.loaded_tape_uuid}
             <div class="tape-detail"><strong>UUID:</strong> <span class="uuid">{stats.loaded_tape_uuid}</span></div>
           {/if}

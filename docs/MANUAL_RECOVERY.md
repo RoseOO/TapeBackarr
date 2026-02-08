@@ -621,9 +621,122 @@ For TapeBackarr software issues:
 
 ---
 
+## Recovering Compressed Tapes
+
+If your backup was created with compression enabled, you need to decompress the data after extracting from tape.
+
+### Gzip Compressed Tapes
+
+```bash
+# Rewind and skip past the label
+mt -f /dev/nst0 rewind
+mt -f /dev/nst0 fsf 1
+
+# Extract and decompress in one step
+dd if=/dev/nst0 bs=65536 | gunzip | tar xvf - -C /restore/path/
+
+# Or save compressed data first, then decompress
+dd if=/dev/nst0 bs=65536 of=/tmp/backup.tar.gz
+tar xzf /tmp/backup.tar.gz -C /restore/path/
+```
+
+### Zstd Compressed Tapes
+
+```bash
+# Rewind and skip past the label
+mt -f /dev/nst0 rewind
+mt -f /dev/nst0 fsf 1
+
+# Extract and decompress in one step
+dd if=/dev/nst0 bs=65536 | zstd -d | tar xvf - -C /restore/path/
+
+# Or save compressed data first, then decompress
+dd if=/dev/nst0 bs=65536 of=/tmp/backup.tar.zst
+zstd -d /tmp/backup.tar.zst -o /tmp/backup.tar
+tar xf /tmp/backup.tar -C /restore/path/
+```
+
+### Compressed AND Encrypted Tapes
+
+If the tape is both compressed and encrypted, you must decrypt first, then decompress:
+
+```bash
+# Rewind and skip past the label
+mt -f /dev/nst0 rewind
+mt -f /dev/nst0 fsf 1
+
+# Gzip + encrypted: decrypt then decompress
+dd if=/dev/nst0 bs=65536 | openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 100000 -pass pass:YOUR_KEY | gunzip | tar xvf - -C /restore/path/
+
+# Zstd + encrypted: decrypt then decompress
+dd if=/dev/nst0 bs=65536 | openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 100000 -pass pass:YOUR_KEY | zstd -d | tar xvf - -C /restore/path/
+```
+
+### Identifying Compression Type
+
+The tape label (first block on tape) contains metadata about the compression type used.
+To read the label:
+
+```bash
+mt -f /dev/nst0 rewind
+dd if=/dev/nst0 bs=65536 count=1 2>/dev/null | strings
+```
+
+Look for `compression_type` in the JSON output. Values are: `none`, `gzip`, or `zstd`.
+
+## Recovering Database Backups from Tape
+
+If you have lost your TapeBackarr database but have a database backup on tape, you can recover it without any prior knowledge of what's on the tape.
+
+### Scanning for Database Backups
+
+```bash
+# Rewind the tape
+mt -f /dev/nst0 rewind
+
+# Read the label to identify the tape
+dd if=/dev/nst0 bs=65536 count=1 2>/dev/null | strings
+
+# Skip to the data section (past label)
+mt -f /dev/nst0 fsf 1
+
+# Try to list the tar contents - database backups are named tapebackarr-db-*.sql
+dd if=/dev/nst0 bs=65536 | tar tvf - 2>/dev/null | grep -i "tapebackarr-db"
+
+# If encrypted, try with your key:
+dd if=/dev/nst0 bs=65536 | openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 100000 -pass pass:YOUR_KEY | tar tvf - 2>/dev/null | grep -i "tapebackarr-db"
+```
+
+### Extracting the Database Backup
+
+```bash
+# Position tape
+mt -f /dev/nst0 rewind
+mt -f /dev/nst0 fsf 1
+
+# Extract just the database file
+dd if=/dev/nst0 bs=65536 | tar xvf - -C /tmp/ --wildcards '*tapebackarr-db*'
+
+# For encrypted tapes:
+dd if=/dev/nst0 bs=65536 | openssl enc -aes-256-cbc -d -salt -pbkdf2 -iter 100000 -pass pass:YOUR_KEY | tar xvf - -C /tmp/ --wildcards '*tapebackarr-db*'
+
+# The extracted .sql file can be imported into a fresh TapeBackarr database
+```
+
+### Using TapeBackarr's Built-in Recovery
+
+TapeBackarr includes a tape scanning endpoint that can discover database backups:
+
+```bash
+# Via API (if TapeBackarr is running with a fresh database):
+curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8080/api/v1/drives/1/scan-for-db-backup
+
+# This will scan the tape, find any database backup files, and offer to restore them
+```
+
 ## Document Version
 
-- Version: 1.1
+- Version: 1.2
 - Last Updated: February 2026
 - Applies to: TapeBackarr 1.x, LTO-5 through LTO-9 drives
-- Added: Encrypted backup restore procedures
+- Added: Compressed tape recovery procedures, database backup recovery from tape

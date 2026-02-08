@@ -253,6 +253,106 @@ func (s *Service) DeleteUser(userID int64) error {
 	return nil
 }
 
+// GenerateAPIKey creates a new API key and returns the raw key (only shown once)
+func (s *Service) GenerateAPIKey(name string, role models.UserRole, expiresAt *time.Time) (string, *models.APIKey, error) {
+	// Generate a random 32-byte key
+	keyBytes := make([]byte, 32)
+	if _, err := rand.Read(keyBytes); err != nil {
+		return "", nil, fmt.Errorf("failed to generate key: %w", err)
+	}
+	rawKey := "tbk_" + hex.EncodeToString(keyBytes)
+	keyPrefix := rawKey[:12]
+
+	// Hash the key for storage
+	hash, err := bcrypt.GenerateFromPassword([]byte(rawKey), bcrypt.DefaultCost)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to hash key: %w", err)
+	}
+
+	result, err := s.db.Exec(`
+		INSERT INTO api_keys (name, key_hash, key_prefix, role, expires_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, name, string(hash), keyPrefix, role, expiresAt)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to store API key: %w", err)
+	}
+
+	id, _ := result.LastInsertId()
+	apiKey := &models.APIKey{
+		ID:        id,
+		Name:      name,
+		KeyPrefix: keyPrefix,
+		Role:      role,
+		ExpiresAt: expiresAt,
+	}
+
+	return rawKey, apiKey, nil
+}
+
+// ValidateAPIKey validates an API key and returns claims if valid
+func (s *Service) ValidateAPIKey(rawKey string) (*Claims, error) {
+	if len(rawKey) < 12 {
+		return nil, ErrInvalidToken
+	}
+	prefix := rawKey[:12]
+
+	var apiKey models.APIKey
+	err := s.db.QueryRow(`
+		SELECT id, name, key_hash, key_prefix, role, expires_at
+		FROM api_keys WHERE key_prefix = ?
+	`, prefix).Scan(&apiKey.ID, &apiKey.Name, &apiKey.KeyHash, &apiKey.KeyPrefix, &apiKey.Role, &apiKey.ExpiresAt)
+	if err != nil {
+		return nil, ErrInvalidToken
+	}
+
+	// Check expiration
+	if apiKey.ExpiresAt != nil && apiKey.ExpiresAt.Before(time.Now()) {
+		return nil, ErrTokenExpired
+	}
+
+	// Verify key hash
+	if err := bcrypt.CompareHashAndPassword([]byte(apiKey.KeyHash), []byte(rawKey)); err != nil {
+		return nil, ErrInvalidCredentials
+	}
+
+	// Update last used timestamp
+	s.db.Exec("UPDATE api_keys SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?", apiKey.ID)
+
+	return &Claims{
+		UserID:   -apiKey.ID, // Negative to distinguish from user IDs
+		Username: "api:" + apiKey.Name,
+		Role:     apiKey.Role,
+	}, nil
+}
+
+// ListAPIKeys returns all API keys (without hashes)
+func (s *Service) ListAPIKeys() ([]models.APIKey, error) {
+	rows, err := s.db.Query(`
+		SELECT id, name, key_prefix, role, last_used_at, expires_at, created_at
+		FROM api_keys ORDER BY created_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var keys []models.APIKey
+	for rows.Next() {
+		var k models.APIKey
+		if err := rows.Scan(&k.ID, &k.Name, &k.KeyPrefix, &k.Role, &k.LastUsedAt, &k.ExpiresAt, &k.CreatedAt); err != nil {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	return keys, nil
+}
+
+// DeleteAPIKey deletes an API key
+func (s *Service) DeleteAPIKey(id int64) error {
+	_, err := s.db.Exec("DELETE FROM api_keys WHERE id = ?", id)
+	return err
+}
+
 // CheckPermission checks if a role has permission for an action
 func CheckPermission(role models.UserRole, action string) bool {
 	permissions := map[models.UserRole][]string{
