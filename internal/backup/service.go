@@ -51,7 +51,8 @@ type JobProgress struct {
 	TapeCapacityBytes         int64     `json:"tape_capacity_bytes"`
 	TapeUsedBytes             int64     `json:"tape_used_bytes"` // used before this backup
 	DevicePath                string    `json:"device_path"`
-	EstimatedSecondsRemaining float64   `json:"estimated_seconds_remaining"`
+	EstimatedSecondsRemaining     float64   `json:"estimated_seconds_remaining"`
+	TapeEstimatedSecondsRemaining float64   `json:"tape_estimated_seconds_remaining"`
 	StartTime                 time.Time `json:"start_time"`
 	UpdatedAt                 time.Time `json:"updated_at"`
 	LogLines                  []string  `json:"log_lines"`
@@ -202,7 +203,7 @@ func (s *Service) updateProgress(jobID int64, phase, message string) {
 		}
 		// Update write speed and ETA
 		elapsed := time.Since(p.StartTime).Seconds()
-		if elapsed > 0 && p.BytesWritten > 0 {
+		if elapsed > 30 && p.BytesWritten > 0 {
 			p.WriteSpeed = float64(p.BytesWritten) / elapsed
 			remainingBytes := p.TotalBytes - p.BytesWritten
 			if p.WriteSpeed > 0 && remainingBytes > 0 {
@@ -1071,14 +1072,32 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		s.mu.Lock()
 		if p, ok := s.activeJobs[job.ID]; ok {
 			p.BytesWritten = bytesWritten
+			// Estimate file count from bytes written for live progress display.
+			// Assumes linear relationship between bytes and files (approximate when file sizes vary).
+			if p.TotalFiles > 0 && p.TotalBytes > 0 {
+				estimatedFiles := int64(float64(p.TotalFiles) * float64(bytesWritten) / float64(p.TotalBytes))
+				if estimatedFiles > p.TotalFiles {
+					estimatedFiles = p.TotalFiles
+				}
+				p.FileCount = estimatedFiles
+			}
 			elapsed := time.Since(p.StartTime).Seconds()
-			if elapsed > 0 {
+			if elapsed > 30 {
 				p.WriteSpeed = float64(bytesWritten) / elapsed
 				remainingBytes := p.TotalBytes - bytesWritten
 				if p.WriteSpeed > 0 && remainingBytes > 0 {
 					p.EstimatedSecondsRemaining = float64(remainingBytes) / p.WriteSpeed
 				} else {
 					p.EstimatedSecondsRemaining = 0
+				}
+				// Calculate per-tape ETA
+				if p.TapeCapacityBytes > 0 && p.WriteSpeed > 0 {
+					tapeRemaining := p.TapeCapacityBytes - p.TapeUsedBytes - bytesWritten
+					if tapeRemaining > 0 {
+						p.TapeEstimatedSecondsRemaining = float64(tapeRemaining) / p.WriteSpeed
+					} else {
+						p.TapeEstimatedSecondsRemaining = 0
+					}
 				}
 			}
 			p.UpdatedAt = time.Now()
