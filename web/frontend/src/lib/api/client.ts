@@ -464,3 +464,11 @@ export async function restartService() {
     method: 'POST',
   });
 }
+
+// Batch label tapes with auto-detect/label/eject loop
+export async function batchLabelTapes(driveId: number, data: { prefix: string; start_number: number; count: number; digits: number; pool_id?: number }) {
+  return fetchApi(`/drives/${driveId}/batch-label`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}

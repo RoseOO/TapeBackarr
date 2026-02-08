@@ -157,7 +157,7 @@
 <style>
   .progress-toolbar {
     position: fixed;
-    bottom: 0;
+    bottom: 35px;
     left: 240px;
     right: 0;
     z-index: 910;

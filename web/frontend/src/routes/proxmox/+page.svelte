@@ -45,6 +45,11 @@
   let proxmoxEnabled = false;
   let activeTab = 'guests';
   let showCreateJobModal = false;
+  let showBackupModal = false;
+  let backupTarget: ProxmoxGuest | null = null;
+  let backupForm = { tape_id: 0, mode: 'snapshot', compress: 'zstd' };
+  let tapes: any[] = [];
+  let pools: any[] = [];
 
   let jobForm = {
     name: '',
@@ -69,7 +74,10 @@
       ]);
 
       if (guestResult.status === 'fulfilled') {
-        guests = Array.isArray(guestResult.value) ? guestResult.value : [];
+        const data = guestResult.value;
+        const vmList = Array.isArray(data?.vms) ? data.vms.map((v: any) => ({...v, type: v.type || 'qemu'})) : [];
+        const lxcList = Array.isArray(data?.lxcs) ? data.lxcs.map((c: any) => ({...c, type: c.type || 'lxc'})) : [];
+        guests = [...vmList, ...lxcList];
         proxmoxEnabled = true;
       }
       if (backupResult.status === 'fulfilled') {
@@ -81,12 +89,22 @@
 
       if (guestResult.status === 'rejected') {
         const msg = guestResult.reason?.message || '';
-        if (msg.includes('not configured') || msg.includes('not enabled') || msg.includes('disabled')) {
+        if (msg.includes('not configured') || msg.includes('not enabled') || msg.includes('disabled') || msg.includes('Proxmox integration')) {
           proxmoxEnabled = false;
         } else {
           error = msg || 'Failed to load Proxmox data';
         }
       }
+
+      // Also load tapes and pools for backup form
+      try {
+        const [tapeResult, poolResult] = await Promise.allSettled([
+          api.get('/tapes'),
+          api.get('/pools'),
+        ]);
+        if (tapeResult.status === 'fulfilled') tapes = Array.isArray(tapeResult.value) ? tapeResult.value : [];
+        if (poolResult.status === 'fulfilled') pools = Array.isArray(poolResult.value) ? poolResult.value : [];
+      } catch {}
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load data';
     } finally {
@@ -94,11 +112,29 @@
     }
   }
 
-  async function handleBackupGuest(vmid: number) {
-    if (!confirm(`Start backup for VM/LXC ${vmid}?`)) return;
+  function openBackupModal(guest: ProxmoxGuest) {
+    backupTarget = guest;
+    backupForm = { tape_id: 0, mode: 'snapshot', compress: 'zstd' };
+    showBackupModal = true;
+  }
+
+  async function handleBackupGuest() {
+    if (!backupTarget || !backupForm.tape_id) {
+      error = 'Please select a tape for backup';
+      return;
+    }
     try {
-      await api.post('/proxmox/backups', { vmid });
-      alert('Proxmox backup started!');
+      await api.post('/proxmox/backups', {
+        node: backupTarget.node,
+        vmid: backupTarget.vmid,
+        guest_type: backupTarget.type,
+        guest_name: backupTarget.name,
+        tape_id: backupForm.tape_id,
+        backup_mode: backupForm.mode,
+        compress: backupForm.compress,
+      });
+      showBackupModal = false;
+      backupTarget = null;
       await loadData();
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to start backup';
@@ -106,10 +142,18 @@
   }
 
   async function handleBackupAll() {
-    if (!confirm('Start backup for ALL VMs and containers?')) return;
+    const activeTapes = tapes.filter((t: any) => t.status === 'active' || t.status === 'blank');
+    if (activeTapes.length === 0) {
+      error = 'No active tapes available. Please add a tape first.';
+      return;
+    }
+    if (!confirm(`Start backup for ALL VMs and containers to tape '${activeTapes[0].label}'?`)) return;
     try {
-      await api.post('/proxmox/backups/all');
-      alert('Proxmox backup all started!');
+      await api.post('/proxmox/backups/all', {
+        tape_id: activeTapes[0].id,
+        mode: 'snapshot',
+        compress: 'zstd',
+      });
       await loadData();
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to start backup all';
@@ -234,7 +278,7 @@
               <td>{formatBytes(guest.maxmem)}</td>
               <td>{formatBytes(guest.maxdisk)}</td>
               <td>
-                <button class="btn btn-success" on:click={() => handleBackupGuest(guest.vmid)}>
+                <button class="btn btn-success" on:click={() => openBackupModal(guest)}>
                   Backup
                 </button>
               </td>
@@ -352,6 +396,15 @@
           <input type="text" id="pxjob-schedule" bind:value={jobForm.schedule_cron} placeholder="e.g., 0 2 * * *" />
         </div>
         <div class="form-group">
+          <label for="pxjob-pool">Media Pool</label>
+          <select id="pxjob-pool" bind:value={jobForm.pool_id}>
+            <option value={0}>No pool (manual tape selection)</option>
+            {#each pools as pool}
+              <option value={pool.id}>{pool.name}</option>
+            {/each}
+          </select>
+        </div>
+        <div class="form-group">
           <label for="pxjob-compression">Compression</label>
           <select id="pxjob-compression" bind:value={jobForm.compression}>
             <option value="none">None</option>
@@ -362,6 +415,46 @@
         <div class="modal-actions">
           <button type="button" class="btn btn-secondary" on:click={() => showCreateJobModal = false}>Cancel</button>
           <button type="submit" class="btn btn-primary">Create</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{/if}
+
+{#if showBackupModal && backupTarget}
+  <div class="modal-overlay" on:click={() => showBackupModal = false}>
+    <div class="modal" on:click|stopPropagation={() => {}}>
+      <h2>Backup {backupTarget.type === 'lxc' ? 'Container' : 'VM'}: {backupTarget.name} (VMID {backupTarget.vmid})</h2>
+      <form on:submit|preventDefault={handleBackupGuest}>
+        <div class="form-group">
+          <label for="bk-tape">Target Tape</label>
+          <select id="bk-tape" bind:value={backupForm.tape_id} required>
+            <option value={0}>Select a tape...</option>
+            {#each tapes.filter(t => t.status === 'active' || t.status === 'blank') as tape}
+              <option value={tape.id}>{tape.label} ({tape.status})</option>
+            {/each}
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="bk-mode">Backup Mode</label>
+          <select id="bk-mode" bind:value={backupForm.mode}>
+            <option value="snapshot">Snapshot (live)</option>
+            <option value="suspend">Suspend</option>
+            <option value="stop">Stop</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="bk-compress">Compression</label>
+          <select id="bk-compress" bind:value={backupForm.compress}>
+            <option value="zstd">Zstd</option>
+            <option value="gzip">Gzip</option>
+            <option value="lzo">LZO</option>
+            <option value="">None</option>
+          </select>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" on:click={() => showBackupModal = false}>Cancel</button>
+          <button type="submit" class="btn btn-success" disabled={!backupForm.tape_id}>Start Backup</button>
         </div>
       </form>
     </div>

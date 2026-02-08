@@ -43,9 +43,6 @@
   let formatConfirmChecked = false;
   let showAddUnknownTapeModal = false;
   let unknownTapeTarget: { drive: Drive; tape: Drive['unknown_tape'] } | null = null;
-  let showInspectModal = false;
-  let inspectResult: any = null;
-  let inspecting = false;
   let addTapeFormData = {
     label: '',
     barcode: '',
@@ -60,6 +57,11 @@
     serial_number: '',
     model: ''
   };
+
+  let showBatchLabelModal = false;
+  let batchLabelDriveId = 0;
+  let batchLabelForm = { prefix: '', start_number: 1, count: 10, digits: 3, pool_id: undefined as number | undefined };
+  let batchLabelRunning = false;
 
   onMount(async () => {
     await loadDrives();
@@ -257,17 +259,31 @@
     }
   }
 
-  async function handleInspectTape(drive: Drive) {
-    inspecting = true;
+  function openBatchLabelModal(driveId: number) {
+    batchLabelDriveId = driveId;
+    batchLabelForm = { prefix: '', start_number: 1, count: 10, digits: 3, pool_id: undefined };
+    showBatchLabelModal = true;
+  }
+
+  async function handleBatchLabel() {
+    batchLabelRunning = true;
     try {
       error = '';
-      inspectResult = await api.inspectTape(drive.id);
-      showInspectModal = true;
+      await api.batchLabelTapes(batchLabelDriveId, batchLabelForm);
+      showBatchLabelModal = false;
+      showSuccessMsg('Batch label started successfully');
+      await loadDrives();
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Failed to inspect tape';
+      error = e instanceof Error ? e.message : 'Failed to start batch label';
     } finally {
-      inspecting = false;
+      batchLabelRunning = false;
     }
+  }
+
+  function batchLabelPreview(prefix: string, start: number, count: number, digits: number): string {
+    const first = prefix + String(start).padStart(digits, '0');
+    const last = prefix + String(start + count - 1).padStart(digits, '0');
+    return `${first} through ${last}`;
   }
 </script>
 
@@ -322,7 +338,8 @@
               <button class="btn btn-secondary btn-sm" on:click={() => selectDrive(drive.id)}>Select</button>
               <button class="btn btn-secondary btn-sm" on:click={() => rewindTape(drive.id)}>Rewind</button>
               <button class="btn btn-secondary btn-sm" on:click={() => ejectTape(drive.id)}>Eject</button>
-              <button class="btn btn-secondary btn-sm" on:click={() => handleInspectTape(drive)} disabled={inspecting}>🔍 Inspect</button>
+              <a href="/inspect" class="btn btn-secondary btn-sm">🔍 Inspect</a>
+              <button class="btn btn-secondary btn-sm" on:click={() => openBatchLabelModal(drive.id)}>📦 Batch Label</button>
               <button class="btn btn-warning btn-sm" on:click={() => openFormatDriveModal(drive)} disabled={drive.status === 'offline'}>Format</button>
               <button class="btn btn-danger btn-sm" on:click={() => deleteDrive(drive.id)}>Remove</button>
             </td>
@@ -502,59 +519,56 @@
   </div>
 {/if}
 
-<!-- Inspect Tape Modal -->
-{#if showInspectModal && inspectResult}
-  <div class="modal-backdrop" on:click={() => showInspectModal = false}>
-    <div class="modal modal-wide" on:click|stopPropagation={() => {}}>
-      <h2>🔍 Tape Inspection</h2>
-      <div class="tape-info-box">
-        {#if inspectResult.has_tapebackarr_label}
-          <div><strong>Label:</strong> {inspectResult.label}</div>
-          <div><strong>UUID:</strong> <code>{inspectResult.uuid || 'N/A'}</code></div>
-          <div><strong>Pool:</strong> {inspectResult.pool || 'N/A'}</div>
-          {#if inspectResult.encrypted}
-            <div><strong>🔒 Encrypted:</strong> Yes</div>
-            <div><strong>Key Fingerprint:</strong> <code>{inspectResult.encryption_key_fingerprint}</code></div>
-          {/if}
-        {:else}
-          <div><strong>TapeBackarr Label:</strong> Not found (foreign or unlabeled tape)</div>
-        {/if}
-      </div>
-      {#if inspectResult.contents_error}
-        <div class="alert alert-error" style="margin-top: 1rem;">{inspectResult.contents_error}</div>
-      {/if}
-      {#if inspectResult.contents && inspectResult.contents.length > 0}
-        <h3>File Contents ({inspectResult.contents.length} entries)</h3>
-        <div class="file-list-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>Path</th>
-                <th>Size</th>
-                <th>Permissions</th>
-                <th>Owner</th>
-                <th>Date</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each inspectResult.contents as entry}
-                <tr>
-                  <td><code>{entry.path}</code></td>
-                  <td>{formatBytes(entry.size)}</td>
-                  <td><code>{entry.permissions}</code></td>
-                  <td>{entry.owner}</td>
-                  <td>{entry.date}</td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
+<!-- Batch Label Modal -->
+{#if showBatchLabelModal}
+  <div class="modal-backdrop" on:click={() => showBatchLabelModal = false}>
+    <div class="modal" on:click|stopPropagation={() => {}}>
+      <h2>📦 Batch Label Tapes</h2>
+      <p class="modal-desc">Automatically label multiple tapes in sequence. Insert a blank tape, and the system will detect, label, eject, and repeat.</p>
+      <form on:submit|preventDefault={handleBatchLabel}>
+        <div class="form-group">
+          <label for="bl-prefix">Label Prefix</label>
+          <input type="text" id="bl-prefix" bind:value={batchLabelForm.prefix} placeholder="e.g., NAS-OFF-" required />
         </div>
-      {:else if !inspectResult.contents_error}
-        <p class="text-muted" style="margin-top: 1rem;">No readable file contents found on this tape.</p>
-      {/if}
-      <div class="form-actions">
-        <button class="btn btn-primary" on:click={() => showInspectModal = false}>Close</button>
-      </div>
+        <div class="form-group">
+          <label for="bl-start">Start Number</label>
+          <input type="number" id="bl-start" bind:value={batchLabelForm.start_number} min="0" required />
+        </div>
+        <div class="form-group">
+          <label for="bl-count">Count</label>
+          <input type="number" id="bl-count" bind:value={batchLabelForm.count} min="1" max="100" required />
+        </div>
+        <div class="form-group">
+          <label for="bl-digits">Digits</label>
+          <select id="bl-digits" bind:value={batchLabelForm.digits}>
+            <option value={2}>2 (01-99)</option>
+            <option value={3}>3 (001-999)</option>
+            <option value={4}>4 (0001-9999)</option>
+            <option value={5}>5 (00001-99999)</option>
+            <option value={6}>6 (000001-999999)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="bl-pool">Pool (optional)</label>
+          <select id="bl-pool" bind:value={batchLabelForm.pool_id}>
+            <option value={undefined}>No pool</option>
+            {#each pools as pool}
+              <option value={pool.id}>{pool.name}</option>
+            {/each}
+          </select>
+        </div>
+        {#if batchLabelForm.prefix && batchLabelForm.count > 0}
+          <div class="tape-info-box">
+            <strong>Preview:</strong> {batchLabelPreview(batchLabelForm.prefix, batchLabelForm.start_number, batchLabelForm.count, batchLabelForm.digits)}
+          </div>
+        {/if}
+        <div class="form-actions">
+          <button type="button" class="btn btn-secondary" on:click={() => showBatchLabelModal = false}>Cancel</button>
+          <button type="submit" class="btn btn-primary" disabled={batchLabelRunning}>
+            {batchLabelRunning ? 'Running...' : 'Start Batch Label'}
+          </button>
+        </div>
+      </form>
     </div>
   </div>
 {/if}
@@ -595,7 +609,7 @@
   }
 
   code {
-    background: #f0f0f0;
+    background: var(--bg-input);
     padding: 0.25rem 0.5rem;
     border-radius: 4px;
     font-family: monospace;
@@ -626,7 +640,7 @@
   }
 
   .modal {
-    background: white;
+    background: var(--bg-card);
     padding: 2rem;
     border-radius: 12px;
     max-width: 500px;

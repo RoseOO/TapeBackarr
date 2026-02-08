@@ -272,12 +272,12 @@
   }
 
   .stat-card {
-    background: white;
+    background: var(--bg-card);
     border-radius: 12px;
     padding: 1.25rem;
     display: flex;
     align-items: center;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    box-shadow: var(--shadow);
   }
 
   .stat-icon {
@@ -288,12 +288,12 @@
   .stat-value {
     font-size: 1.5rem;
     font-weight: 700;
-    color: #333;
+    color: var(--text-primary);
   }
 
   .stat-label {
     font-size: 0.875rem;
-    color: #666;
+    color: var(--text-secondary);
   }
 
   .dashboard-row {
@@ -306,7 +306,7 @@
   .quick-actions h2 {
     margin: 0 0 1rem;
     font-size: 1rem;
-    color: #333;
+    color: var(--text-primary);
   }
 
   .drive-status {
@@ -314,15 +314,15 @@
     align-items: center;
     padding: 1rem;
     border-radius: 8px;
-    background: #f5f5f5;
+    background: var(--bg-input);
   }
 
   .drive-status.online {
-    background: #d4edda;
+    background: var(--badge-success-bg);
   }
 
   .drive-status.offline {
-    background: #f8d7da;
+    background: var(--badge-danger-bg);
   }
 
   .status-indicator {
@@ -333,29 +333,30 @@
   }
 
   .drive-status.online .status-indicator {
-    background: #28a745;
+    background: var(--accent-success);
   }
 
   .drive-status.offline .status-indicator {
-    background: #dc3545;
+    background: var(--accent-danger);
   }
 
   .status-text {
     font-weight: 600;
     text-transform: capitalize;
+    color: var(--text-primary);
   }
 
   .loaded-tape-info {
     margin-top: 1rem;
     padding: 0.75rem;
-    background: #f0f0f5;
+    background: var(--bg-input);
     border-radius: 8px;
   }
 
   .loaded-tape-info h3 {
     margin: 0 0 0.5rem;
     font-size: 0.875rem;
-    color: #555;
+    color: var(--text-secondary);
   }
 
   .tape-detail {
@@ -371,7 +372,7 @@
 
   .no-tape {
     font-size: 0.875rem;
-    color: #888;
+    color: var(--text-muted);
     margin: 0;
     font-style: italic;
   }
@@ -393,7 +394,7 @@
   .active-operations h2 {
     margin: 0 0 1rem;
     font-size: 1rem;
-    color: #333;
+    color: var(--text-primary);
   }
 
   .terminal-card {

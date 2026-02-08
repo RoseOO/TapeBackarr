@@ -135,9 +135,9 @@
   }
 
   .alert-error {
-    background: #fee;
-    color: #c00;
-    border: 1px solid #fcc;
+    background: var(--badge-danger-bg);
+    color: var(--badge-danger-text);
+    border: 1px solid var(--accent-danger);
   }
 
   .docs-container {
@@ -149,16 +149,16 @@
   .docs-sidebar {
     width: 280px;
     flex-shrink: 0;
-    background: white;
+    background: var(--bg-card);
     border-radius: 12px;
     padding: 1.5rem;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    box-shadow: var(--shadow);
   }
 
   .docs-sidebar h3 {
     margin: 0 0 1rem;
     font-size: 1rem;
-    color: #666;
+    color: var(--text-secondary);
   }
 
   .docs-sidebar ul {
@@ -181,14 +181,14 @@
     padding: 0.75rem;
     border: none;
     border-radius: 8px;
-    background: #f5f6fa;
+    background: var(--bg-input);
     cursor: pointer;
     text-align: left;
     transition: all 0.2s ease;
   }
 
   .docs-sidebar button:hover {
-    background: #e0e0e0;
+    background: var(--bg-card-hover);
   }
 
   .docs-sidebar button strong {
@@ -199,7 +199,7 @@
   .docs-sidebar button span {
     display: block;
     font-size: 0.75rem;
-    color: #888;
+    color: var(--text-muted);
     margin-top: 0.25rem;
   }
 
@@ -209,10 +209,10 @@
 
   .docs-content {
     flex: 1;
-    background: white;
+    background: var(--bg-card);
     border-radius: 12px;
     padding: 2rem;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    box-shadow: var(--shadow);
     overflow-x: auto;
   }
 
@@ -227,7 +227,7 @@
   }
 
   .docs-welcome p {
-    color: #666;
+    color: var(--text-secondary);
     margin-bottom: 2rem;
   }
 
@@ -240,7 +240,7 @@
   .quick-links h3 {
     font-size: 1rem;
     margin-bottom: 1rem;
-    color: #666;
+    color: var(--text-secondary);
   }
 
   .quick-links ul {
@@ -250,7 +250,7 @@
 
   .quick-links li {
     padding: 0.5rem 0;
-    border-bottom: 1px solid #eee;
+    border-bottom: 1px solid var(--border-color);
   }
 
   .doc-viewer {
