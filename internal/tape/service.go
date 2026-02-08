@@ -51,6 +51,7 @@ type TapeLabelData struct {
 	Pool                     string `json:"pool"`
 	Timestamp                int64  `json:"timestamp"`
 	EncryptionKeyFingerprint string `json:"encryption_key_fingerprint,omitempty"`
+	CompressionType          string `json:"compression_type,omitempty"`
 }
 
 // TapeContentEntry represents a single file entry from tape contents listing
@@ -367,11 +368,15 @@ func (s *Service) ReadTapeLabel(ctx context.Context) (*TapeLabelData, error) {
 	if len(parts) >= 6 {
 		data.EncryptionKeyFingerprint = parts[5]
 	}
+	if len(parts) >= 7 {
+		data.CompressionType = parts[6]
+	}
 	return data, nil
 }
 
 // WriteTapeLabel writes a label to the beginning of the tape
-func (s *Service) WriteTapeLabel(ctx context.Context, label string, uuid string, pool string, encFingerprint ...string) error {
+// Optional metadata parameters: encFingerprint, compressionType
+func (s *Service) WriteTapeLabel(ctx context.Context, label string, uuid string, pool string, metadata ...string) error {
 	// Rewind to beginning
 	if err := s.Rewind(ctx); err != nil {
 		return err
@@ -379,8 +384,13 @@ func (s *Service) WriteTapeLabel(ctx context.Context, label string, uuid string,
 
 	// Create label block with UUID and pool info
 	fields := []string{labelMagic, label, uuid, pool, strconv.FormatInt(time.Now().Unix(), 10)}
-	if len(encFingerprint) > 0 && encFingerprint[0] != "" {
-		fields = append(fields, encFingerprint[0])
+	if len(metadata) > 0 && metadata[0] != "" {
+		fields = append(fields, metadata[0])
+	} else if len(metadata) > 1 {
+		fields = append(fields, "")
+	}
+	if len(metadata) > 1 && metadata[1] != "" {
+		fields = append(fields, metadata[1])
 	}
 	labelData := strings.Join(fields, labelDelimiter)
 	// Pad to 512 bytes
