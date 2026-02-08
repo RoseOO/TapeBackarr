@@ -149,9 +149,9 @@
   .theme-btn {
     width: 100%;
     padding: 0.5rem;
-    background: #2d2d44;
-    color: #a0a0b0;
-    border: 1px solid #3d3d54;
+    background: var(--bg-input, #2d2d44);
+    color: var(--text-secondary, #a0a0b0);
+    border: 1px solid var(--border-color, #3d3d54);
     border-radius: 6px;
     cursor: pointer;
     transition: background 0.2s ease;
@@ -160,8 +160,8 @@
   }
 
   .theme-btn:hover {
-    background: #3d3d54;
-    color: white;
+    background: var(--bg-card-hover, #3d3d54);
+    color: var(--text-primary, white);
   }
 
   .logout-btn {
