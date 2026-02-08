@@ -52,7 +52,7 @@ The installer will:
 
 ```bash
 sudo apt update
-sudo apt install -y mt-st tar mbuffer sg3-utils
+sudo apt install -y mt-st tar mbuffer sg3-utils lsscsi
 ```
 
 ### Step 2: Build from Source
@@ -309,7 +309,7 @@ If you prefer manual setup:
    pct enter 200
    
    # Inside container:
-   apt update && apt install -y wget curl git mt-st tar mbuffer
+   apt update && apt install -y wget curl git mt-st tar mbuffer lsscsi
    # ... follow manual installation steps
    ```
 
