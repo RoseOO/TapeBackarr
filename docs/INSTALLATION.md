@@ -276,8 +276,17 @@ bash -c "$(wget -qLO - https://github.com/RoseOO/TapeBackarr/raw/main/deploy/pro
 If you prefer manual setup:
 
 1. **Create container:**
+   
+   First, find an available Debian 12 template:
    ```bash
-   pct create 200 local:vztmpl/debian-12-standard_12.2-1_amd64.tar.zst \
+   pveam update
+   pveam available --section system | grep debian-12
+   ```
+   
+   Download and create the container (replace `<template>` with the actual template name from the previous command):
+   ```bash
+   pveam download local <template>
+   pct create 200 local:vztmpl/<template> \
      --hostname tapebackarr \
      --memory 2048 \
      --cores 2 \

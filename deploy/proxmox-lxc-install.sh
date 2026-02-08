@@ -100,8 +100,18 @@ select_template() {
     if [[ -z "$templates" ]]; then
         msg_info "No Debian template found. Downloading Debian 12..."
         pveam update
-        pveam download local debian-12-standard_12.2-1_amd64.tar.zst || \
-        pveam download local debian-12-standard_12.2-1_amd64.tar.gz
+        
+        # Get available Debian 12 templates dynamically from pveam available
+        local available_template
+        available_template=$(pveam available --section system 2>/dev/null | grep -E "debian-12-standard_[0-9].*_amd64" | head -1 | awk '{print $2}')
+        
+        if [[ -z "$available_template" ]]; then
+            msg_error "Could not find a Debian 12 template in the available templates. Check your network connection and run 'pveam available --section system' to see available templates."
+        fi
+        
+        msg_info "Downloading template: $available_template"
+        pveam download local "$available_template"
+        
         templates=$(pveam list local 2>/dev/null | grep "debian-12" | head -1 | awk '{print $1}')
     fi
     
