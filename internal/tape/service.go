@@ -46,10 +46,20 @@ type TapeInfo struct {
 
 // TapeLabelData represents structured label data written to tape
 type TapeLabelData struct {
-	Label     string `json:"label"`
-	UUID      string `json:"uuid"`
-	Pool      string `json:"pool"`
-	Timestamp int64  `json:"timestamp"`
+	Label                    string `json:"label"`
+	UUID                     string `json:"uuid"`
+	Pool                     string `json:"pool"`
+	Timestamp                int64  `json:"timestamp"`
+	EncryptionKeyFingerprint string `json:"encryption_key_fingerprint,omitempty"`
+}
+
+// TapeContentEntry represents a single file entry from tape contents listing
+type TapeContentEntry struct {
+	Permissions string `json:"permissions"`
+	Owner       string `json:"owner"`
+	Size        int64  `json:"size"`
+	Date        string `json:"date"`
+	Path        string `json:"path"`
 }
 
 // Service provides tape drive operations
@@ -354,18 +364,25 @@ func (s *Service) ReadTapeLabel(ctx context.Context) (*TapeLabelData, error) {
 	if len(parts) >= 5 {
 		data.Timestamp, _ = strconv.ParseInt(parts[4], 10, 64)
 	}
+	if len(parts) >= 6 {
+		data.EncryptionKeyFingerprint = parts[5]
+	}
 	return data, nil
 }
 
 // WriteTapeLabel writes a label to the beginning of the tape
-func (s *Service) WriteTapeLabel(ctx context.Context, label string, uuid string, pool string) error {
+func (s *Service) WriteTapeLabel(ctx context.Context, label string, uuid string, pool string, encFingerprint ...string) error {
 	// Rewind to beginning
 	if err := s.Rewind(ctx); err != nil {
 		return err
 	}
 
 	// Create label block with UUID and pool info
-	labelData := strings.Join([]string{labelMagic, label, uuid, pool, strconv.FormatInt(time.Now().Unix(), 10)}, labelDelimiter)
+	fields := []string{labelMagic, label, uuid, pool, strconv.FormatInt(time.Now().Unix(), 10)}
+	if len(encFingerprint) > 0 && encFingerprint[0] != "" {
+		fields = append(fields, encFingerprint[0])
+	}
+	labelData := strings.Join(fields, labelDelimiter)
 	// Pad to 512 bytes
 	padded := make([]byte, 512)
 	copy(padded, []byte(labelData))
@@ -520,4 +537,54 @@ func (s *Service) WaitForTape(ctx context.Context, timeout time.Duration) error 
 	}
 
 	return fmt.Errorf("timeout waiting for tape to be loaded")
+}
+
+// ListTapeContents lists the contents of a tape using tar, starting from current position.
+// It reads at most maxEntries files. If encrypted is true, returns an indicator instead.
+func (s *Service) ListTapeContents(ctx context.Context, maxEntries int) ([]TapeContentEntry, error) {
+	if maxEntries <= 0 {
+		maxEntries = 1000
+	}
+
+	// Seek past the label to file number 1
+	if err := s.SeekToFileNumber(ctx, 1); err != nil {
+		return nil, fmt.Errorf("failed to seek past label: %w", err)
+	}
+
+	// Run tar with a timeout
+	tarCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(tarCtx, "tar", "-tvf", s.devicePath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// Could be encrypted data or not a tar archive - return empty list
+		return []TapeContentEntry{}, nil
+	}
+
+	entries := make([]TapeContentEntry, 0)
+	scanner := bufio.NewScanner(bytes.NewReader(output))
+	for scanner.Scan() && len(entries) < maxEntries {
+		line := scanner.Text()
+		fields := strings.Fields(line)
+		if len(fields) < 6 {
+			continue
+		}
+
+		permissions := fields[0]
+		owner := fields[1]
+		size, _ := strconv.ParseInt(fields[2], 10, 64)
+		date := fields[3] + " " + fields[4]
+		path := strings.Join(fields[5:], " ")
+
+		entries = append(entries, TapeContentEntry{
+			Permissions: permissions,
+			Owner:       owner,
+			Size:        size,
+			Date:        date,
+			Path:        path,
+		})
+	}
+
+	return entries, nil
 }

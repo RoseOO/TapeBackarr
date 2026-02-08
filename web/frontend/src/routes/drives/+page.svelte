@@ -43,6 +43,9 @@
   let formatConfirmChecked = false;
   let showAddUnknownTapeModal = false;
   let unknownTapeTarget: { drive: Drive; tape: Drive['unknown_tape'] } | null = null;
+  let showInspectModal = false;
+  let inspectResult: any = null;
+  let inspecting = false;
   let addTapeFormData = {
     label: '',
     barcode: '',
@@ -253,6 +256,19 @@
       error = e instanceof Error ? e.message : 'Failed to add tape to library';
     }
   }
+
+  async function handleInspectTape(drive: Drive) {
+    inspecting = true;
+    try {
+      error = '';
+      inspectResult = await api.inspectTape(drive.id);
+      showInspectModal = true;
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to inspect tape';
+    } finally {
+      inspecting = false;
+    }
+  }
 </script>
 
 <div class="page-header">
@@ -306,6 +322,7 @@
               <button class="btn btn-secondary btn-sm" on:click={() => selectDrive(drive.id)}>Select</button>
               <button class="btn btn-secondary btn-sm" on:click={() => rewindTape(drive.id)}>Rewind</button>
               <button class="btn btn-secondary btn-sm" on:click={() => ejectTape(drive.id)}>Eject</button>
+              <button class="btn btn-secondary btn-sm" on:click={() => handleInspectTape(drive)} disabled={inspecting}>🔍 Inspect</button>
               <button class="btn btn-warning btn-sm" on:click={() => openFormatDriveModal(drive)} disabled={drive.status === 'offline'}>Format</button>
               <button class="btn btn-danger btn-sm" on:click={() => deleteDrive(drive.id)}>Remove</button>
             </td>
@@ -481,6 +498,63 @@
           <button type="submit" class="btn btn-primary">Add to Library</button>
         </div>
       </form>
+    </div>
+  </div>
+{/if}
+
+<!-- Inspect Tape Modal -->
+{#if showInspectModal && inspectResult}
+  <div class="modal-backdrop" on:click={() => showInspectModal = false}>
+    <div class="modal modal-wide" on:click|stopPropagation={() => {}}>
+      <h2>🔍 Tape Inspection</h2>
+      <div class="tape-info-box">
+        {#if inspectResult.has_tapebackarr_label}
+          <div><strong>Label:</strong> {inspectResult.label}</div>
+          <div><strong>UUID:</strong> <code>{inspectResult.uuid || 'N/A'}</code></div>
+          <div><strong>Pool:</strong> {inspectResult.pool || 'N/A'}</div>
+          {#if inspectResult.encrypted}
+            <div><strong>🔒 Encrypted:</strong> Yes</div>
+            <div><strong>Key Fingerprint:</strong> <code>{inspectResult.encryption_key_fingerprint}</code></div>
+          {/if}
+        {:else}
+          <div><strong>TapeBackarr Label:</strong> Not found (foreign or unlabeled tape)</div>
+        {/if}
+      </div>
+      {#if inspectResult.contents_error}
+        <div class="alert alert-error" style="margin-top: 1rem;">{inspectResult.contents_error}</div>
+      {/if}
+      {#if inspectResult.contents && inspectResult.contents.length > 0}
+        <h3>File Contents ({inspectResult.contents.length} entries)</h3>
+        <div class="file-list-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Path</th>
+                <th>Size</th>
+                <th>Permissions</th>
+                <th>Owner</th>
+                <th>Date</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each inspectResult.contents as entry}
+                <tr>
+                  <td><code>{entry.path}</code></td>
+                  <td>{formatBytes(entry.size)}</td>
+                  <td><code>{entry.permissions}</code></td>
+                  <td>{entry.owner}</td>
+                  <td>{entry.date}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {:else if !inspectResult.contents_error}
+        <p class="text-muted" style="margin-top: 1rem;">No readable file contents found on this tape.</p>
+      {/if}
+      <div class="form-actions">
+        <button class="btn btn-primary" on:click={() => showInspectModal = false}>Close</button>
+      </div>
     </div>
   </div>
 {/if}
@@ -681,5 +755,17 @@
 
   .btn-warning:hover {
     background: #e0a800;
+  }
+
+  .file-list-scroll {
+    max-height: 400px;
+    overflow-y: auto;
+    margin-top: 0.5rem;
+    border: 1px solid #eee;
+    border-radius: 8px;
+  }
+
+  .file-list-scroll table {
+    margin: 0;
   }
 </style>

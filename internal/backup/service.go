@@ -10,9 +10,9 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"runtime"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,25 +36,25 @@ type FileInfo struct {
 
 // JobProgress tracks the progress of a running backup job
 type JobProgress struct {
-	JobID                   int64     `json:"job_id"`
-	JobName                 string    `json:"job_name"`
-	BackupSetID             int64     `json:"backup_set_id"`
-	Phase                   string    `json:"phase"`
-	Message                 string    `json:"message"`
-	Status                  string    `json:"status"` // running, paused, cancelled
-	FileCount               int64     `json:"file_count"`
-	TotalFiles              int64     `json:"total_files"`
-	TotalBytes              int64     `json:"total_bytes"`
-	BytesWritten            int64     `json:"bytes_written"`
-	WriteSpeed              float64   `json:"write_speed"`   // bytes per second (recent average)
-	TapeLabel               string    `json:"tape_label"`
-	TapeCapacityBytes       int64     `json:"tape_capacity_bytes"`
-	TapeUsedBytes           int64     `json:"tape_used_bytes"` // used before this backup
-	DevicePath              string    `json:"device_path"`
-	EstimatedSecondsRemaining float64 `json:"estimated_seconds_remaining"`
-	StartTime               time.Time `json:"start_time"`
-	UpdatedAt               time.Time `json:"updated_at"`
-	LogLines                []string  `json:"log_lines"`
+	JobID                     int64     `json:"job_id"`
+	JobName                   string    `json:"job_name"`
+	BackupSetID               int64     `json:"backup_set_id"`
+	Phase                     string    `json:"phase"`
+	Message                   string    `json:"message"`
+	Status                    string    `json:"status"` // running, paused, cancelled
+	FileCount                 int64     `json:"file_count"`
+	TotalFiles                int64     `json:"total_files"`
+	TotalBytes                int64     `json:"total_bytes"`
+	BytesWritten              int64     `json:"bytes_written"`
+	WriteSpeed                float64   `json:"write_speed"` // bytes per second (recent average)
+	TapeLabel                 string    `json:"tape_label"`
+	TapeCapacityBytes         int64     `json:"tape_capacity_bytes"`
+	TapeUsedBytes             int64     `json:"tape_used_bytes"` // used before this backup
+	DevicePath                string    `json:"device_path"`
+	EstimatedSecondsRemaining float64   `json:"estimated_seconds_remaining"`
+	StartTime                 time.Time `json:"start_time"`
+	UpdatedAt                 time.Time `json:"updated_at"`
+	LogLines                  []string  `json:"log_lines"`
 }
 
 // EventCallback is called when backup progress events occur (for SSE/console)
@@ -812,6 +812,24 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		s.mu.Unlock()
 	}
 
+	// Position tape past the label before writing data.
+	// The tape label occupies file position 0 followed by a file mark.
+	// We must seek to file position 1 so that backup data does not overwrite the label.
+	s.updateProgress(job.ID, "positioning", "Positioning tape past label...")
+	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+	if err := driveSvc.Rewind(ctx); err != nil {
+		s.logger.Warn("Failed to rewind tape before positioning", map[string]interface{}{"error": err.Error()})
+	}
+	if err := driveSvc.SeekToFileNumber(ctx, 1); err != nil {
+		// If seek fails (e.g. no file mark yet on a blank tape), rewind and write a label first
+		s.logger.Warn("Failed to seek past label, tape may be unlabeled", map[string]interface{}{"error": err.Error()})
+		if rewindErr := driveSvc.Rewind(ctx); rewindErr != nil {
+			s.updateProgress(job.ID, "failed", "Failed to position tape: "+rewindErr.Error())
+			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "failed to position tape")
+			return nil, fmt.Errorf("failed to rewind tape: %w", rewindErr)
+		}
+	}
+
 	// Stream to tape
 	s.updateProgress(job.ID, "streaming", fmt.Sprintf("Streaming %d files (%d bytes) to tape device %s", len(files), totalBytes, devicePath))
 	s.logger.Info("Streaming to tape", map[string]interface{}{
@@ -927,6 +945,24 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 			status = CASE WHEN status = 'blank' THEN 'active' ELSE status END
 		WHERE id = ?
 	`, totalBytes, endTime, tapeID)
+
+	// Update tape with encryption key info for library visibility
+	if encrypted && encryptionKeyID != nil {
+		var keyFingerprint, keyName string
+		if err := s.db.QueryRow("SELECT key_fingerprint, name FROM encryption_keys WHERE id = ?", *encryptionKeyID).Scan(&keyFingerprint, &keyName); err != nil {
+			s.logger.Warn("Failed to look up encryption key for tape tracking", map[string]interface{}{
+				"encryption_key_id": *encryptionKeyID,
+				"error":             err.Error(),
+			})
+		} else if keyFingerprint != "" {
+			if _, err := s.db.Exec("UPDATE tapes SET encryption_key_fingerprint = ?, encryption_key_name = ? WHERE id = ?", keyFingerprint, keyName, tapeID); err != nil {
+				s.logger.Warn("Failed to update tape encryption tracking", map[string]interface{}{
+					"tape_id": tapeID,
+					"error":   err.Error(),
+				})
+			}
+		}
+	}
 
 	// Update job last run
 	s.db.Exec("UPDATE backup_jobs SET last_run_at = ? WHERE id = ?", endTime, job.ID)

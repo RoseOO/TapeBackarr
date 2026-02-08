@@ -181,6 +181,7 @@ func (s *Server) setupRoutes() {
 			r.Post("/{id}/rewind", s.handleRewindTape)
 			r.Post("/{id}/select", s.handleSelectDrive)
 			r.Post("/{id}/format-tape", s.handleFormatTapeInDrive)
+			r.Get("/{id}/inspect-tape", s.handleInspectTape)
 		})
 
 		// Backup Sources
@@ -250,6 +251,7 @@ func (s *Server) setupRoutes() {
 				r.Use(s.adminOnlyMiddleware)
 				r.Put("/", s.handleUpdateConfig)
 				r.Post("/telegram/test", s.handleTestTelegram)
+				r.Post("/restart", s.handleRestart)
 			})
 		})
 
@@ -508,7 +510,9 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListTapes(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`
 		SELECT t.id, t.uuid, t.barcode, t.label, COALESCE(t.lto_type, '') as lto_type, t.pool_id, tp.name as pool_name, t.status, 
-		       t.capacity_bytes, t.used_bytes, t.write_count, t.last_written_at, t.labeled_at, t.created_at
+		       t.capacity_bytes, t.used_bytes, t.write_count, t.last_written_at, t.labeled_at, t.created_at,
+		       COALESCE(t.encryption_key_fingerprint, '') as encryption_key_fingerprint,
+		       COALESCE(t.encryption_key_name, '') as encryption_key_name
 		FROM tapes t
 		LEFT JOIN tape_pools tp ON t.pool_id = tp.id
 		ORDER BY t.label
@@ -524,25 +528,29 @@ func (s *Server) handleListTapes(w http.ResponseWriter, r *http.Request) {
 		var t models.Tape
 		var poolName *string
 		var ltoType string
+		var encFingerprint, encKeyName string
 		if err := rows.Scan(&t.ID, &t.UUID, &t.Barcode, &t.Label, &ltoType, &t.PoolID, &poolName, &t.Status,
-			&t.CapacityBytes, &t.UsedBytes, &t.WriteCount, &t.LastWrittenAt, &t.LabeledAt, &t.CreatedAt); err != nil {
+			&t.CapacityBytes, &t.UsedBytes, &t.WriteCount, &t.LastWrittenAt, &t.LabeledAt, &t.CreatedAt,
+			&encFingerprint, &encKeyName); err != nil {
 			continue
 		}
 		tape := map[string]interface{}{
-			"id":              t.ID,
-			"uuid":            t.UUID,
-			"barcode":         t.Barcode,
-			"label":           t.Label,
-			"lto_type":        ltoType,
-			"pool_id":         t.PoolID,
-			"pool_name":       poolName,
-			"status":          t.Status,
-			"capacity_bytes":  t.CapacityBytes,
-			"used_bytes":      t.UsedBytes,
-			"write_count":     t.WriteCount,
-			"last_written_at": t.LastWrittenAt,
-			"labeled_at":      t.LabeledAt,
-			"created_at":      t.CreatedAt,
+			"id":                         t.ID,
+			"uuid":                       t.UUID,
+			"barcode":                    t.Barcode,
+			"label":                      t.Label,
+			"lto_type":                   ltoType,
+			"pool_id":                    t.PoolID,
+			"pool_name":                  poolName,
+			"status":                     t.Status,
+			"capacity_bytes":             t.CapacityBytes,
+			"used_bytes":                 t.UsedBytes,
+			"write_count":                t.WriteCount,
+			"last_written_at":            t.LastWrittenAt,
+			"labeled_at":                 t.LabeledAt,
+			"created_at":                 t.CreatedAt,
+			"encryption_key_fingerprint": encFingerprint,
+			"encryption_key_name":        encKeyName,
 		}
 		tapes = append(tapes, tape)
 	}
@@ -848,10 +856,10 @@ func (s *Server) handleLabelTape(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Label      string `json:"label"`
-		DriveID    *int64 `json:"drive_id"`
-		Force      bool   `json:"force"`
-		AutoEject  bool   `json:"auto_eject"`
+		Label     string `json:"label"`
+		DriveID   *int64 `json:"drive_id"`
+		Force     bool   `json:"force"`
+		AutoEject bool   `json:"auto_eject"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.respondError(w, http.StatusBadRequest, "invalid request body")
@@ -2169,7 +2177,8 @@ func (s *Server) handleListBackupSets(w http.ResponseWriter, r *http.Request) {
 
 	query := `
 		SELECT bs.id, bs.job_id, j.name as job_name, bs.tape_id, t.label as tape_label,
-		       bs.backup_type, bs.start_time, bs.end_time, bs.status, bs.file_count, bs.total_bytes
+		       bs.backup_type, bs.start_time, bs.end_time, bs.status, bs.file_count, bs.total_bytes,
+		       COALESCE(bs.encrypted, 0) as encrypted, bs.encryption_key_id
 		FROM backup_sets bs
 		LEFT JOIN backup_jobs j ON bs.job_id = j.id
 		LEFT JOIN tapes t ON bs.tape_id = t.id
@@ -2196,22 +2205,27 @@ func (s *Server) handleListBackupSets(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var bs models.BackupSet
 		var jobName, tapeLabel *string
+		var encrypted bool
+		var encryptionKeyID *int64
 		if err := rows.Scan(&bs.ID, &bs.JobID, &jobName, &bs.TapeID, &tapeLabel,
-			&bs.BackupType, &bs.StartTime, &bs.EndTime, &bs.Status, &bs.FileCount, &bs.TotalBytes); err != nil {
+			&bs.BackupType, &bs.StartTime, &bs.EndTime, &bs.Status, &bs.FileCount, &bs.TotalBytes,
+			&encrypted, &encryptionKeyID); err != nil {
 			continue
 		}
 		set := map[string]interface{}{
-			"id":          bs.ID,
-			"job_id":      bs.JobID,
-			"job_name":    jobName,
-			"tape_id":     bs.TapeID,
-			"tape_label":  tapeLabel,
-			"backup_type": bs.BackupType,
-			"start_time":  bs.StartTime,
-			"end_time":    bs.EndTime,
-			"status":      bs.Status,
-			"file_count":  bs.FileCount,
-			"total_bytes": bs.TotalBytes,
+			"id":                bs.ID,
+			"job_id":            bs.JobID,
+			"job_name":          jobName,
+			"tape_id":           bs.TapeID,
+			"tape_label":        tapeLabel,
+			"backup_type":       bs.BackupType,
+			"start_time":        bs.StartTime,
+			"end_time":          bs.EndTime,
+			"status":            bs.Status,
+			"file_count":        bs.FileCount,
+			"total_bytes":       bs.TotalBytes,
+			"encrypted":         encrypted,
+			"encryption_key_id": encryptionKeyID,
 		}
 		sets = append(sets, set)
 	}
@@ -3355,9 +3369,9 @@ func (s *Server) handleReadTapeLabel(w http.ResponseWriter, r *http.Request) {
 
 	if labelData == nil {
 		s.respondJSON(w, http.StatusOK, map[string]interface{}{
-			"tape_id":  id,
-			"labeled":  false,
-			"message":  "no TapeBackarr label found on tape",
+			"tape_id": id,
+			"labeled": false,
+			"message": "no TapeBackarr label found on tape",
 		})
 		return
 	}
@@ -4660,4 +4674,81 @@ func (s *Server) checkTapeHealth() map[string]interface{} {
 
 	result["drives"] = driveCount
 	return result
+}
+
+func (s *Server) handleInspectTape(w http.ResponseWriter, r *http.Request) {
+	driveID, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid drive id")
+		return
+	}
+
+	var devicePath string
+	err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", driveID).Scan(&devicePath)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "drive not found or not enabled")
+		return
+	}
+
+	ctx := r.Context()
+	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+
+	// Read label
+	labelData, _ := driveSvc.ReadTapeLabel(ctx)
+
+	// List contents
+	entries, listErr := driveSvc.ListTapeContents(ctx, 1000)
+
+	result := map[string]interface{}{
+		"drive_id":    driveID,
+		"device_path": devicePath,
+	}
+
+	if labelData != nil {
+		result["label"] = labelData.Label
+		result["uuid"] = labelData.UUID
+		result["pool"] = labelData.Pool
+		result["timestamp"] = labelData.Timestamp
+		result["has_tapebackarr_label"] = true
+		if labelData.EncryptionKeyFingerprint != "" {
+			result["encryption_key_fingerprint"] = labelData.EncryptionKeyFingerprint
+			result["encrypted"] = true
+		}
+	} else {
+		result["has_tapebackarr_label"] = false
+	}
+
+	if listErr != nil {
+		result["contents_error"] = listErr.Error()
+		if labelData != nil && labelData.EncryptionKeyFingerprint != "" {
+			result["contents_error"] = "Cannot read tape contents — data appears to be encrypted. Use the encryption key with fingerprint " + labelData.EncryptionKeyFingerprint + " to decrypt."
+		}
+	}
+	result["contents"] = entries
+
+	s.respondJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
+	s.logger.Info("Restart requested via API", nil)
+
+	s.respondJSON(w, http.StatusOK, map[string]string{
+		"status":  "restarting",
+		"message": "TapeBackarr is restarting. The page will reload automatically.",
+	})
+
+	// Perform restart asynchronously after response is sent
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		// Try systemctl first (standard deployment)
+		cmd := exec.Command("systemctl", "restart", "tapebackarr")
+		if err := cmd.Run(); err != nil {
+			// Fallback: send interrupt to self to trigger graceful shutdown
+			s.logger.Warn("systemctl restart failed, sending interrupt", map[string]interface{}{"error": err.Error()})
+			p, err := os.FindProcess(os.Getpid())
+			if err == nil {
+				p.Signal(os.Interrupt)
+			}
+		}
+	}()
 }

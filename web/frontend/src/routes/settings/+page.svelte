@@ -16,6 +16,7 @@
   let dbBackupTapeId: number | null = null;
   let dbBackupTapes: any[] = [];
   let dbBackupRunning = false;
+  let restarting = false;
 
   const tabs = [
     { id: 'server', label: 'Server', icon: '🖥️' },
@@ -25,6 +26,7 @@
     { id: 'auth', label: 'Authentication', icon: '🔐' },
     { id: 'notifications', label: 'Notifications', icon: '🔔' },
     { id: 'proxmox', label: 'Proxmox', icon: '🖧' },
+    { id: 'system', label: 'System', icon: '⚙️' },
   ];
 
   onMount(async () => {
@@ -123,6 +125,23 @@
 
   function removeDrive(index: number) {
     config.tape.drives = config.tape.drives.filter((_: any, i: number) => i !== index);
+  }
+
+  async function handleRestart() {
+    if (!confirm('Are you sure you want to restart TapeBackarr? Active operations will be interrupted.')) return;
+    restarting = true;
+    error = '';
+    try {
+      await api.restartService();
+      showSuccess('TapeBackarr is restarting... The page will reload shortly.');
+      setTimeout(() => {
+        window.location.reload();
+      }, 5000);
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to restart service';
+    } finally {
+      restarting = false;
+    }
   }
 </script>
 
@@ -522,6 +541,20 @@
               <input type="text" id="px-tmpdir" bind:value={config.proxmox.temp_dir} />
             </div>
           {/if}
+        </div>
+
+      {:else if activeTab === 'system'}
+        <div class="settings-section">
+          <h2>System Management</h2>
+          <p class="section-desc">Manage the TapeBackarr service. Use the restart button after making configuration changes that require a service restart.</p>
+          
+          <h3>Restart Service</h3>
+          <p style="font-size: 0.875rem; color: #666; margin-bottom: 1rem;">
+            Restart TapeBackarr to apply configuration changes. Active backup and restore operations will be interrupted.
+          </p>
+          <button class="btn btn-danger" on:click={handleRestart} disabled={restarting}>
+            {restarting ? '🔄 Restarting...' : '🔄 Restart TapeBackarr'}
+          </button>
         </div>
       {/if}
     </div>

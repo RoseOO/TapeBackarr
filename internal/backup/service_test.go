@@ -534,16 +534,16 @@ func TestCountingReader(t *testing.T) {
 
 func TestJobProgressFields(t *testing.T) {
 	p := JobProgress{
-		JobID:                   1,
-		JobName:                 "test",
-		Status:                  "running",
-		Phase:                   "streaming",
-		BytesWritten:            1000,
-		WriteSpeed:              100.5,
-		TapeLabel:               "TAPE001",
-		TapeCapacityBytes:       12000000000000,
-		TapeUsedBytes:           5000000000000,
-		DevicePath:              "/dev/nst0",
+		JobID:                     1,
+		JobName:                   "test",
+		Status:                    "running",
+		Phase:                     "streaming",
+		BytesWritten:              1000,
+		WriteSpeed:                100.5,
+		TapeLabel:                 "TAPE001",
+		TapeCapacityBytes:         12000000000000,
+		TapeUsedBytes:             5000000000000,
+		DevicePath:                "/dev/nst0",
 		EstimatedSecondsRemaining: 3600.5,
 	}
 
