@@ -83,7 +83,7 @@ Created: 2024-01-15
 **In TapeBackarr:**
 - Use consistent naming: `POOL-NUMBER` (e.g., WEEKLY-001)
 - Add notes for special circumstances
-- Update status when moving offsite
+- Export tape when moving offsite
 
 ---
 

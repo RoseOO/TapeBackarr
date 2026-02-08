@@ -212,7 +212,10 @@ Edit `/etc/tapebackarr/config.json`:
       "username": "your-username",
       "password": "your-password",
       "from_email": "tapebackarr@example.com",
-      "to_emails": "admin@example.com"
+      "from_name": "TapeBackarr",
+      "to_emails": "admin@example.com",
+      "use_tls": true,
+      "skip_verify": false
     }
   }
 }
