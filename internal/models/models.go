@@ -260,3 +260,43 @@ type TapeChangeRequest struct {
 	AcknowledgedAt *time.Time `json:"acknowledged_at" db:"acknowledged_at"`
 	NewTapeID      *int64    `json:"new_tape_id" db:"new_tape_id"`
 }
+
+// DatabaseBackup represents a backup of the TapeBackarr database to tape
+type DatabaseBackup struct {
+	ID           int64      `json:"id" db:"id"`
+	TapeID       int64      `json:"tape_id" db:"tape_id"`
+	BackupTime   time.Time  `json:"backup_time" db:"backup_time"`
+	FileSize     int64      `json:"file_size" db:"file_size"`
+	Checksum     string     `json:"checksum" db:"checksum"`
+	BlockOffset  int64      `json:"block_offset" db:"block_offset"`
+	Status       string     `json:"status" db:"status"` // pending, completed, failed
+	ErrorMessage string     `json:"error_message,omitempty" db:"error_message"`
+	CreatedAt    time.Time  `json:"created_at" db:"created_at"`
+}
+
+// RestoreDestinationType represents the type of restore destination
+type RestoreDestinationType string
+
+const (
+	RestoreDestLocal RestoreDestinationType = "local"
+	RestoreDestSMB   RestoreDestinationType = "smb"
+	RestoreDestNFS   RestoreDestinationType = "nfs"
+)
+
+// RestoreOperation represents a tracked restore operation
+type RestoreOperation struct {
+	ID              int64                  `json:"id" db:"id"`
+	BackupSetID     *int64                 `json:"backup_set_id" db:"backup_set_id"`
+	DestinationType RestoreDestinationType `json:"destination_type" db:"destination_type"`
+	DestinationPath string                 `json:"destination_path" db:"destination_path"`
+	FilesRequested  int64                  `json:"files_requested" db:"files_requested"`
+	FilesRestored   int64                  `json:"files_restored" db:"files_restored"`
+	BytesRestored   int64                  `json:"bytes_restored" db:"bytes_restored"`
+	Status          string                 `json:"status" db:"status"` // pending, running, completed, failed
+	ErrorMessage    string                 `json:"error_message,omitempty" db:"error_message"`
+	VerifyEnabled   bool                   `json:"verify_enabled" db:"verify_enabled"`
+	VerifyPassed    *bool                  `json:"verify_passed" db:"verify_passed"`
+	StartedAt       *time.Time             `json:"started_at" db:"started_at"`
+	CompletedAt     *time.Time             `json:"completed_at" db:"completed_at"`
+	CreatedAt       time.Time              `json:"created_at" db:"created_at"`
+}

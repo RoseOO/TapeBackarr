@@ -56,11 +56,72 @@ The dashboard provides an at-a-glance view of your system:
 |---------|---------|
 | Dashboard | System overview and quick stats |
 | Tapes | Manage tape inventory |
+| Drives | Manage and select tape drives |
 | Sources | Configure backup source paths |
 | Jobs | Create and manage backup jobs |
 | Restore | Browse catalog and restore files |
 | Logs | View operation logs and audit trail |
+| Documentation | Access guides and references |
 | Users | Manage user accounts (admin only) |
+
+---
+
+## Managing Tape Drives
+
+TapeBackarr supports multiple tape drives. Use the **Drives** page to manage them.
+
+### Adding a New Drive
+
+1. Navigate to **Drives** in the sidebar
+2. Click **Add Drive**
+3. Enter the drive details:
+   - **Device Path**: The Linux device path (e.g., `/dev/nst0`)
+   - **Display Name**: A friendly name (e.g., "Primary LTO-8 Drive")
+   - **Model**: Optional model information (e.g., "LTO-8")
+   - **Serial Number**: Optional serial number
+4. Click **Add Drive**
+
+### Managing Drives
+
+| Action | Description |
+|--------|-------------|
+| **Select** | Choose which drive to use for operations |
+| **Rewind** | Rewind the tape to the beginning |
+| **Eject** | Eject the tape from the drive |
+| **Remove** | Remove the drive from TapeBackarr |
+
+### Drive Status
+
+| Status | Description |
+|--------|-------------|
+| Ready | Drive is online and ready |
+| Busy | Drive is performing an operation |
+| Offline | Drive is not responding |
+| Error | Drive has encountered an error |
+
+### Configuring Multiple Drives
+
+You can also configure drives in the configuration file:
+
+```json
+{
+  "tape": {
+    "default_device": "/dev/nst0",
+    "drives": [
+      {
+        "device_path": "/dev/nst0",
+        "display_name": "Primary LTO-8 Drive",
+        "enabled": true
+      },
+      {
+        "device_path": "/dev/nst1",
+        "display_name": "Secondary LTO-6 Drive",
+        "enabled": true
+      }
+    ]
+  }
+}
+```
 
 ---
 
@@ -282,18 +343,40 @@ Please insert tape WEEKLY-001 and click Continue.
 |--------|-------------|
 | Full Path | Restore to original location |
 | Custom Path | Restore to a different location |
+| Destination Type | Local, SMB, or NFS path |
 | Overwrite | Replace existing files |
 | Skip Existing | Don't overwrite existing files |
 | Verify | Verify checksums after restore |
+
+### Restore Destination Types
+
+TapeBackarr supports restoring to different destination types:
+
+| Type | Description | Example Path |
+|------|-------------|--------------|
+| **Local** | Direct filesystem path | `/restore/output` |
+| **SMB/CIFS** | Pre-mounted SMB share | `/mnt/smb/restore` |
+| **NFS** | Pre-mounted NFS share | `/mnt/nfs/restore` |
+
+**Note:** For network destinations (SMB/NFS), mount the share first using standard Linux commands:
+
+```bash
+# Mount SMB share
+sudo mount -t cifs //server/share /mnt/smb/restore -o username=user,password=pass
+
+# Mount NFS share
+sudo mount -t nfs server:/export/path /mnt/nfs/restore
+```
 
 ### Restore Process
 
 1. **Select files** from the catalog
 2. **Review required tapes** - system shows which tapes are needed
-3. **Insert first tape** as directed
-4. **Start restore** - files are extracted to the destination
-5. **Change tapes** if prompted (for multi-tape restores)
-6. **Verify** - optionally verify restored file checksums
+3. **Choose destination** - local path or pre-mounted network share
+4. **Insert first tape** as directed
+5. **Start restore** - files are extracted to the destination
+6. **Change tapes** if prompted (for multi-tape restores)
+7. **Verify** - optionally verify restored file checksums
 
 ### Restore Single File
 
@@ -473,6 +556,7 @@ cat /var/log/tapebackarr/tapebackarr.log | jq '.message'
 2. **Test restores**: Regularly verify backups work
 3. **Full + Incremental**: Monthly full, daily incremental
 4. **Document sources**: Keep source configurations documented
+5. **Backup the database**: Periodically backup TapeBackarr's database to tape
 
 ### Security
 
@@ -496,6 +580,83 @@ cat /var/log/tapebackarr/tapebackarr.log | jq '.message'
 3. **Test full restores** periodically
 4. **Have spare tapes** on hand
 5. **Know your tape rotation** locations
+6. **Backup the TapeBackarr database** to tape regularly
+
+---
+
+## Database Backup
+
+TapeBackarr can backup its own database to tape for disaster recovery. This ensures you can recover your tape catalog and configuration even if the server is lost.
+
+### Why Backup the Database?
+
+The TapeBackarr database contains:
+- File catalog with block offset information
+- Tape inventory and pool assignments
+- Backup job configurations
+- User accounts
+- Audit logs
+
+Without this database, you would need to manually catalog each tape to know its contents.
+
+### Backup Database to Tape
+
+Via API:
+```bash
+curl -X POST http://localhost:8080/api/v1/database-backup/backup \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"tape_id": 1}'
+```
+
+### Restore Database from Tape
+
+Via API:
+```bash
+curl -X POST http://localhost:8080/api/v1/database-backup/restore \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"backup_id": 1, "dest_path": "/tmp/restore"}'
+```
+
+### Best Practices for Database Backup
+
+1. **Schedule regular backups**: Weekly or after major changes
+2. **Use archive tapes**: Store database backups on long-term archive tapes
+3. **Test restoration**: Periodically verify database backups can be restored
+4. **Document the process**: Keep written instructions for database recovery
+
+---
+
+## In-App Documentation
+
+TapeBackarr includes comprehensive documentation accessible directly from the web interface.
+
+### Accessing Documentation
+
+1. Click **Documentation** (📖) in the sidebar
+2. Select a document from the list
+3. Read the content directly in the browser
+
+### Available Documents
+
+| Document | Description |
+|----------|-------------|
+| Usage Guide | Complete guide to using TapeBackarr |
+| API Reference | REST API documentation |
+| Operator Guide | Quick reference for daily operations |
+| Manual Recovery | Recover data without TapeBackarr |
+| Architecture | System design and data flows |
+| Database Schema | Database table definitions |
+
+### Manual Recovery Guide
+
+The **Manual Recovery** document is especially important for long-term archival. It contains step-by-step instructions for recovering data from tape using only standard Linux commands (mt, tar), without needing TapeBackarr.
+
+This is useful when:
+- The TapeBackarr server is unavailable
+- Recovering data many years after archival
+- Disaster recovery scenarios
 
 ---
 

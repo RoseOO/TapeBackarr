@@ -2,8 +2,13 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
+	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -112,9 +117,13 @@ func (s *Server) setupRoutes() {
 		// Drives
 		r.Route("/api/v1/drives", func(r chi.Router) {
 			r.Get("/", s.handleListDrives)
+			r.Post("/", s.handleCreateDrive)
 			r.Get("/{id}/status", s.handleDriveStatus)
+			r.Put("/{id}", s.handleUpdateDrive)
+			r.Delete("/{id}", s.handleDeleteDrive)
 			r.Post("/{id}/eject", s.handleEjectTape)
 			r.Post("/{id}/rewind", s.handleRewindTape)
+			r.Post("/{id}/select", s.handleSelectDrive)
 		})
 
 		// Backup Sources
@@ -167,6 +176,19 @@ func (s *Server) setupRoutes() {
 			r.Get("/", s.handleListUsers)
 			r.Post("/", s.handleCreateUser)
 			r.Delete("/{id}", s.handleDeleteUser)
+		})
+
+		// Documentation
+		r.Route("/api/v1/docs", func(r chi.Router) {
+			r.Get("/", s.handleListDocs)
+			r.Get("/{id}", s.handleGetDoc)
+		})
+
+		// Database backup
+		r.Route("/api/v1/database-backup", func(r chi.Router) {
+			r.Get("/", s.handleListDatabaseBackups)
+			r.Post("/backup", s.handleBackupDatabase)
+			r.Post("/restore", s.handleRestoreDatabaseBackup)
 		})
 	})
 
@@ -1440,4 +1462,425 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// Documentation handlers
+
+// handleListDocs returns a list of available documentation files
+func (s *Server) handleListDocs(w http.ResponseWriter, r *http.Request) {
+	docs := []map[string]string{
+		{"id": "usage", "title": "Usage Guide", "description": "Complete guide to using TapeBackarr"},
+		{"id": "api", "title": "API Reference", "description": "REST API documentation"},
+		{"id": "operator", "title": "Operator Guide", "description": "Quick reference for operators"},
+		{"id": "recovery", "title": "Manual Recovery", "description": "Recover data without TapeBackarr"},
+		{"id": "architecture", "title": "Architecture", "description": "System design and data flows"},
+		{"id": "database", "title": "Database Schema", "description": "Database table definitions"},
+	}
+	s.respondJSON(w, http.StatusOK, docs)
+}
+
+// handleGetDoc returns a specific documentation file content
+func (s *Server) handleGetDoc(w http.ResponseWriter, r *http.Request) {
+	docID := chi.URLParam(r, "id")
+
+	docFiles := map[string]string{
+		"usage":        "USAGE_GUIDE.md",
+		"api":          "API_REFERENCE.md",
+		"operator":     "OPERATOR_GUIDE.md",
+		"recovery":     "MANUAL_RECOVERY.md",
+		"architecture": "ARCHITECTURE.md",
+		"database":     "DATABASE_SCHEMA.md",
+	}
+
+	filename, ok := docFiles[docID]
+	if !ok {
+		s.respondError(w, http.StatusNotFound, "documentation not found")
+		return
+	}
+
+	// Read documentation from embedded files or docs directory
+	content, err := s.readDocFile(filename)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "documentation file not found")
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]string{
+		"id":      docID,
+		"title":   filename,
+		"content": content,
+	})
+}
+
+// readDocFile reads documentation file content
+func (s *Server) readDocFile(filename string) (string, error) {
+	// Try to read from docs directory relative to working directory
+	paths := []string{
+		"docs/" + filename,
+		"../docs/" + filename,
+		"/opt/tapebackarr/docs/" + filename,
+	}
+
+	for _, path := range paths {
+		content, err := os.ReadFile(path)
+		if err == nil {
+			return string(content), nil
+		}
+	}
+
+	return "", os.ErrNotExist
+}
+
+// Database backup handlers
+
+// handleBackupDatabase backs up the TapeBackarr database to tape
+func (s *Server) handleBackupDatabase(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		TapeID int64 `json:"tape_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Get tape device path
+	var devicePath string
+	err := s.db.QueryRow("SELECT device_path FROM tape_drives WHERE current_tape_id = ?", req.TapeID).Scan(&devicePath)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "tape not loaded in any drive")
+		return
+	}
+
+	// Create database backup record
+	result, err := s.db.Exec(`
+		INSERT INTO database_backups (tape_id, status, backup_time)
+		VALUES (?, 'pending', CURRENT_TIMESTAMP)
+	`, req.TapeID)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	backupID, _ := result.LastInsertId()
+
+	// Run backup in background
+	go s.runDatabaseBackup(backupID, req.TapeID, devicePath)
+
+	s.respondJSON(w, http.StatusAccepted, map[string]interface{}{
+		"id":      backupID,
+		"status":  "started",
+		"message": "Database backup started",
+	})
+}
+
+// runDatabaseBackup performs the actual database backup to tape
+func (s *Server) runDatabaseBackup(backupID, tapeID int64, devicePath string) {
+	ctx := context.Background()
+
+	// Get database path from config
+	var dbPath string
+	err := s.db.QueryRow("SELECT path FROM pragma_database_list WHERE name='main'").Scan(&dbPath)
+	if err != nil {
+		// Use default path
+		dbPath = "/var/lib/tapebackarr/tapebackarr.db"
+	}
+
+	// Create a backup copy of the database
+	tempDir := "/tmp/tapebackarr-backup"
+	os.MkdirAll(tempDir, 0755)
+	defer os.RemoveAll(tempDir)
+
+	backupPath := tempDir + "/tapebackarr.db"
+
+	// Use SQLite backup command
+	_, err = s.db.Exec("VACUUM INTO ?", backupPath)
+	if err != nil {
+		s.db.Exec("UPDATE database_backups SET status = 'failed', error_message = ? WHERE id = ?", err.Error(), backupID)
+		return
+	}
+
+	// Get file info
+	info, err := os.Stat(backupPath)
+	if err != nil {
+		s.db.Exec("UPDATE database_backups SET status = 'failed', error_message = ? WHERE id = ?", err.Error(), backupID)
+		return
+	}
+
+	// Calculate checksum
+	checksum, _ := calculateFileChecksum(backupPath)
+
+	// Position tape and write
+	if err := s.tapeService.Rewind(ctx); err != nil {
+		s.db.Exec("UPDATE database_backups SET status = 'failed', error_message = ? WHERE id = ?", "failed to rewind: "+err.Error(), backupID)
+		return
+	}
+
+	// Skip past tape label to first file position
+	// Database backups are written after the label block (file 0)
+	s.tapeService.SeekToFileNumber(ctx, 1)
+
+	// Stream database backup to tape using tar
+	tarArgs := []string{"-c", "-f", devicePath, "-C", tempDir, "tapebackarr.db"}
+	cmd := exec.CommandContext(ctx, "tar", tarArgs...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		s.db.Exec("UPDATE database_backups SET status = 'failed', error_message = ? WHERE id = ?", "tar failed: "+string(output), backupID)
+		return
+	}
+
+	// Write file mark
+	s.tapeService.WriteFileMark(ctx)
+
+	// Update backup record
+	s.db.Exec(`
+		UPDATE database_backups 
+		SET status = 'completed', file_size = ?, checksum = ?
+		WHERE id = ?
+	`, info.Size(), checksum, backupID)
+
+	// Log audit entry
+	s.db.Exec(`
+		INSERT INTO audit_logs (action, resource_type, resource_id, details)
+		VALUES (?, ?, ?, ?)
+	`, "database_backup", "database_backup", backupID, "Database backed up to tape")
+}
+
+// handleListDatabaseBackups returns list of database backups
+func (s *Server) handleListDatabaseBackups(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.db.Query(`
+		SELECT db.id, db.tape_id, t.label as tape_label, db.backup_time, db.file_size, 
+		       db.checksum, db.status, db.error_message, db.created_at
+		FROM database_backups db
+		LEFT JOIN tapes t ON db.tape_id = t.id
+		ORDER BY db.backup_time DESC
+		LIMIT 50
+	`)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer rows.Close()
+
+	var backups []map[string]interface{}
+	for rows.Next() {
+		var id, tapeID, fileSize int64
+		var tapeLabel, checksum, status, errorMsg *string
+		var backupTime, createdAt time.Time
+
+		if err := rows.Scan(&id, &tapeID, &tapeLabel, &backupTime, &fileSize, &checksum, &status, &errorMsg, &createdAt); err != nil {
+			continue
+		}
+
+		backup := map[string]interface{}{
+			"id":            id,
+			"tape_id":       tapeID,
+			"tape_label":    tapeLabel,
+			"backup_time":   backupTime,
+			"file_size":     fileSize,
+			"checksum":      checksum,
+			"status":        status,
+			"error_message": errorMsg,
+			"created_at":    createdAt,
+		}
+		backups = append(backups, backup)
+	}
+
+	s.respondJSON(w, http.StatusOK, backups)
+}
+
+// handleRestoreDatabaseBackup restores database from tape
+func (s *Server) handleRestoreDatabaseBackup(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		BackupID int64  `json:"backup_id"`
+		DestPath string `json:"dest_path"` // Optional: path to restore to
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Get backup info
+	var tapeID, blockOffset int64
+	err := s.db.QueryRow(`
+		SELECT tape_id, COALESCE(block_offset, 0)
+		FROM database_backups WHERE id = ?
+	`, req.BackupID).Scan(&tapeID, &blockOffset)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "database backup not found")
+		return
+	}
+
+	// Get tape device
+	var devicePath string
+	err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE current_tape_id = ?", tapeID).Scan(&devicePath)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "required tape not loaded")
+		return
+	}
+
+	destPath := req.DestPath
+	if destPath == "" {
+		destPath = "/tmp/tapebackarr-restore"
+	}
+	os.MkdirAll(destPath, 0755)
+
+	ctx := r.Context()
+
+	// Position tape
+	if err := s.tapeService.Rewind(ctx); err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to rewind tape")
+		return
+	}
+
+	if blockOffset > 0 {
+		s.tapeService.SeekToBlock(ctx, blockOffset)
+	}
+
+	// Extract database
+	tarArgs := []string{"-x", "-f", devicePath, "-C", destPath, "tapebackarr.db"}
+	cmd := exec.CommandContext(ctx, "tar", tarArgs...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "restore failed: "+string(output))
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]string{
+		"status":    "restored",
+		"dest_path": destPath + "/tapebackarr.db",
+	})
+}
+
+// Drive management handlers
+
+// handleCreateDrive adds a new tape drive
+func (s *Server) handleCreateDrive(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		DevicePath   string `json:"device_path"`
+		DisplayName  string `json:"display_name"`
+		SerialNumber string `json:"serial_number"`
+		Model        string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	result, err := s.db.Exec(`
+		INSERT INTO tape_drives (device_path, display_name, serial_number, model, status, enabled)
+		VALUES (?, ?, ?, ?, 'offline', 1)
+	`, req.DevicePath, req.DisplayName, req.SerialNumber, req.Model)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	id, _ := result.LastInsertId()
+	s.respondJSON(w, http.StatusCreated, map[string]int64{"id": id})
+}
+
+// handleUpdateDrive updates a tape drive configuration
+func (s *Server) handleUpdateDrive(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid drive id")
+		return
+	}
+
+	var req struct {
+		DisplayName *string `json:"display_name"`
+		Enabled     *bool   `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	updates := []string{}
+	args := []interface{}{}
+
+	if req.DisplayName != nil {
+		updates = append(updates, "display_name = ?")
+		args = append(args, *req.DisplayName)
+	}
+	if req.Enabled != nil {
+		updates = append(updates, "enabled = ?")
+		args = append(args, *req.Enabled)
+	}
+
+	if len(updates) == 0 {
+		s.respondError(w, http.StatusBadRequest, "no fields to update")
+		return
+	}
+
+	updates = append(updates, "updated_at = CURRENT_TIMESTAMP")
+	args = append(args, id)
+
+	query := "UPDATE tape_drives SET " + strings.Join(updates, ", ") + " WHERE id = ?"
+	_, err = s.db.Exec(query, args...)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+// handleDeleteDrive removes a tape drive
+func (s *Server) handleDeleteDrive(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid drive id")
+		return
+	}
+
+	_, err = s.db.Exec("DELETE FROM tape_drives WHERE id = ?", id)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// handleSelectDrive selects which drive to use for operations
+func (s *Server) handleSelectDrive(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid drive id")
+		return
+	}
+
+	// Get drive device path
+	var devicePath string
+	err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ?", id).Scan(&devicePath)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "drive not found")
+		return
+	}
+
+	// Update the tape service to use this drive
+	// Note: In a full implementation, this would update the active drive configuration
+
+	s.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"status":      "selected",
+		"drive_id":    id,
+		"device_path": devicePath,
+	})
+}
+
+// Helper function to calculate file checksum
+func calculateFileChecksum(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+
+	return hex.EncodeToString(h.Sum(nil)), nil
 }

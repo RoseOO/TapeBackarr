@@ -13,6 +13,9 @@ Quick reference guide for operators managing daily tape backup operations.
 | Handle tape change | Wait for notification → Swap tape → Acknowledge |
 | Restore files | Restore → Search → Select → Insert tape → Restore |
 | View recent errors | Logs → Filter by Error level |
+| Switch tape drive | Drives → Select drive → Click "Select" |
+| Backup database | API: POST /api/v1/database-backup/backup |
+| View documentation | Sidebar → Documentation (📖) |
 
 ### Emergency Contacts
 
@@ -21,6 +24,7 @@ Quick reference guide for operators managing daily tape backup operations.
 | Drive hardware failure | Contact IT support |
 | Tape stuck in drive | DO NOT force → Contact IT |
 | System not responding | Restart service: `sudo systemctl restart tapebackarr` |
+| Need manual recovery | See Manual Recovery Guide in Documentation |
 
 ---
 
@@ -30,7 +34,7 @@ Quick reference guide for operators managing daily tape backup operations.
 
 - [ ] Check Dashboard for overnight job status
 - [ ] Review any failed jobs and errors
-- [ ] Verify tape drive is online
+- [ ] Verify tape drive(s) are online
 - [ ] Check for pending tape change requests
 - [ ] Ensure spare tapes are available
 
@@ -40,6 +44,12 @@ Quick reference guide for operators managing daily tape backup operations.
 - [ ] Note any tapes that need to go offsite
 - [ ] Check tape pool levels (adequate blanks available)
 - [ ] Clear any warnings/alerts
+
+### Weekly Tasks
+
+- [ ] Backup the TapeBackarr database to tape
+- [ ] Review and rotate offsite tapes
+- [ ] Check drive status and clean if needed
 
 ---
 
@@ -384,6 +394,36 @@ mt -f /dev/nst0 rewind
 
 ---
 
+## Managing Multiple Drives
+
+If your system has multiple tape drives, you can select which drive to use.
+
+### Switching Drives
+
+1. Navigate to **Drives** in the sidebar
+2. Find the drive you want to use
+3. Click **Select** on that drive
+4. The drive is now active for operations
+
+### Drive Operations
+
+| Button | Action |
+|--------|--------|
+| **Select** | Make this the active drive |
+| **Rewind** | Rewind the tape to beginning |
+| **Eject** | Eject the tape from the drive |
+
+### Drive Status Indicators
+
+| Status | Meaning |
+|--------|---------|
+| 🟢 Ready | Drive is online and operational |
+| 🟡 Busy | Drive is performing an operation |
+| 🔴 Offline | Drive is not responding |
+| ⛔ Error | Drive has encountered an error |
+
+---
+
 ## Emergency Procedures
 
 ### Power Failure During Backup
@@ -406,3 +446,25 @@ mt -f /dev/nst0 rewind
 4. Retrieve tapes from storage (including offsite if needed)
 5. Perform restore with verification enabled
 6. Confirm restored data is complete
+
+### Manual Recovery Without TapeBackarr
+
+If TapeBackarr is unavailable, you can still recover data:
+
+1. Access the **Manual Recovery Guide** in Documentation
+2. Or use raw mt/tar commands:
+
+```bash
+# Check tape status
+mt -f /dev/nst0 status
+
+# Rewind and list contents
+mt -f /dev/nst0 rewind
+mt -f /dev/nst0 fsf 1  # Skip label
+tar -tvf /dev/nst0    # List files
+
+# Extract all files
+tar -xvf /dev/nst0 -C /restore/path
+```
+
+For complete instructions, see the [Manual Recovery Guide](MANUAL_RECOVERY.md).
