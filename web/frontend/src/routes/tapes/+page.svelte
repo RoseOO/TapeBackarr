@@ -534,7 +534,7 @@
             <input type="checkbox" bind:checked={labelForce} />
             Force overwrite existing label
           </label>
-          <small>If the tape already has a label, overwrite it without formatting</small>
+          <small>If the tape already has a label, overwrite it (tape data is not erased)</small>
         </div>
         <div class="form-group checkbox-group">
           <label>

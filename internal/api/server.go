@@ -613,9 +613,8 @@ func (s *Server) handleCreateTape(w http.ResponseWriter, r *http.Request) {
 
 	id, _ := result.LastInsertId()
 	s.respondJSON(w, http.StatusCreated, map[string]interface{}{
-		"id":          id,
-		"uuid":        tapeUUID,
-		"auto_ejected": req.AutoEject && req.WriteLabel && req.DriveID != nil,
+		"id":   id,
+		"uuid": tapeUUID,
 	})
 }
 
@@ -2623,19 +2622,19 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Preserve sensitive fields if they were masked (not changed)
-	if newCfg.Auth.JWTSecret == "********" || newCfg.Auth.JWTSecret == "" {
+	if newCfg.Auth.JWTSecret == "********" {
 		newCfg.Auth.JWTSecret = s.config.Auth.JWTSecret
 	}
-	if newCfg.Notifications.Telegram.BotToken == "********" || newCfg.Notifications.Telegram.BotToken == "" {
+	if newCfg.Notifications.Telegram.BotToken == "********" {
 		newCfg.Notifications.Telegram.BotToken = s.config.Notifications.Telegram.BotToken
 	}
-	if newCfg.Notifications.Email.Password == "********" || newCfg.Notifications.Email.Password == "" {
+	if newCfg.Notifications.Email.Password == "********" {
 		newCfg.Notifications.Email.Password = s.config.Notifications.Email.Password
 	}
-	if newCfg.Proxmox.Password == "********" || newCfg.Proxmox.Password == "" {
+	if newCfg.Proxmox.Password == "********" {
 		newCfg.Proxmox.Password = s.config.Proxmox.Password
 	}
-	if newCfg.Proxmox.TokenSecret == "********" || newCfg.Proxmox.TokenSecret == "" {
+	if newCfg.Proxmox.TokenSecret == "********" {
 		newCfg.Proxmox.TokenSecret = s.config.Proxmox.TokenSecret
 	}
 

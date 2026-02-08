@@ -207,8 +207,8 @@
           <h2>Authentication Configuration</h2>
           <div class="form-group">
             <label for="jwt-secret">JWT Secret</label>
-            <input type="password" id="jwt-secret" bind:value={config.auth.jwt_secret} />
-            <small>Secret key for JWT token signing (auto-generated if empty)</small>
+            <input type="password" id="jwt-secret" bind:value={config.auth.jwt_secret} placeholder="Leave as-is to keep current value" />
+            <small>Secret key for JWT token signing. Value is masked — clear to remove, or type a new value to replace.</small>
           </div>
           <div class="form-row">
             <div class="form-group">
