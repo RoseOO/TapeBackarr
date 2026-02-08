@@ -18,9 +18,9 @@ type DriveStatus struct {
 	Ready        bool      `json:"ready"`
 	Online       bool      `json:"online"`
 	WriteProtect bool      `json:"write_protect"`
-	BOT          bool      `json:"bot"`          // Beginning of Tape
-	EOT          bool      `json:"eot"`          // End of Tape
-	EOF          bool      `json:"eof"`          // End of File mark
+	BOT          bool      `json:"bot"` // Beginning of Tape
+	EOT          bool      `json:"eot"` // End of Tape
+	EOF          bool      `json:"eof"` // End of File mark
 	FileNumber   int64     `json:"file_number"`
 	BlockNumber  int64     `json:"block_number"`
 	Density      string    `json:"density"`

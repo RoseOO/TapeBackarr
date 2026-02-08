@@ -55,22 +55,22 @@ type NodeStatus struct {
 
 // VMInfo represents a QEMU VM
 type VMInfo struct {
-	VMID      int     `json:"vmid"`
-	Name      string  `json:"name"`
-	Node      string  `json:"node,omitempty"`
-	Status    string  `json:"status"`
-	CPU       float64 `json:"cpu"`
-	CPUs      int     `json:"cpus"`
-	Mem       int64   `json:"mem"`
-	MaxMem    int64   `json:"maxmem"`
-	Disk      int64   `json:"disk"`
-	MaxDisk   int64   `json:"maxdisk"`
-	Uptime    int64   `json:"uptime"`
-	Template  int     `json:"template"`
-	Type      string  `json:"type,omitempty"`
-	Tags      string  `json:"tags,omitempty"`
-	Lock      string  `json:"lock,omitempty"`
-	HA        HAState `json:"ha,omitempty"`
+	VMID     int     `json:"vmid"`
+	Name     string  `json:"name"`
+	Node     string  `json:"node,omitempty"`
+	Status   string  `json:"status"`
+	CPU      float64 `json:"cpu"`
+	CPUs     int     `json:"cpus"`
+	Mem      int64   `json:"mem"`
+	MaxMem   int64   `json:"maxmem"`
+	Disk     int64   `json:"disk"`
+	MaxDisk  int64   `json:"maxdisk"`
+	Uptime   int64   `json:"uptime"`
+	Template int     `json:"template"`
+	Type     string  `json:"type,omitempty"`
+	Tags     string  `json:"tags,omitempty"`
+	Lock     string  `json:"lock,omitempty"`
+	HA       HAState `json:"ha,omitempty"`
 }
 
 // LXCInfo represents an LXC container
@@ -101,17 +101,17 @@ type HAState struct {
 
 // VMConfig represents QEMU VM configuration
 type VMConfig struct {
-	Name       string `json:"name"`
-	Memory     int    `json:"memory"`
-	Cores      int    `json:"cores"`
-	Sockets    int    `json:"sockets"`
-	CPU        string `json:"cpu"`
-	OSType     string `json:"ostype"`
-	BIOS       string `json:"bios"`
-	Machine    string `json:"machine"`
-	Boot       string `json:"boot"`
-	SCSIHW     string `json:"scsihw"`
-	Digest     string `json:"digest"`
+	Name    string `json:"name"`
+	Memory  int    `json:"memory"`
+	Cores   int    `json:"cores"`
+	Sockets int    `json:"sockets"`
+	CPU     string `json:"cpu"`
+	OSType  string `json:"ostype"`
+	BIOS    string `json:"bios"`
+	Machine string `json:"machine"`
+	Boot    string `json:"boot"`
+	SCSIHW  string `json:"scsihw"`
+	Digest  string `json:"digest"`
 	// Storage devices (scsi0, virtio0, ide0, etc.)
 	Disks map[string]string `json:"-"`
 	// Network devices (net0, net1, etc.)
@@ -122,16 +122,16 @@ type VMConfig struct {
 
 // LXCConfig represents LXC container configuration
 type LXCConfig struct {
-	Hostname    string `json:"hostname"`
-	Memory      int    `json:"memory"`
-	Swap        int    `json:"swap"`
-	Cores       int    `json:"cores"`
-	OSType      string `json:"ostype"`
-	Arch        string `json:"arch"`
-	RootFS      string `json:"rootfs"`
-	Digest      string `json:"digest"`
+	Hostname     string `json:"hostname"`
+	Memory       int    `json:"memory"`
+	Swap         int    `json:"swap"`
+	Cores        int    `json:"cores"`
+	OSType       string `json:"ostype"`
+	Arch         string `json:"arch"`
+	RootFS       string `json:"rootfs"`
+	Digest       string `json:"digest"`
 	Unprivileged int    `json:"unprivileged"`
-	Features    string `json:"features"`
+	Features     string `json:"features"`
 	// Mount points (mp0, mp1, etc.)
 	MountPoints map[string]string `json:"-"`
 	// Network devices (net0, net1, etc.)
@@ -155,21 +155,21 @@ type BackupTask struct {
 
 // Storage represents a Proxmox storage
 type Storage struct {
-	Storage    string  `json:"storage"`
-	Type       string  `json:"type"`
-	Content    string  `json:"content"`
-	Active     int     `json:"active"`
-	Enabled    int     `json:"enabled"`
-	Shared     int     `json:"shared"`
-	Used       int64   `json:"used"`
-	Available  int64   `json:"avail"`
-	Total      int64   `json:"total"`
+	Storage      string  `json:"storage"`
+	Type         string  `json:"type"`
+	Content      string  `json:"content"`
+	Active       int     `json:"active"`
+	Enabled      int     `json:"enabled"`
+	Shared       int     `json:"shared"`
+	Used         int64   `json:"used"`
+	Available    int64   `json:"avail"`
+	Total        int64   `json:"total"`
 	UsedFraction float64 `json:"used_fraction"`
 }
 
 // apiResponse wraps Proxmox API responses
 type apiResponse struct {
-	Data interface{} `json:"data"`
+	Data   interface{} `json:"data"`
 	Errors []struct {
 		Message string `json:"message"`
 		Path    string `json:"path"`
@@ -732,7 +732,7 @@ func (c *Client) StartLXC(ctx context.Context, node string, vmid int) (string, e
 func (c *Client) DownloadBackupFile(ctx context.Context, node, storage, volumeID string) (io.ReadCloser, int64, error) {
 	// Use the special download endpoint
 	path := fmt.Sprintf("/nodes/%s/storage/%s/file-restore/download", node, storage)
-	
+
 	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+path+"?volume="+url.QueryEscape(volumeID), nil)
 	if err != nil {
 		return nil, 0, err

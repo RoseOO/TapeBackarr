@@ -74,20 +74,20 @@ type TelegramConfig struct {
 // ProxmoxConfig holds Proxmox VE connection configuration
 type ProxmoxConfig struct {
 	Enabled       bool   `json:"enabled"`
-	Host          string `json:"host"`                     // Proxmox host/IP
-	Port          int    `json:"port"`                     // API port (default 8006)
-	SkipTLSVerify bool   `json:"skip_tls_verify"`          // Skip SSL certificate verification
+	Host          string `json:"host"`            // Proxmox host/IP
+	Port          int    `json:"port"`            // API port (default 8006)
+	SkipTLSVerify bool   `json:"skip_tls_verify"` // Skip SSL certificate verification
 	// Auth option 1: Username/Password
-	Username      string `json:"username,omitempty"`       // e.g., "root"
-	Password      string `json:"password,omitempty"`       // User password
-	Realm         string `json:"realm,omitempty"`          // e.g., "pam" or "pve"
+	Username string `json:"username,omitempty"` // e.g., "root"
+	Password string `json:"password,omitempty"` // User password
+	Realm    string `json:"realm,omitempty"`    // e.g., "pam" or "pve"
 	// Auth option 2: API Token (recommended)
-	TokenID       string `json:"token_id,omitempty"`       // Format: user@realm!tokenname
-	TokenSecret   string `json:"token_secret,omitempty"`   // API token secret
+	TokenID     string `json:"token_id,omitempty"`     // Format: user@realm!tokenname
+	TokenSecret string `json:"token_secret,omitempty"` // API token secret
 	// Backup settings
-	DefaultMode   string `json:"default_mode"`             // snapshot, suspend, or stop
-	DefaultCompress string `json:"default_compress"`       // zstd, lzo, gzip, or empty
-	TempDir       string `json:"temp_dir"`                 // Temp directory for backup operations
+	DefaultMode     string `json:"default_mode"`     // snapshot, suspend, or stop
+	DefaultCompress string `json:"default_compress"` // zstd, lzo, gzip, or empty
+	TempDir         string `json:"temp_dir"`         // Temp directory for backup operations
 }
 
 // DefaultConfig returns a configuration with sensible defaults
@@ -101,8 +101,8 @@ func DefaultConfig() *Config {
 			Path: "/var/lib/tapebackarr/tapebackarr.db",
 		},
 		Tape: TapeConfig{
-			DefaultDevice:    "/dev/nst0",
-			Drives:           []DriveConfig{
+			DefaultDevice: "/dev/nst0",
+			Drives: []DriveConfig{
 				{DevicePath: "/dev/nst0", DisplayName: "Primary LTO Drive", Enabled: true},
 			},
 			BufferSizeMB:     256,

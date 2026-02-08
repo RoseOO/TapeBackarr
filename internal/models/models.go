@@ -225,13 +225,13 @@ type Snapshot struct {
 
 // TapeSpanningSet represents a backup that spans multiple tapes
 type TapeSpanningSet struct {
-	ID             int64     `json:"id" db:"id"`
-	BackupSetID    int64     `json:"backup_set_id" db:"backup_set_id"`
-	TotalTapes     int       `json:"total_tapes" db:"total_tapes"`
-	TotalBytes     int64     `json:"total_bytes" db:"total_bytes"`
-	Status         string    `json:"status" db:"status"` // in_progress, completed, failed
-	CreatedAt      time.Time `json:"created_at" db:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at" db:"updated_at"`
+	ID          int64     `json:"id" db:"id"`
+	BackupSetID int64     `json:"backup_set_id" db:"backup_set_id"`
+	TotalTapes  int       `json:"total_tapes" db:"total_tapes"`
+	TotalBytes  int64     `json:"total_bytes" db:"total_bytes"`
+	Status      string    `json:"status" db:"status"` // in_progress, completed, failed
+	CreatedAt   time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at" db:"updated_at"`
 }
 
 // TapeSpanningMember represents a single tape in a spanning set
@@ -250,28 +250,28 @@ type TapeSpanningMember struct {
 
 // TapeChangeRequest represents a pending tape change request
 type TapeChangeRequest struct {
-	ID             int64     `json:"id" db:"id"`
-	JobExecutionID int64     `json:"job_execution_id" db:"job_execution_id"`
-	SpanningSetID  *int64    `json:"spanning_set_id" db:"spanning_set_id"`
-	CurrentTapeID  int64     `json:"current_tape_id" db:"current_tape_id"`
-	Reason         string    `json:"reason" db:"reason"` // tape_full, tape_error
-	Status         string    `json:"status" db:"status"` // pending, acknowledged, completed, cancelled
-	RequestedAt    time.Time `json:"requested_at" db:"requested_at"`
+	ID             int64      `json:"id" db:"id"`
+	JobExecutionID int64      `json:"job_execution_id" db:"job_execution_id"`
+	SpanningSetID  *int64     `json:"spanning_set_id" db:"spanning_set_id"`
+	CurrentTapeID  int64      `json:"current_tape_id" db:"current_tape_id"`
+	Reason         string     `json:"reason" db:"reason"` // tape_full, tape_error
+	Status         string     `json:"status" db:"status"` // pending, acknowledged, completed, cancelled
+	RequestedAt    time.Time  `json:"requested_at" db:"requested_at"`
 	AcknowledgedAt *time.Time `json:"acknowledged_at" db:"acknowledged_at"`
-	NewTapeID      *int64    `json:"new_tape_id" db:"new_tape_id"`
+	NewTapeID      *int64     `json:"new_tape_id" db:"new_tape_id"`
 }
 
 // DatabaseBackup represents a backup of the TapeBackarr database to tape
 type DatabaseBackup struct {
-	ID           int64      `json:"id" db:"id"`
-	TapeID       int64      `json:"tape_id" db:"tape_id"`
-	BackupTime   time.Time  `json:"backup_time" db:"backup_time"`
-	FileSize     int64      `json:"file_size" db:"file_size"`
-	Checksum     string     `json:"checksum" db:"checksum"`
-	BlockOffset  int64      `json:"block_offset" db:"block_offset"`
-	Status       string     `json:"status" db:"status"` // pending, completed, failed
-	ErrorMessage string     `json:"error_message,omitempty" db:"error_message"`
-	CreatedAt    time.Time  `json:"created_at" db:"created_at"`
+	ID           int64     `json:"id" db:"id"`
+	TapeID       int64     `json:"tape_id" db:"tape_id"`
+	BackupTime   time.Time `json:"backup_time" db:"backup_time"`
+	FileSize     int64     `json:"file_size" db:"file_size"`
+	Checksum     string    `json:"checksum" db:"checksum"`
+	BlockOffset  int64     `json:"block_offset" db:"block_offset"`
+	Status       string    `json:"status" db:"status"` // pending, completed, failed
+	ErrorMessage string    `json:"error_message,omitempty" db:"error_message"`
+	CreatedAt    time.Time `json:"created_at" db:"created_at"`
 }
 
 // RestoreDestinationType represents the type of restore destination

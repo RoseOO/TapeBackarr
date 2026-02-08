@@ -1,0 +1,267 @@
+package restore
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/RoseOO/TapeBackarr/internal/database"
+)
+
+func setupTestDB(t *testing.T) *database.DB {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	db, err := database.New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("failed to migrate database: %v", err)
+	}
+	return db
+}
+
+func setupTestData(t *testing.T, db *database.DB) int64 {
+	// Insert a tape pool
+	_, err := db.Exec(`INSERT INTO tape_pools (name, description, retention_days) VALUES (?, ?, ?)`,
+		"test_pool", "Test pool", 30)
+	if err != nil {
+		t.Fatalf("failed to insert tape pool: %v", err)
+	}
+
+	// Insert a tape
+	result, err := db.Exec(`INSERT INTO tapes (barcode, label, pool_id, status, capacity_bytes, used_bytes) VALUES (?, ?, ?, ?, ?, ?)`,
+		"TEST001", "Test Tape", 1, "active", 1000000000, 0)
+	if err != nil {
+		t.Fatalf("failed to insert tape: %v", err)
+	}
+	tapeID, _ := result.LastInsertId()
+
+	// Insert a backup source
+	_, err = db.Exec(`INSERT INTO backup_sources (name, source_type, path, enabled) VALUES (?, ?, ?, ?)`,
+		"test_source", "local", "/test/source", true)
+	if err != nil {
+		t.Fatalf("failed to insert backup source: %v", err)
+	}
+
+	// Insert a backup job
+	_, err = db.Exec(`INSERT INTO backup_jobs (name, source_id, pool_id, backup_type, schedule_cron, retention_days, enabled) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"test_job", 1, 1, "full", "0 2 * * *", 30, true)
+	if err != nil {
+		t.Fatalf("failed to insert backup job: %v", err)
+	}
+
+	// Insert a backup set
+	result, err = db.Exec(`INSERT INTO backup_sets (job_id, tape_id, backup_type, start_time, status, file_count, total_bytes) VALUES (?, ?, ?, datetime('now'), ?, ?, ?)`,
+		1, tapeID, "full", "completed", 5, 5000)
+	if err != nil {
+		t.Fatalf("failed to insert backup set: %v", err)
+	}
+	backupSetID, _ := result.LastInsertId()
+
+	// Insert catalog entries with folder structure
+	testFiles := []struct {
+		path     string
+		size     int64
+		checksum string
+	}{
+		{"documents/report.pdf", 1000, "abc123def456789012345678901234567890123456789012345678901234"},
+		{"documents/notes.txt", 500, "def456abc123789012345678901234567890123456789012345678901234"},
+		{"documents/subfolder/data.csv", 800, "ghi789abc123def456012345678901234567890123456789012345678901"},
+		{"documents/subfolder/deep/config.json", 200, "jkl012abc123def456789012345678901234567890123456789012345678"},
+		{"images/photo.jpg", 2500, "mno345abc123def456789012345678901234567890123456789012345678"},
+	}
+
+	for _, f := range testFiles {
+		_, err := db.Exec(`INSERT INTO catalog_entries (backup_set_id, file_path, file_size, file_mode, mod_time, checksum) VALUES (?, ?, ?, ?, datetime('now'), ?)`,
+			backupSetID, f.path, f.size, 0644, f.checksum)
+		if err != nil {
+			t.Fatalf("failed to insert catalog entry: %v", err)
+		}
+	}
+
+	return backupSetID
+}
+
+func TestGetFilesInFolders(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	backupSetID := setupTestData(t, db)
+
+	svc := &Service{db: db}
+
+	tests := []struct {
+		name          string
+		folderPaths   []string
+		expectedCount int
+	}{
+		{
+			name:          "single folder",
+			folderPaths:   []string{"documents"},
+			expectedCount: 4, // report.pdf, notes.txt, subfolder/data.csv, subfolder/deep/config.json
+		},
+		{
+			name:          "subfolder only",
+			folderPaths:   []string{"documents/subfolder"},
+			expectedCount: 2, // data.csv, deep/config.json
+		},
+		{
+			name:          "deep subfolder",
+			folderPaths:   []string{"documents/subfolder/deep"},
+			expectedCount: 1, // config.json
+		},
+		{
+			name:          "multiple folders",
+			folderPaths:   []string{"documents", "images"},
+			expectedCount: 5, // all files
+		},
+		{
+			name:          "non-existent folder",
+			folderPaths:   []string{"nonexistent"},
+			expectedCount: 0,
+		},
+		{
+			name:          "empty folder list",
+			folderPaths:   []string{},
+			expectedCount: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			files, err := svc.getFilesInFolders(context.Background(), backupSetID, tt.folderPaths)
+			if err != nil {
+				t.Fatalf("getFilesInFolders failed: %v", err)
+			}
+			if len(files) != tt.expectedCount {
+				t.Errorf("expected %d files, got %d: %v", tt.expectedCount, len(files), files)
+			}
+		})
+	}
+}
+
+func TestGetFolderContents(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	backupSetID := setupTestData(t, db)
+
+	svc := &Service{db: db}
+
+	tests := []struct {
+		name                string
+		folderPath          string
+		expectedFileCount   int
+		expectedFolderCount int
+	}{
+		{
+			name:                "documents folder",
+			folderPath:          "documents",
+			expectedFileCount:   2, // report.pdf, notes.txt
+			expectedFolderCount: 1, // subfolder
+		},
+		{
+			name:                "subfolder",
+			folderPath:          "documents/subfolder",
+			expectedFileCount:   1, // data.csv
+			expectedFolderCount: 1, // deep
+		},
+		{
+			name:                "deep folder",
+			folderPath:          "documents/subfolder/deep",
+			expectedFileCount:   1, // config.json
+			expectedFolderCount: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			files, subfolders, err := svc.GetFolderContents(context.Background(), backupSetID, tt.folderPath)
+			if err != nil {
+				t.Fatalf("GetFolderContents failed: %v", err)
+			}
+			if len(files) != tt.expectedFileCount {
+				t.Errorf("expected %d files, got %d", tt.expectedFileCount, len(files))
+			}
+			if len(subfolders) != tt.expectedFolderCount {
+				t.Errorf("expected %d subfolders, got %d", tt.expectedFolderCount, len(subfolders))
+			}
+		})
+	}
+}
+
+func TestRestoreRequestFolderPaths(t *testing.T) {
+	// Test that RestoreRequest properly supports folder paths
+	req := RestoreRequest{
+		BackupSetID:     1,
+		FilePaths:       []string{"file1.txt", "file2.txt"},
+		FolderPaths:     []string{"documents", "images/photos"},
+		DestPath:        "/restore/dest",
+		DestinationType: "local",
+		Verify:          true,
+		Overwrite:       false,
+	}
+
+	if len(req.FolderPaths) != 2 {
+		t.Errorf("expected 2 folder paths, got %d", len(req.FolderPaths))
+	}
+
+	if req.FolderPaths[0] != "documents" {
+		t.Errorf("expected first folder 'documents', got '%s'", req.FolderPaths[0])
+	}
+}
+
+func TestCalculateChecksum(t *testing.T) {
+	// Create a test file
+	tmpDir := t.TempDir()
+	testFile := filepath.Join(tmpDir, "test.txt")
+
+	// Write test content
+	testContent := []byte("Hello, World!")
+	if err := os.WriteFile(testFile, testContent, 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	// Calculate checksum
+	checksum, err := calculateChecksum(testFile)
+	if err != nil {
+		t.Fatalf("calculateChecksum failed: %v", err)
+	}
+
+	// Verify checksum is not empty and is valid SHA256 format (64 hex chars)
+	if len(checksum) != 64 {
+		t.Errorf("expected 64 character SHA256 hash, got %d characters", len(checksum))
+	}
+
+	// Verify checksum is consistent
+	checksum2, err := calculateChecksum(testFile)
+	if err != nil {
+		t.Fatalf("calculateChecksum failed on second call: %v", err)
+	}
+
+	if checksum != checksum2 {
+		t.Errorf("checksums do not match: %s vs %s", checksum, checksum2)
+	}
+
+	// Known SHA256 for "Hello, World!"
+	expectedChecksum := "dffd6021bb2bd5b0af676290809ec3a53191dd81c7f70a4b28688a362182986f"
+	if checksum != expectedChecksum {
+		t.Errorf("checksum mismatch: expected %s, got %s", expectedChecksum, checksum)
+	}
+}
+
+func TestRestoreResultFoldersRestored(t *testing.T) {
+	// Test that RestoreResult includes folders_restored field
+	result := RestoreResult{
+		FilesRestored:   10,
+		BytesRestored:   5000,
+		FoldersRestored: 3,
+		Verified:        true,
+	}
+
+	if result.FoldersRestored != 3 {
+		t.Errorf("expected 3 folders restored, got %d", result.FoldersRestored)
+	}
+}

@@ -20,15 +20,15 @@ type TelegramConfig struct {
 type NotificationType string
 
 const (
-	NotifyTapeChange     NotificationType = "tape_change"
-	NotifyTapeFull       NotificationType = "tape_full"
-	NotifyBackupStart    NotificationType = "backup_start"
-	NotifyBackupComplete NotificationType = "backup_complete"
-	NotifyBackupFailed   NotificationType = "backup_failed"
-	NotifyRestoreStart   NotificationType = "restore_start"
+	NotifyTapeChange      NotificationType = "tape_change"
+	NotifyTapeFull        NotificationType = "tape_full"
+	NotifyBackupStart     NotificationType = "backup_start"
+	NotifyBackupComplete  NotificationType = "backup_complete"
+	NotifyBackupFailed    NotificationType = "backup_failed"
+	NotifyRestoreStart    NotificationType = "restore_start"
 	NotifyRestoreComplete NotificationType = "restore_complete"
-	NotifyDriveError     NotificationType = "drive_error"
-	NotifyWrongTape      NotificationType = "wrong_tape"
+	NotifyDriveError      NotificationType = "drive_error"
+	NotifyWrongTape       NotificationType = "wrong_tape"
 )
 
 // Notification represents a notification to be sent

@@ -208,21 +208,21 @@ func (s *Server) setupRoutes() {
 			r.Get("/guests", s.handleProxmoxListGuests)
 			r.Get("/guests/{vmid}", s.handleProxmoxGetGuest)
 			r.Get("/guests/{vmid}/config", s.handleProxmoxGetGuestConfig)
-			
+
 			// Cluster info
 			r.Get("/cluster/status", s.handleProxmoxClusterStatus)
-			
+
 			// Backup operations
 			r.Get("/backups", s.handleProxmoxListBackups)
 			r.Get("/backups/{id}", s.handleProxmoxGetBackup)
 			r.Post("/backups", s.handleProxmoxCreateBackup)
 			r.Post("/backups/all", s.handleProxmoxBackupAll)
-			
+
 			// Restore operations
 			r.Get("/restores", s.handleProxmoxListRestores)
 			r.Post("/restores", s.handleProxmoxCreateRestore)
 			r.Post("/restores/plan", s.handleProxmoxRestorePlan)
-			
+
 			// Backup jobs (scheduled)
 			r.Get("/jobs", s.handleProxmoxListJobs)
 			r.Post("/jobs", s.handleProxmoxCreateJob)
@@ -331,13 +331,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	var stats struct {
-		TotalTapes     int `json:"total_tapes"`
-		ActiveTapes    int `json:"active_tapes"`
-		TotalJobs      int `json:"total_jobs"`
-		RunningJobs    int `json:"running_jobs"`
-		RecentBackups  int `json:"recent_backups"`
+		TotalTapes     int    `json:"total_tapes"`
+		ActiveTapes    int    `json:"active_tapes"`
+		TotalJobs      int    `json:"total_jobs"`
+		RunningJobs    int    `json:"running_jobs"`
+		RecentBackups  int    `json:"recent_backups"`
 		DriveStatus    string `json:"drive_status"`
-		TotalDataBytes int64 `json:"total_data_bytes"`
+		TotalDataBytes int64  `json:"total_data_bytes"`
 	}
 
 	s.db.QueryRow("SELECT COUNT(*) FROM tapes").Scan(&stats.TotalTapes)
@@ -459,10 +459,10 @@ func (s *Server) handleUpdateTape(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Label           *string           `json:"label"`
-		PoolID          *int64            `json:"pool_id"`
+		Label           *string            `json:"label"`
+		PoolID          *int64             `json:"pool_id"`
 		Status          *models.TapeStatus `json:"status"`
-		OffsiteLocation *string           `json:"offsite_location"`
+		OffsiteLocation *string            `json:"offsite_location"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.respondError(w, http.StatusBadRequest, "invalid request body")
@@ -2124,9 +2124,9 @@ func (s *Server) handleProxmoxClusterStatus(w http.ResponseWriter, r *http.Reque
 	}
 
 	s.respondJSON(w, http.StatusOK, map[string]interface{}{
-		"is_cluster":  isCluster,
-		"node_count":  len(nodes),
-		"nodes":       nodes,
+		"is_cluster": isCluster,
+		"node_count": len(nodes),
+		"nodes":      nodes,
 	})
 }
 
@@ -2358,14 +2358,14 @@ func (s *Server) handleProxmoxListJobs(w http.ResponseWriter, r *http.Request) {
 		}
 
 		job := map[string]interface{}{
-			"id":                id,
-			"name":              name,
-			"backup_mode":       backupMode,
-			"compress":          compress,
-			"schedule_cron":     scheduleCron,
-			"retention_days":    retentionDays,
-			"enabled":           enabled,
-			"created_at":        createdAt,
+			"id":             id,
+			"name":           name,
+			"backup_mode":    backupMode,
+			"compress":       compress,
+			"schedule_cron":  scheduleCron,
+			"retention_days": retentionDays,
+			"enabled":        enabled,
+			"created_at":     createdAt,
 		}
 		if description != nil {
 			job["description"] = *description
@@ -2401,18 +2401,18 @@ func (s *Server) handleProxmoxListJobs(w http.ResponseWriter, r *http.Request) {
 // handleProxmoxCreateJob creates a new Proxmox backup job
 func (s *Server) handleProxmoxCreateJob(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name            string  `json:"name"`
-		Description     string  `json:"description,omitempty"`
-		Node            string  `json:"node,omitempty"`
-		VMIDFilter      string  `json:"vmid_filter,omitempty"`
-		GuestTypeFilter string  `json:"guest_type_filter,omitempty"`
-		TagFilter       string  `json:"tag_filter,omitempty"`
-		PoolID          *int64  `json:"pool_id,omitempty"`
-		BackupMode      string  `json:"backup_mode"`
-		Compress        string  `json:"compress"`
-		ScheduleCron    string  `json:"schedule_cron"`
-		RetentionDays   int     `json:"retention_days"`
-		Enabled         bool    `json:"enabled"`
+		Name            string `json:"name"`
+		Description     string `json:"description,omitempty"`
+		Node            string `json:"node,omitempty"`
+		VMIDFilter      string `json:"vmid_filter,omitempty"`
+		GuestTypeFilter string `json:"guest_type_filter,omitempty"`
+		TagFilter       string `json:"tag_filter,omitempty"`
+		PoolID          *int64 `json:"pool_id,omitempty"`
+		BackupMode      string `json:"backup_mode"`
+		Compress        string `json:"compress"`
+		ScheduleCron    string `json:"schedule_cron"`
+		RetentionDays   int    `json:"retention_days"`
+		Enabled         bool   `json:"enabled"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -2485,14 +2485,14 @@ func (s *Server) handleProxmoxGetJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	job := map[string]interface{}{
-		"id":                id,
-		"name":              name,
-		"backup_mode":       backupMode,
-		"compress":          compress,
-		"schedule_cron":     scheduleCron,
-		"retention_days":    retentionDays,
-		"enabled":           enabled,
-		"created_at":        createdAt,
+		"id":             id,
+		"name":           name,
+		"backup_mode":    backupMode,
+		"compress":       compress,
+		"schedule_cron":  scheduleCron,
+		"retention_days": retentionDays,
+		"enabled":        enabled,
+		"created_at":     createdAt,
 	}
 	if description != nil {
 		job["description"] = *description
@@ -2532,18 +2532,18 @@ func (s *Server) handleProxmoxUpdateJob(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var req struct {
-		Name            string  `json:"name,omitempty"`
-		Description     string  `json:"description,omitempty"`
-		Node            string  `json:"node,omitempty"`
-		VMIDFilter      string  `json:"vmid_filter,omitempty"`
-		GuestTypeFilter string  `json:"guest_type_filter,omitempty"`
-		TagFilter       string  `json:"tag_filter,omitempty"`
-		PoolID          *int64  `json:"pool_id,omitempty"`
-		BackupMode      string  `json:"backup_mode,omitempty"`
-		Compress        string  `json:"compress,omitempty"`
-		ScheduleCron    string  `json:"schedule_cron,omitempty"`
-		RetentionDays   *int    `json:"retention_days,omitempty"`
-		Enabled         *bool   `json:"enabled,omitempty"`
+		Name            string `json:"name,omitempty"`
+		Description     string `json:"description,omitempty"`
+		Node            string `json:"node,omitempty"`
+		VMIDFilter      string `json:"vmid_filter,omitempty"`
+		GuestTypeFilter string `json:"guest_type_filter,omitempty"`
+		TagFilter       string `json:"tag_filter,omitempty"`
+		PoolID          *int64 `json:"pool_id,omitempty"`
+		BackupMode      string `json:"backup_mode,omitempty"`
+		Compress        string `json:"compress,omitempty"`
+		ScheduleCron    string `json:"schedule_cron,omitempty"`
+		RetentionDays   *int   `json:"retention_days,omitempty"`
+		Enabled         *bool  `json:"enabled,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -2693,10 +2693,10 @@ func (s *Server) handleProxmoxRunJob(w http.ResponseWriter, r *http.Request) {
 
 	// Run backup for all guests matching the job criteria
 	results, err := s.proxmoxBackupService.BackupAllGuests(
-		r.Context(), 
-		nodeStr, 
-		req.TapeID, 
-		proxmox.BackupMode(backupMode), 
+		r.Context(),
+		nodeStr,
+		req.TapeID,
+		proxmox.BackupMode(backupMode),
 		compress,
 	)
 	if err != nil {
@@ -2708,8 +2708,8 @@ func (s *Server) handleProxmoxRunJob(w http.ResponseWriter, r *http.Request) {
 	s.db.Exec("UPDATE proxmox_backup_jobs SET last_run_at = CURRENT_TIMESTAMP WHERE id = ?", id)
 
 	s.respondJSON(w, http.StatusOK, map[string]interface{}{
-		"message":  "Proxmox backup job executed",
-		"job_id":   id,
-		"results":  results,
+		"message": "Proxmox backup job executed",
+		"job_id":  id,
+		"results": results,
 	})
 }

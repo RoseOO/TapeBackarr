@@ -240,8 +240,8 @@ func TestClient_GetNodeLXCs(t *testing.T) {
 
 func TestClient_IsClusterMode(t *testing.T) {
 	tests := []struct {
-		name       string
-		response   interface{}
+		name        string
+		response    interface{}
 		wantCluster bool
 	}{
 		{

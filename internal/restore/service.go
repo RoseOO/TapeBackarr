@@ -21,21 +21,23 @@ import (
 // RestoreRequest represents a restore operation request
 type RestoreRequest struct {
 	BackupSetID     int64    `json:"backup_set_id"`
-	FilePaths       []string `json:"file_paths,omitempty"`    // Empty means restore all
+	FilePaths       []string `json:"file_paths,omitempty"`   // Empty means restore all
+	FolderPaths     []string `json:"folder_paths,omitempty"` // Folders to restore (includes subfolders)
 	DestPath        string   `json:"dest_path"`
-	DestinationType string   `json:"destination_type"`        // local, smb, nfs
+	DestinationType string   `json:"destination_type"` // local, smb, nfs
 	Verify          bool     `json:"verify"`
 	Overwrite       bool     `json:"overwrite"`
 }
 
 // RestoreResult represents the result of a restore operation
 type RestoreResult struct {
-	FilesRestored int64     `json:"files_restored"`
-	BytesRestored int64     `json:"bytes_restored"`
-	StartTime     time.Time `json:"start_time"`
-	EndTime       time.Time `json:"end_time"`
-	Errors        []string  `json:"errors,omitempty"`
-	Verified      bool      `json:"verified"`
+	FilesRestored   int64     `json:"files_restored"`
+	BytesRestored   int64     `json:"bytes_restored"`
+	FoldersRestored int       `json:"folders_restored,omitempty"`
+	StartTime       time.Time `json:"start_time"`
+	EndTime         time.Time `json:"end_time"`
+	Errors          []string  `json:"errors,omitempty"`
+	Verified        bool      `json:"verified"`
 }
 
 // TapeRequirement describes a tape needed for restore
@@ -69,7 +71,19 @@ func (s *Service) GetRequiredTapes(ctx context.Context, req *RestoreRequest) ([]
 	var requirements []TapeRequirement
 	tapeMap := make(map[int64]*TapeRequirement)
 
-	if len(req.FilePaths) == 0 {
+	// Expand folder paths to include all files within them
+	allFilePaths := make([]string, len(req.FilePaths))
+	copy(allFilePaths, req.FilePaths)
+
+	if len(req.FolderPaths) > 0 {
+		folderFiles, err := s.getFilesInFolders(ctx, req.BackupSetID, req.FolderPaths)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get files in folders: %w", err)
+		}
+		allFilePaths = append(allFilePaths, folderFiles...)
+	}
+
+	if len(allFilePaths) == 0 && len(req.FolderPaths) == 0 {
 		// Restore entire backup set
 		row := s.db.QueryRow(`
 			SELECT t.id, t.barcode, t.label, t.status, bs.file_count, bs.total_bytes
@@ -93,7 +107,7 @@ func (s *Service) GetRequiredTapes(ctx context.Context, req *RestoreRequest) ([]
 		})
 	} else {
 		// Restore specific files - find which tapes they're on
-		for _, filePath := range req.FilePaths {
+		for _, filePath := range allFilePaths {
 			rows, err := s.db.Query(`
 				SELECT DISTINCT t.id, t.barcode, t.label, t.status, ce.file_size
 				FROM catalog_entries ce
@@ -143,10 +157,24 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 		StartTime: time.Now(),
 	}
 
+	// Expand folder paths to include all files within them
+	allFilePaths := make([]string, len(req.FilePaths))
+	copy(allFilePaths, req.FilePaths)
+
+	if len(req.FolderPaths) > 0 {
+		folderFiles, err := s.getFilesInFolders(ctx, req.BackupSetID, req.FolderPaths)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get files in folders: %w", err)
+		}
+		allFilePaths = append(allFilePaths, folderFiles...)
+		result.FoldersRestored = len(req.FolderPaths)
+	}
+
 	s.logger.Info("Starting restore", map[string]interface{}{
 		"backup_set_id": req.BackupSetID,
 		"dest_path":     req.DestPath,
-		"file_count":    len(req.FilePaths),
+		"file_count":    len(allFilePaths),
+		"folder_count":  len(req.FolderPaths),
 	})
 
 	// Get backup set info
@@ -195,8 +223,8 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 	tarArgs := []string{
 		"-x",                                     // Extract
 		"-b", fmt.Sprintf("%d", s.blockSize/512), // Block size
-		"-f", devicePath,                         // Input from tape
-		"-C", req.DestPath,                       // Change to destination
+		"-f", devicePath, // Input from tape
+		"-C", req.DestPath, // Change to destination
 	}
 
 	if req.Overwrite {
@@ -206,8 +234,8 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 	}
 
 	// Add specific files if requested
-	if len(req.FilePaths) > 0 {
-		tarArgs = append(tarArgs, req.FilePaths...)
+	if len(allFilePaths) > 0 {
+		tarArgs = append(tarArgs, allFilePaths...)
 	}
 
 	cmd := exec.CommandContext(ctx, "tar", tarArgs...)
@@ -222,8 +250,8 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 	}
 
 	// Count restored files
-	if len(req.FilePaths) > 0 {
-		for _, fp := range req.FilePaths {
+	if len(allFilePaths) > 0 {
+		for _, fp := range allFilePaths {
 			destFile := filepath.Join(req.DestPath, fp)
 			if info, err := os.Stat(destFile); err == nil {
 				result.FilesRestored++
@@ -244,7 +272,7 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 	// Verify if requested
 	if req.Verify {
 		s.logger.Info("Verifying restored files", nil)
-		verifyErrors := s.verifyRestore(ctx, req.BackupSetID, req.DestPath, req.FilePaths)
+		verifyErrors := s.verifyRestore(ctx, req.BackupSetID, req.DestPath, allFilePaths)
 		if len(verifyErrors) > 0 {
 			result.Errors = append(result.Errors, verifyErrors...)
 			result.Verified = false
@@ -411,4 +439,111 @@ func (s *Service) GetCatalogDirectories(ctx context.Context, backupSetID int64) 
 	}
 
 	return dirs, nil
+}
+
+// getFilesInFolders returns all file paths within the specified folders and subfolders
+func (s *Service) getFilesInFolders(ctx context.Context, backupSetID int64, folderPaths []string) ([]string, error) {
+	if len(folderPaths) == 0 {
+		return nil, nil
+	}
+
+	var allFiles []string
+
+	for _, folderPath := range folderPaths {
+		// Normalize folder path to ensure consistent matching
+		normalizedPath := strings.TrimSuffix(folderPath, "/")
+
+		// Query for all files that start with the folder path prefix
+		// This includes files directly in the folder and all subfolders
+		// Using LIKE with prefix matching for efficient index usage
+		rows, err := s.db.Query(`
+			SELECT file_path 
+			FROM catalog_entries 
+			WHERE backup_set_id = ? 
+			AND file_path LIKE ?
+			ORDER BY file_path
+		`, backupSetID, normalizedPath+"/%")
+		if err != nil {
+			return nil, fmt.Errorf("failed to query files in folder %s: %w", folderPath, err)
+		}
+
+		for rows.Next() {
+			var filePath string
+			if err := rows.Scan(&filePath); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("failed to scan file path: %w", err)
+			}
+			allFiles = append(allFiles, filePath)
+		}
+		rows.Close()
+	}
+
+	return allFiles, nil
+}
+
+// GetFolderContents returns files and subfolders within a specific folder
+func (s *Service) GetFolderContents(ctx context.Context, backupSetID int64, folderPath string) ([]models.CatalogEntry, []string, error) {
+	normalizedPath := strings.TrimSuffix(folderPath, "/")
+
+	// Get all files that start with this folder path
+	var pattern string
+	if normalizedPath == "" {
+		// Root level - match all files
+		pattern = "%"
+	} else {
+		pattern = normalizedPath + "/%"
+	}
+
+	rows, err := s.db.Query(`
+		SELECT id, backup_set_id, file_path, file_size, COALESCE(file_mode, 0), 
+		       COALESCE(checksum, ''), COALESCE(block_offset, 0)
+		FROM catalog_entries
+		WHERE backup_set_id = ? AND file_path LIKE ?
+		ORDER BY file_path
+	`, backupSetID, pattern)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	var files []models.CatalogEntry
+	subfolderSet := make(map[string]bool)
+
+	prefixLen := len(normalizedPath)
+	if normalizedPath != "" {
+		prefixLen++ // Account for the trailing slash
+	}
+
+	for rows.Next() {
+		var e models.CatalogEntry
+		if err := rows.Scan(&e.ID, &e.BackupSetID, &e.FilePath, &e.FileSize, &e.FileMode, &e.Checksum, &e.BlockOffset); err != nil {
+			return nil, nil, fmt.Errorf("failed to scan catalog entry: %w", err)
+		}
+
+		// Get the part of the path after the folder prefix
+		relativePath := e.FilePath[prefixLen:]
+
+		// Check if there's a slash in the remaining path
+		slashIndex := strings.Index(relativePath, "/")
+		if slashIndex == -1 {
+			// No slash means file is directly in this folder
+			files = append(files, e)
+		} else {
+			// Has a slash means it's in a subfolder - extract immediate subfolder name
+			immediateSubfolder := relativePath[:slashIndex]
+			if normalizedPath == "" {
+				subfolderSet[immediateSubfolder] = true
+			} else {
+				subfolderSet[normalizedPath+"/"+immediateSubfolder] = true
+			}
+		}
+	}
+
+	// Convert subfolder set to slice
+	var subfolders []string
+	for subfolder := range subfolderSet {
+		subfolders = append(subfolders, subfolder)
+	}
+
+	return files, subfolders, nil
 }
