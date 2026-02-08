@@ -33,7 +33,6 @@
   let drives: Drive[] = [];
   let scannedDrives: ScannedDrive[] = [];
   let loading = true;
-  let initialLoad = true;
   let scanning = false;
   let error = '';
   let successMsg = '';
@@ -74,15 +73,15 @@
   });
 
   async function loadDrives() {
-    if (initialLoad) loading = true;
+    loading = true;
+    error = '';
     try {
-      drives = await api.getDrives();
-      error = '';
+      const result = await api.getDrives();
+      drives = Array.isArray(result) ? result : [];
     } catch (e) {
       error = 'Failed to load drives';
     } finally {
       loading = false;
-      initialLoad = false;
     }
   }
 
@@ -337,7 +336,7 @@
 <!-- Add Drive Modal -->
 {#if showAddModal}
   <div class="modal-backdrop" on:click={() => showAddModal = false}>
-    <div class="modal" on:click|stopPropagation>
+    <div class="modal" on:click|stopPropagation={() => {}}>
       <h2>Add Tape Drive</h2>
       <form on:submit|preventDefault={addDrive}>
         <div class="form-group">
@@ -368,7 +367,7 @@
 <!-- Scan Results Modal -->
 {#if showScanModal}
   <div class="modal-backdrop" on:click={() => showScanModal = false}>
-    <div class="modal modal-wide" on:click|stopPropagation>
+    <div class="modal modal-wide" on:click|stopPropagation={() => {}}>
       <h2>Detected Drives</h2>
       {#if scannedDrives.length === 0}
         <p>No tape drives detected. Make sure the drive is connected and the device is passed through to the container.</p>
@@ -412,7 +411,7 @@
 <!-- Format Tape in Drive Modal -->
 {#if showFormatDriveModal && formatDriveTarget}
   <div class="modal-backdrop" on:click={() => showFormatDriveModal = false}>
-    <div class="modal" on:click|stopPropagation>
+    <div class="modal" on:click|stopPropagation={() => {}}>
       <h2>⚠️ Format Tape</h2>
       <div class="format-warning">
         <p><strong>WARNING: This will ERASE ALL DATA on the tape currently loaded in {formatDriveTarget.display_name || formatDriveTarget.device_path}.</strong></p>
@@ -444,7 +443,7 @@
 <!-- Add Unknown Tape to Library Modal -->
 {#if showAddUnknownTapeModal && unknownTapeTarget}
   <div class="modal-backdrop" on:click={() => showAddUnknownTapeModal = false}>
-    <div class="modal" on:click|stopPropagation>
+    <div class="modal" on:click|stopPropagation={() => {}}>
       <h2>Add Tape to Library</h2>
       <p class="modal-desc">This tape was found loaded in a drive but is not in the database. Add it to track it in the tape library.</p>
       <div class="tape-info-box">

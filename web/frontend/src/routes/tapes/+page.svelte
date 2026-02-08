@@ -98,6 +98,8 @@
   });
 
   async function loadData() {
+    loading = true;
+    error = '';
     try {
       const [tapesData, poolsData, drivesData, ltoTypesData] = await Promise.all([
         api.getTapes(),
@@ -105,10 +107,10 @@
         api.getDrives(),
         api.getLTOTypes()
       ]);
-      tapes = tapesData;
-      pools = poolsData;
-      drives = drivesData.filter((d: Drive) => d.enabled);
-      ltoTypes = ltoTypesData;
+      tapes = Array.isArray(tapesData) ? tapesData : [];
+      pools = Array.isArray(poolsData) ? poolsData : [];
+      drives = Array.isArray(drivesData) ? drivesData.filter((d: Drive) => d.enabled) : [];
+      ltoTypes = ltoTypesData || {};
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load data';
     } finally {
@@ -407,7 +409,7 @@
 <!-- Create Modal -->
 {#if showCreateModal}
   <div class="modal-overlay" on:click={() => showCreateModal = false}>
-    <div class="modal" on:click|stopPropagation>
+    <div class="modal" on:click|stopPropagation={() => {}}>
       <h2>Add New Tape</h2>
       <p class="modal-desc">Labels are mandatory before a tape can be used. Assign to a pool for lifecycle management.</p>
       <form on:submit|preventDefault={handleCreate}>
@@ -491,7 +493,7 @@
 <!-- Edit Modal -->
 {#if showEditModal && selectedTape}
   <div class="modal-overlay" on:click={() => showEditModal = false}>
-    <div class="modal" on:click|stopPropagation>
+    <div class="modal" on:click|stopPropagation={() => {}}>
       <h2>Edit Tape</h2>
       <p class="modal-desc">UUID: {selectedTape.uuid || 'N/A'}</p>
       <form on:submit|preventDefault={handleUpdate}>
@@ -520,7 +522,7 @@
 <!-- Format Modal -->
 {#if showFormatModal && selectedTape}
   <div class="modal-overlay" on:click={() => showFormatModal = false}>
-    <div class="modal" on:click|stopPropagation>
+    <div class="modal" on:click|stopPropagation={() => {}}>
       <h2>⚠️ Format Tape</h2>
       <p class="modal-desc warning-text">This will erase ALL data on tape <strong>{selectedTape.label}</strong> including the label. This action cannot be undone.</p>
       <div class="form-group">
@@ -543,7 +545,7 @@
 <!-- Export Modal -->
 {#if showExportModal && selectedTape}
   <div class="modal-overlay" on:click={() => showExportModal = false}>
-    <div class="modal" on:click|stopPropagation>
+    <div class="modal" on:click|stopPropagation={() => {}}>
       <h2>Export Tape</h2>
       <p class="modal-desc">Mark tape <strong>{selectedTape.label}</strong> as exported/offsite. The tape will be locked against reuse but its pool membership and catalog data will be preserved.</p>
       <div class="form-group">
@@ -562,7 +564,7 @@
 <!-- Label Modal -->
 {#if showLabelModal && selectedTape}
   <div class="modal-overlay" on:click={() => showLabelModal = false}>
-    <div class="modal" on:click|stopPropagation>
+    <div class="modal" on:click|stopPropagation={() => {}}>
       <h2>Write Tape Label</h2>
       <p class="modal-desc">Write label data to the physical tape in the drive. UUID: {selectedTape.uuid || 'N/A'}</p>
       <form on:submit|preventDefault={handleLabel}>

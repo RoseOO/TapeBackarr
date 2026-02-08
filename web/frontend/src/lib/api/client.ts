@@ -31,7 +31,16 @@ async function fetchApi(endpoint: string, options: RequestInit = {}) {
     throw new Error(error.error || 'Request failed');
   }
 
-  return response.json();
+  // Handle empty or non-JSON responses gracefully
+  const text = await response.text();
+  if (!text) {
+    return {};
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    return {};
+  }
 }
 
 // Auth
@@ -386,6 +395,18 @@ export async function formatTapeInDrive(driveId: number, confirm: boolean) {
   return fetchApi(`/drives/${driveId}/format-tape`, {
     method: 'POST',
     body: JSON.stringify({ confirm }),
+  });
+}
+
+// Database Backup to Tape
+export async function getDatabaseBackups() {
+  return fetchApi('/database-backup');
+}
+
+export async function backupDatabaseToTape(tapeId: number) {
+  return fetchApi('/database-backup/backup', {
+    method: 'POST',
+    body: JSON.stringify({ tape_id: tapeId }),
   });
 }
 

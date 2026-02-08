@@ -103,6 +103,8 @@
   }
 
   async function loadData() {
+    loading = true;
+    error = '';
     try {
       const [jobsResult, sourcesResult, poolsResult, tapesResult, keysResult] = await Promise.all([
         api.getJobs(),
@@ -111,11 +113,11 @@
         api.getTapes(),
         api.getEncryptionKeys(),
       ]);
-      jobs = jobsResult;
-      sources = sourcesResult;
-      pools = poolsResult;
-      tapes = tapesResult;
-      encryptionKeys = keysResult.keys || [];
+      jobs = Array.isArray(jobsResult) ? jobsResult : [];
+      sources = Array.isArray(sourcesResult) ? sourcesResult : [];
+      pools = Array.isArray(poolsResult) ? poolsResult : [];
+      tapes = Array.isArray(tapesResult) ? tapesResult : [];
+      encryptionKeys = keysResult?.keys || [];
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load data';
     } finally {
@@ -325,7 +327,7 @@
 <!-- Create Modal -->
 {#if showCreateModal}
   <div class="modal-overlay" on:click={() => showCreateModal = false}>
-    <div class="modal" on:click|stopPropagation>
+    <div class="modal" on:click|stopPropagation={() => {}}>
       <h2>Create Backup Job</h2>
       <form on:submit|preventDefault={handleCreate}>
         <div class="form-group">
@@ -389,7 +391,7 @@
 <!-- Run Modal -->
 {#if showRunModal && selectedJob}
   <div class="modal-overlay" on:click={() => showRunModal = false}>
-    <div class="modal" on:click|stopPropagation>
+    <div class="modal" on:click|stopPropagation={() => {}}>
       <h2>Run Backup Job</h2>
       <p>Running job: <strong>{selectedJob.name}</strong></p>
       <form on:submit|preventDefault={handleRunJob}>

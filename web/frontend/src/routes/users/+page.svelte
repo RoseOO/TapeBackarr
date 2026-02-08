@@ -36,8 +36,11 @@
   });
 
   async function loadUsers() {
+    loading = true;
+    error = '';
     try {
-      users = await api.getUsers();
+      const result = await api.getUsers();
+      users = Array.isArray(result) ? result : [];
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load users';
     } finally {
@@ -215,7 +218,7 @@
 <!-- Create Modal -->
 {#if showCreateModal}
   <div class="modal-overlay" on:click={() => showCreateModal = false} role="presentation">
-    <div class="modal" on:click|stopPropagation role="dialog" aria-modal="true" tabindex="-1">
+    <div class="modal" on:click|stopPropagation={() => {}} role="dialog" aria-modal="true" tabindex="-1">
       <h2>Add New User</h2>
       <form on:submit|preventDefault={handleCreate}>
         <div class="form-group">
@@ -246,7 +249,7 @@
 <!-- Change Password Modal -->
 {#if showPasswordModal}
   <div class="modal-overlay" on:click={() => showPasswordModal = false} role="presentation">
-    <div class="modal" on:click|stopPropagation role="dialog" aria-modal="true" tabindex="-1">
+    <div class="modal" on:click|stopPropagation={() => {}} role="dialog" aria-modal="true" tabindex="-1">
       <h2>Change Password</h2>
       <p class="modal-desc">Change the password for your account ({currentUser?.username}).</p>
       <form on:submit|preventDefault={handleChangePassword}>

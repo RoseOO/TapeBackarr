@@ -27,9 +27,10 @@
 
   async function loadLogs() {
     loading = true;
+    error = '';
     try {
       const result = await api.getAuditLogs(limit, offset);
-      logs = result || [];
+      logs = Array.isArray(result) ? result : [];
       hasMore = logs.length === limit;
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load logs';
