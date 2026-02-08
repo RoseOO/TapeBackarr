@@ -85,8 +85,8 @@
             formData.capacity_bytes = result.capacity_bytes;
           }
         }
-      } catch {
-        // Detection failed silently - user can still select manually
+      } catch (e) {
+        console.error('Tape type detection failed:', e);
       } finally {
         detecting = false;
       }
@@ -448,8 +448,8 @@
         {#if drives.length > 0}
           <div class="form-group">
             <label for="drive">Drive (for labeling)</label>
-            <select id="drive" on:change={(e) => onDriveChange(Number((e.target as HTMLSelectElement).value) || null)} value={formData.drive_id}>
-              <option value={null}>No drive (software-only)</option>
+            <select id="drive" on:change={(e) => onDriveChange(Number((e.target as HTMLSelectElement).value) || null)}>
+              <option value={0} selected={!formData.drive_id}>No drive (software-only)</option>
               {#each drives as drive}
                 <option value={drive.id}>{drive.display_name || drive.device_path}</option>
               {/each}

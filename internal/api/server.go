@@ -1225,8 +1225,13 @@ func (s *Server) handleDetectTape(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
 
-	loaded, err := driveSvc.IsTapeLoaded(ctx)
-	if err != nil || !loaded {
+	status, err := driveSvc.GetStatus(ctx)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to get drive status: "+err.Error())
+		return
+	}
+
+	if status.Error != "" || !status.Online || !status.Ready {
 		s.respondJSON(w, http.StatusOK, map[string]interface{}{
 			"loaded":   false,
 			"lto_type": "",
@@ -1235,13 +1240,13 @@ func (s *Server) handleDetectTape(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	status, err := driveSvc.GetStatus(ctx)
-	if err != nil {
-		s.respondError(w, http.StatusInternalServerError, "failed to get drive status: "+err.Error())
-		return
+	// Determine LTO type: first from mt description, then from density code lookup
+	ltoType := status.DriveType
+	if ltoType == "" && status.Density != "" {
+		if detected, ok := models.LTOTypeFromDensity(status.Density); ok {
+			ltoType = detected
+		}
 	}
-
-	ltoType, _ := driveSvc.DetectTapeType(ctx)
 
 	var capacityBytes int64
 	if ltoType != "" {
