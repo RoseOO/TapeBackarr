@@ -56,7 +56,7 @@ substep() {
 # Install dependencies
 step "Installing system dependencies..."
 apt-get update -qq
-apt-get install -y -qq mt-st tar mbuffer sg3-utils 2>/dev/null || {
+apt-get install -y -qq mt-st tar mbuffer sg3-utils lsscsi 2>/dev/null || {
     substep "Some optional packages may not be available"
 }
 

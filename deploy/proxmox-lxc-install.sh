@@ -288,7 +288,7 @@ install_tapebackarr() {
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
         apt-get upgrade -y -qq
-        apt-get install -y -qq wget curl git mt-st tar mbuffer sg3-utils
+        apt-get install -y -qq wget curl git mt-st tar mbuffer sg3-utils lsscsi
     "
     msg_ok "Dependencies installed"
     
