@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/RoseOO/TapeBackarr/internal/auth"
@@ -39,6 +40,19 @@ import (
 
 var cryptoRand io.Reader = rand.Reader
 
+// batchLabelState tracks the current batch label operation
+type batchLabelState struct {
+	mu        sync.Mutex
+	running   bool
+	cancel    context.CancelFunc
+	progress  int
+	total     int
+	current   string
+	message   string
+	completed int
+	failed    int
+}
+
 // Server represents the API server
 type Server struct {
 	router                *chi.Mux
@@ -58,6 +72,7 @@ type Server struct {
 	config                *config.Config
 	eventBus              *EventBus
 	telegramService       *notifications.TelegramService
+	batchLabel            batchLabelState
 }
 
 // NewServer creates a new API server
@@ -169,6 +184,10 @@ func (s *Server) setupRoutes() {
 			r.Post("/{id}/export", s.handleExportTape)
 			r.Post("/{id}/import", s.handleImportTape)
 			r.Get("/{id}/read-label", s.handleReadTapeLabel)
+			r.Post("/batch-label", s.handleTapesBatchLabel)
+			r.Get("/batch-label/status", s.handleBatchLabelStatus)
+			r.Post("/batch-label/cancel", s.handleBatchLabelCancel)
+			r.Post("/batch-update", s.handleBatchUpdateTapes)
 		})
 
 		// Tape Pools
@@ -1009,6 +1028,7 @@ func (s *Server) handleUpdateTape(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		Label           *string            `json:"label"`
+		Barcode         *string            `json:"barcode"`
 		PoolID          *int64             `json:"pool_id"`
 		Status          *models.TapeStatus `json:"status"`
 		OffsiteLocation *string            `json:"offsite_location"`
@@ -1021,9 +1041,16 @@ func (s *Server) handleUpdateTape(w http.ResponseWriter, r *http.Request) {
 	// Get current tape state for lifecycle safeguards
 	var currentStatus string
 	var currentPoolID *int64
-	err = s.db.QueryRow("SELECT status, pool_id FROM tapes WHERE id = ?", id).Scan(&currentStatus, &currentPoolID)
+	var labeledAt *time.Time
+	err = s.db.QueryRow("SELECT status, pool_id, labeled_at FROM tapes WHERE id = ?", id).Scan(&currentStatus, &currentPoolID, &labeledAt)
 	if err != nil {
 		s.respondError(w, http.StatusNotFound, "tape not found")
+		return
+	}
+
+	// Prevent label changes after the tape has been physically labelled
+	if req.Label != nil && labeledAt != nil {
+		s.respondError(w, http.StatusConflict, "cannot change label after tape has been physically labelled - the label on tape must match the database")
 		return
 	}
 
@@ -1059,6 +1086,10 @@ func (s *Server) handleUpdateTape(w http.ResponseWriter, r *http.Request) {
 	if req.Label != nil {
 		updates = append(updates, "label = ?")
 		args = append(args, *req.Label)
+	}
+	if req.Barcode != nil {
+		updates = append(updates, "barcode = ?")
+		args = append(args, *req.Barcode)
 	}
 	if req.PoolID != nil {
 		updates = append(updates, "pool_id = ?")
@@ -1110,6 +1141,13 @@ func (s *Server) handleDeleteTape(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Clear foreign key references before deleting the tape
+	s.db.Exec("UPDATE tape_drives SET current_tape_id = NULL WHERE current_tape_id = ?", id)
+	s.db.Exec("DELETE FROM backup_sets WHERE tape_id = ?", id)
+	s.db.Exec("DELETE FROM database_backups WHERE tape_id = ?", id)
+	s.db.Exec("UPDATE proxmox_backups SET tape_id = NULL WHERE tape_id = ?", id)
+	s.db.Exec("UPDATE proxmox_job_executions SET tape_id = NULL WHERE tape_id = ?", id)
+
 	_, err = s.db.Exec("DELETE FROM tapes WHERE id = ?", id)
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
@@ -1119,6 +1157,81 @@ func (s *Server) handleDeleteTape(w http.ResponseWriter, r *http.Request) {
 	s.auditLog(r, "delete", "tape", id, "Deleted tape")
 
 	s.respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// handleBatchUpdateTapes updates status or pool for multiple tapes at once
+func (s *Server) handleBatchUpdateTapes(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		TapeIDs []int64            `json:"tape_ids"`
+		Status  *models.TapeStatus `json:"status"`
+		PoolID  *int64             `json:"pool_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if len(req.TapeIDs) == 0 {
+		s.respondError(w, http.StatusBadRequest, "tape_ids is required")
+		return
+	}
+	if req.Status == nil && req.PoolID == nil {
+		s.respondError(w, http.StatusBadRequest, "at least one of status or pool_id is required")
+		return
+	}
+
+	updated := 0
+	skipped := 0
+	for _, tapeID := range req.TapeIDs {
+		// Get current state
+		var currentStatus string
+		err := s.db.QueryRow("SELECT status FROM tapes WHERE id = ?", tapeID).Scan(&currentStatus)
+		if err != nil {
+			skipped++
+			continue
+		}
+
+		// Apply lifecycle safeguards
+		if req.Status != nil {
+			newStatus := string(*req.Status)
+			if currentStatus == "exported" && newStatus != "exported" {
+				skipped++
+				continue
+			}
+			if newStatus == "blank" && (currentStatus == "active" || currentStatus == "full") {
+				skipped++
+				continue
+			}
+		}
+
+		updates := []string{}
+		args := []interface{}{}
+		if req.Status != nil {
+			updates = append(updates, "status = ?")
+			args = append(args, *req.Status)
+		}
+		if req.PoolID != nil {
+			updates = append(updates, "pool_id = ?")
+			args = append(args, *req.PoolID)
+		}
+		updates = append(updates, "updated_at = CURRENT_TIMESTAMP")
+		args = append(args, tapeID)
+
+		query := "UPDATE tapes SET " + strings.Join(updates, ", ") + " WHERE id = ?"
+		_, err = s.db.Exec(query, args...)
+		if err != nil {
+			skipped++
+			continue
+		}
+		updated++
+	}
+
+	s.auditLog(r, "batch_update", "tape", 0, fmt.Sprintf("Batch updated %d tapes (skipped %d)", updated, skipped))
+
+	s.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"updated": updated,
+		"skipped": skipped,
+	})
 }
 
 func (s *Server) handleLabelTape(w http.ResponseWriter, r *http.Request) {
@@ -1800,7 +1913,7 @@ func (s *Server) handleRewindTape(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListSources(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`
-		SELECT id, name, source_type, path, include_patterns, exclude_patterns, enabled, created_at
+		SELECT id, name, source_type, path, COALESCE(include_patterns, '[]'), COALESCE(exclude_patterns, '[]'), enabled, created_at
 		FROM backup_sources ORDER BY name
 	`)
 	if err != nil {
@@ -5040,7 +5153,7 @@ func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 	s.respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
-// handleBatchLabel starts a batch tape labelling operation
+// handleBatchLabel starts a batch tape labelling operation (legacy endpoint under /drives)
 func (s *Server) handleBatchLabel(w http.ResponseWriter, r *http.Request) {
 	driveID, err := s.getIDParam(r)
 	if err != nil {
@@ -5075,6 +5188,14 @@ func (s *Server) handleBatchLabel(w http.ResponseWriter, r *http.Request) {
 		req.StartNum = 1
 	}
 
+	s.batchLabel.mu.Lock()
+	if s.batchLabel.running {
+		s.batchLabel.mu.Unlock()
+		s.respondError(w, http.StatusConflict, "batch labelling is already running")
+		return
+	}
+	s.batchLabel.mu.Unlock()
+
 	// Get drive device path
 	var devicePath string
 	err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", driveID).Scan(&devicePath)
@@ -5083,8 +5204,21 @@ func (s *Server) handleBatchLabel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+
+	s.batchLabel.mu.Lock()
+	s.batchLabel.running = true
+	s.batchLabel.cancel = cancel
+	s.batchLabel.progress = 0
+	s.batchLabel.total = req.Count
+	s.batchLabel.current = ""
+	s.batchLabel.message = "Starting batch labelling..."
+	s.batchLabel.completed = 0
+	s.batchLabel.failed = 0
+	s.batchLabel.mu.Unlock()
+
 	// Start batch labelling in background
-	go s.runBatchLabel(devicePath, driveID, req.Prefix, req.StartNum, req.Count, req.Digits, req.PoolID)
+	go s.runBatchLabel(ctx, devicePath, driveID, req.Prefix, req.StartNum, req.Count, req.Digits, req.PoolID)
 
 	s.respondJSON(w, http.StatusAccepted, map[string]interface{}{
 		"status":  "started",
@@ -5092,9 +5226,15 @@ func (s *Server) handleBatchLabel(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) runBatchLabel(devicePath string, driveID int64, prefix string, startNum, count, digits int, poolID *int64) {
-	ctx := context.Background()
+func (s *Server) runBatchLabel(ctx context.Context, devicePath string, driveID int64, prefix string, startNum, count, digits int, poolID *int64) {
 	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+
+	defer func() {
+		s.batchLabel.mu.Lock()
+		s.batchLabel.running = false
+		s.batchLabel.cancel = nil
+		s.batchLabel.mu.Unlock()
+	}()
 
 	poolName := ""
 	if poolID != nil {
@@ -5102,8 +5242,32 @@ func (s *Server) runBatchLabel(devicePath string, driveID int64, prefix string, 
 	}
 
 	for i := 0; i < count; i++ {
+		// Check for cancellation
+		select {
+		case <-ctx.Done():
+			s.batchLabel.mu.Lock()
+			s.batchLabel.message = "Batch labelling cancelled by user"
+			s.batchLabel.mu.Unlock()
+			if s.eventBus != nil {
+				s.eventBus.Publish(SystemEvent{
+					Type:     "warning",
+					Category: "tape",
+					Title:    "Batch Label",
+					Message:  fmt.Sprintf("Batch labelling cancelled after %d/%d tapes", i, count),
+				})
+			}
+			return
+		default:
+		}
+
 		num := startNum + i
 		label := fmt.Sprintf("%s%0*d", prefix, digits, num)
+
+		s.batchLabel.mu.Lock()
+		s.batchLabel.progress = i
+		s.batchLabel.current = label
+		s.batchLabel.message = fmt.Sprintf("Waiting for tape to label as '%s'... Insert tape and close drive.", label)
+		s.batchLabel.mu.Unlock()
 
 		if s.eventBus != nil {
 			s.eventBus.Publish(SystemEvent{
@@ -5117,6 +5281,24 @@ func (s *Server) runBatchLabel(devicePath string, driveID int64, prefix string, 
 
 		// Wait for tape to be inserted (up to 5 minutes)
 		if err := driveSvc.WaitForTape(ctx, 5*time.Minute); err != nil {
+			if ctx.Err() != nil {
+				s.batchLabel.mu.Lock()
+				s.batchLabel.message = "Batch labelling cancelled by user"
+				s.batchLabel.mu.Unlock()
+				if s.eventBus != nil {
+					s.eventBus.Publish(SystemEvent{
+						Type:     "warning",
+						Category: "tape",
+						Title:    "Batch Label",
+						Message:  fmt.Sprintf("Batch labelling cancelled after %d/%d tapes", i, count),
+					})
+				}
+				return
+			}
+			s.batchLabel.mu.Lock()
+			s.batchLabel.message = fmt.Sprintf("Timeout waiting for tape %d/%d", i+1, count)
+			s.batchLabel.failed++
+			s.batchLabel.mu.Unlock()
 			if s.eventBus != nil {
 				s.eventBus.Publish(SystemEvent{
 					Type:     "error",
@@ -5131,6 +5313,9 @@ func (s *Server) runBatchLabel(devicePath string, driveID int64, prefix string, 
 		// Check if tape already has a label
 		existingLabel, err := driveSvc.ReadTapeLabel(ctx)
 		if err == nil && existingLabel != nil && existingLabel.Label != "" {
+			s.batchLabel.mu.Lock()
+			s.batchLabel.message = fmt.Sprintf("Tape already labelled as '%s', skipping. Eject and insert a blank tape.", existingLabel.Label)
+			s.batchLabel.mu.Unlock()
 			if s.eventBus != nil {
 				s.eventBus.Publish(SystemEvent{
 					Type:     "warning",
@@ -5150,8 +5335,16 @@ func (s *Server) runBatchLabel(devicePath string, driveID int64, prefix string, 
 		cryptoRand.Read(uuidBytes)
 		tapeUUID := hex.EncodeToString(uuidBytes)
 
+		s.batchLabel.mu.Lock()
+		s.batchLabel.message = fmt.Sprintf("Writing label '%s' to tape...", label)
+		s.batchLabel.mu.Unlock()
+
 		// Write label
 		if err := driveSvc.WriteTapeLabel(ctx, label, tapeUUID, poolName); err != nil {
+			s.batchLabel.mu.Lock()
+			s.batchLabel.message = fmt.Sprintf("Failed to write label '%s': %s", label, err.Error())
+			s.batchLabel.failed++
+			s.batchLabel.mu.Unlock()
 			if s.eventBus != nil {
 				s.eventBus.Publish(SystemEvent{
 					Type:     "error",
@@ -5179,6 +5372,11 @@ func (s *Server) runBatchLabel(devicePath string, driveID int64, prefix string, 
 			INSERT INTO tapes (uuid, barcode, label, lto_type, pool_id, status, capacity_bytes, used_bytes, write_count, labeled_at)
 			VALUES (?, ?, ?, ?, ?, 'blank', ?, 0, 0, ?)
 		`, tapeUUID, label, label, ltoType, poolID, capacityBytes, now)
+
+		s.batchLabel.mu.Lock()
+		s.batchLabel.completed++
+		s.batchLabel.message = fmt.Sprintf("Successfully labelled tape as '%s'. Ejecting...", label)
+		s.batchLabel.mu.Unlock()
 
 		if s.eventBus != nil {
 			s.eventBus.Publish(SystemEvent{
@@ -5208,6 +5406,10 @@ func (s *Server) runBatchLabel(devicePath string, driveID int64, prefix string, 
 		}
 	}
 
+	s.batchLabel.mu.Lock()
+	s.batchLabel.message = fmt.Sprintf("Batch labelling complete: %d tapes labelled", s.batchLabel.completed)
+	s.batchLabel.mu.Unlock()
+
 	if s.eventBus != nil {
 		s.eventBus.Publish(SystemEvent{
 			Type:     "success",
@@ -5216,6 +5418,106 @@ func (s *Server) runBatchLabel(devicePath string, driveID int64, prefix string, 
 			Message:  fmt.Sprintf("Batch labelling complete: %d tapes labelled (%s%0*d through %s%0*d)", count, prefix, digits, startNum, prefix, digits, startNum+count-1),
 		})
 	}
+}
+
+// handleTapesBatchLabel starts a batch tape labelling operation (under /tapes route)
+func (s *Server) handleTapesBatchLabel(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		DriveID  int64  `json:"drive_id"`
+		Prefix   string `json:"prefix"`
+		StartNum int    `json:"start_number"`
+		Count    int    `json:"count"`
+		Digits   int    `json:"digits"`
+		PoolID   *int64 `json:"pool_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.DriveID <= 0 {
+		s.respondError(w, http.StatusBadRequest, "drive_id is required")
+		return
+	}
+	if req.Prefix == "" {
+		s.respondError(w, http.StatusBadRequest, "prefix is required")
+		return
+	}
+	if req.Count <= 0 || req.Count > 1000 {
+		s.respondError(w, http.StatusBadRequest, "count must be between 1 and 1000")
+		return
+	}
+	if req.Digits < 1 || req.Digits > 6 {
+		req.Digits = 3
+	}
+	if req.StartNum < 0 {
+		req.StartNum = 1
+	}
+
+	s.batchLabel.mu.Lock()
+	if s.batchLabel.running {
+		s.batchLabel.mu.Unlock()
+		s.respondError(w, http.StatusConflict, "batch labelling is already running")
+		return
+	}
+	s.batchLabel.mu.Unlock()
+
+	// Get drive device path
+	var devicePath string
+	err := s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", req.DriveID).Scan(&devicePath)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "drive not found or not enabled")
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	s.batchLabel.mu.Lock()
+	s.batchLabel.running = true
+	s.batchLabel.cancel = cancel
+	s.batchLabel.progress = 0
+	s.batchLabel.total = req.Count
+	s.batchLabel.current = ""
+	s.batchLabel.message = "Starting batch labelling..."
+	s.batchLabel.completed = 0
+	s.batchLabel.failed = 0
+	s.batchLabel.mu.Unlock()
+
+	go s.runBatchLabel(ctx, devicePath, req.DriveID, req.Prefix, req.StartNum, req.Count, req.Digits, req.PoolID)
+
+	s.respondJSON(w, http.StatusAccepted, map[string]interface{}{
+		"status":  "started",
+		"message": fmt.Sprintf("Batch labelling started: %s%0*d through %s%0*d", req.Prefix, req.Digits, req.StartNum, req.Prefix, req.Digits, req.StartNum+req.Count-1),
+	})
+}
+
+// handleBatchLabelStatus returns the current batch label operation status
+func (s *Server) handleBatchLabelStatus(w http.ResponseWriter, r *http.Request) {
+	s.batchLabel.mu.Lock()
+	status := map[string]interface{}{
+		"running":   s.batchLabel.running,
+		"progress":  s.batchLabel.progress,
+		"total":     s.batchLabel.total,
+		"current":   s.batchLabel.current,
+		"message":   s.batchLabel.message,
+		"completed": s.batchLabel.completed,
+		"failed":    s.batchLabel.failed,
+	}
+	s.batchLabel.mu.Unlock()
+	s.respondJSON(w, http.StatusOK, status)
+}
+
+// handleBatchLabelCancel cancels the current batch label operation
+func (s *Server) handleBatchLabelCancel(w http.ResponseWriter, r *http.Request) {
+	s.batchLabel.mu.Lock()
+	if !s.batchLabel.running || s.batchLabel.cancel == nil {
+		s.batchLabel.mu.Unlock()
+		s.respondError(w, http.StatusBadRequest, "no batch labelling operation is running")
+		return
+	}
+	s.batchLabel.cancel()
+	s.batchLabel.mu.Unlock()
+	s.respondJSON(w, http.StatusOK, map[string]string{"status": "cancelling"})
 }
 
 // handleHealthCheck returns detailed health status
