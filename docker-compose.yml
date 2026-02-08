@@ -1,0 +1,77 @@
+# TapeBackarr Docker Compose Configuration
+#
+# Usage:
+#   docker compose up -d
+#
+# Note: Tape device access requires privileged mode or proper device passthrough
+
+services:
+  tapebackarr:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-0.1.0}
+        BUILD_TIME: ${BUILD_TIME:-}
+    image: tapebackarr:${VERSION:-latest}
+    container_name: tapebackarr
+    restart: unless-stopped
+    
+    # Required for tape device access
+    privileged: true
+    
+    # Or use specific devices (less privileged, but more complex):
+    # devices:
+    #   - /dev/st0:/dev/st0
+    #   - /dev/nst0:/dev/nst0
+    #   - /dev/sg0:/dev/sg0  # SCSI generic device
+    
+    ports:
+      - "8080:8080"
+    
+    volumes:
+      # Configuration file
+      - ./config.json:/etc/tapebackarr/config.json:ro
+      
+      # Persistent data (database)
+      - tapebackarr-data:/var/lib/tapebackarr
+      
+      # Logs
+      - tapebackarr-logs:/var/log/tapebackarr
+      
+      # Mount points for backup sources (customize as needed)
+      # - /mnt/nfs:/mnt/nfs:ro
+      # - /mnt/smb:/mnt/smb:ro
+      # - /backup/sources:/backup/sources:ro
+      
+      # Restore destination (customize as needed)
+      # - /restore:/restore:rw
+    
+    environment:
+      - TZ=${TZ:-UTC}
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  tapebackarr-data:
+    driver: local
+  tapebackarr-logs:
+    driver: local
+
+# Optional: Network configuration for integration with other services
+# networks:
+#   backup-network:
+#     driver: bridge

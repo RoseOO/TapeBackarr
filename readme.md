@@ -4,6 +4,8 @@
 
 TapeBackarr is a disk-light, tape-first backup system designed to run on Debian Linux and manage LTO tape drives. It supports direct streaming from network shares to tape without requiring large intermediate disk storage.
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 ## Features
 
 ### Core Capabilities
@@ -12,7 +14,8 @@ TapeBackarr is a disk-light, tape-first backup system designed to run on Debian 
 - **Incremental Backups**: Track file changes via timestamps and size
 - **Multi-tape Spanning**: Automatic handling of tape-full conditions with continuation markers
 - **Guided Restore**: Operator-friendly restore workflow with tape insertion guidance
-- **Telegram Notifications**: Real-time alerts when tapes need to be changed
+- **Notifications**: Real-time alerts via Telegram and Email (SMTP)
+- **Encryption**: AES-256 encryption for sensitive backups
 - **Database Backup**: Backup the TapeBackarr database itself to tape for disaster recovery
 - **Multi-Drive Support**: Manage and select from multiple tape drives
 - **Proxmox VE Integration**: Backup and restore VMs and LXC containers directly to tape
@@ -49,6 +52,11 @@ TapeBackarr is a disk-light, tape-first backup system designed to run on Debian 
 - Role-based access control (admin/operator/read-only)
 - **In-app documentation** - Access all guides from the web UI
 
+### Deployment Options
+- **Native Installation**: Debian/Ubuntu with systemd
+- **Docker**: Container deployment with docker-compose
+- **Proxmox LXC**: Automated installation script for Proxmox community scripts
+
 ## Architecture
 
 ```
@@ -67,7 +75,7 @@ TapeBackarr is a disk-light, tape-first backup system designed to run on Debian 
 
 ## Requirements
 
-- **OS**: Debian 12+ (systemd-native)
+- **OS**: Debian 12+ or Ubuntu 22.04+ (systemd-native)
 - **Hardware**: LTO tape drive (/dev/st0, /dev/nst0)
 - **Software**: 
   - Go 1.21+
@@ -77,34 +85,46 @@ TapeBackarr is a disk-light, tape-first backup system designed to run on Debian 
 
 ## Installation
 
-### Quick Install (Recommended)
+For complete installation instructions, see the [Installation Guide](docs/INSTALLATION.md).
 
-Use the automated installation script:
+### Quick Install (Native)
 
 ```bash
 # Clone repository
 git clone https://github.com/RoseOO/TapeBackarr.git
 cd TapeBackarr
 
-# Build backend
-go build -o tapebackarr ./cmd/tapebackarr
-
-# Build frontend
-cd web/frontend
-npm install
-npm run build
-cd ../..
+# Build
+make build
 
 # Run installer
 sudo ./deploy/install.sh
 ```
 
-The install script will:
-- Install system dependencies (mt-st, tar, mbuffer)
-- Create required directories
-- Install the binary to `/opt/tapebackarr`
-- Create configuration with secure JWT secret
-- Install and enable the systemd service
+### Docker Install
+
+```bash
+# Clone repository
+git clone https://github.com/RoseOO/TapeBackarr.git
+cd TapeBackarr
+
+# Configure
+cp deploy/config.example.json config.json
+nano config.json
+
+# Start
+docker compose up -d
+```
+
+### Proxmox LXC Install
+
+Run this command on your **Proxmox host**:
+
+```bash
+bash -c "$(wget -qLO - https://github.com/RoseOO/TapeBackarr/raw/main/deploy/proxmox-lxc-install.sh)"
+```
+
+This creates an LXC container with TapeBackarr installed and tape device passthrough configured.
 
 ### Manual Installation
 
@@ -184,6 +204,15 @@ Edit `/etc/tapebackarr/config.json`:
       "enabled": false,
       "bot_token": "YOUR_BOT_TOKEN",
       "chat_id": "YOUR_CHAT_ID"
+    },
+    "email": {
+      "enabled": false,
+      "smtp_host": "smtp.example.com",
+      "smtp_port": 587,
+      "username": "your-username",
+      "password": "your-password",
+      "from_email": "tapebackarr@example.com",
+      "to_emails": "admin@example.com"
     }
   }
 }
@@ -210,9 +239,11 @@ TapeBackarr supports multiple tape drives. Configure them in the `tape.drives` a
 
 You can also add and manage drives through the web UI under the **Drives** section.
 
-### Telegram Notifications Setup
+### Notification Setup
 
-To receive notifications when tapes need to be changed:
+TapeBackarr supports both Telegram and Email notifications for critical events like tape changes, backup completion, and errors.
+
+#### Telegram Notifications
 
 1. Create a bot with [@BotFather](https://t.me/botfather) on Telegram
 2. Get your chat ID by messaging the bot and visiting `https://api.telegram.org/bot{YOUR_TOKEN}/getUpdates`
@@ -227,6 +258,29 @@ To receive notifications when tapes need to be changed:
    }
    ```
 4. Restart TapeBackarr
+
+#### Email Notifications (SMTP)
+
+Configure SMTP settings to receive email notifications:
+
+```json
+"notifications": {
+  "email": {
+    "enabled": true,
+    "smtp_host": "smtp.gmail.com",
+    "smtp_port": 587,
+    "username": "your-email@gmail.com",
+    "password": "your-app-password",
+    "from_email": "tapebackarr@yourdomain.com",
+    "from_name": "TapeBackarr",
+    "to_emails": "admin@yourdomain.com, operator@yourdomain.com",
+    "use_tls": true,
+    "skip_verify": false
+  }
+}
+```
+
+**Note:** For Gmail, use an [App Password](https://support.google.com/accounts/answer/185833) instead of your regular password.
 
 **Notification Events:**
 - 📼 Tape change required
@@ -416,6 +470,7 @@ Access documentation directly from the web interface by clicking **Documentation
 
 ### Document Files
 
+- [**Installation Guide**](docs/INSTALLATION.md) - Complete installation instructions (Native, Docker, Proxmox LXC)
 - [**Usage Guide**](docs/USAGE_GUIDE.md) - Complete guide for using TapeBackarr
 - [**API Reference**](docs/API_REFERENCE.md) - REST API documentation
 - [**Operator Guide**](docs/OPERATOR_GUIDE.md) - Quick reference for daily operations
@@ -433,11 +488,20 @@ Key recovery capabilities:
 - Restore files using raw mt/tar commands
 - Handle multi-tape spanning sets
 - Recover the TapeBackarr database from tape
-
-## License
-
-MIT License - see LICENSE file for details.
+- Restore encrypted backups with your key sheet
 
 ## Contributing
 
-Contributions welcome! Please read CONTRIBUTING.md before submitting PRs.
+Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting PRs.
+
+## Security
+
+For security-related information, see [SECURITY.md](SECURITY.md).
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for version history.
+
+## License
+
+MIT License - see [LICENSE](LICENSE) file for details.

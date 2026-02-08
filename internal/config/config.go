@@ -62,6 +62,7 @@ type AuthConfig struct {
 // NotificationsConfig holds notification configuration
 type NotificationsConfig struct {
 	Telegram TelegramConfig `json:"telegram"`
+	Email    EmailConfig    `json:"email"`
 }
 
 // TelegramConfig holds Telegram bot configuration
@@ -69,6 +70,20 @@ type TelegramConfig struct {
 	Enabled  bool   `json:"enabled"`
 	BotToken string `json:"bot_token"`
 	ChatID   string `json:"chat_id"`
+}
+
+// EmailConfig holds SMTP email configuration
+type EmailConfig struct {
+	Enabled    bool   `json:"enabled"`
+	SMTPHost   string `json:"smtp_host"`
+	SMTPPort   int    `json:"smtp_port"`
+	Username   string `json:"username"`
+	Password   string `json:"password"`
+	FromEmail  string `json:"from_email"`
+	FromName   string `json:"from_name"`
+	ToEmails   string `json:"to_emails"` // Comma-separated list
+	UseTLS     bool   `json:"use_tls"`
+	SkipVerify bool   `json:"skip_verify"`
 }
 
 // ProxmoxConfig holds Proxmox VE connection configuration
@@ -125,6 +140,18 @@ func DefaultConfig() *Config {
 				Enabled:  false,
 				BotToken: "",
 				ChatID:   "",
+			},
+			Email: EmailConfig{
+				Enabled:    false,
+				SMTPHost:   "",
+				SMTPPort:   587,
+				Username:   "",
+				Password:   "",
+				FromEmail:  "",
+				FromName:   "TapeBackarr",
+				ToEmails:   "",
+				UseTLS:     true,
+				SkipVerify: false,
 			},
 		},
 		Proxmox: ProxmoxConfig{
