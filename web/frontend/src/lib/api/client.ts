@@ -263,3 +263,19 @@ export async function deleteUser(id: number) {
     method: 'DELETE',
   });
 }
+
+// Generic API client for pages that need direct endpoint access
+export const api = {
+  get: (endpoint: string) => fetchApi(endpoint),
+  post: (endpoint: string, data?: any) => fetchApi(endpoint, {
+    method: 'POST',
+    body: data ? JSON.stringify(data) : undefined,
+  }),
+  put: (endpoint: string, data?: any) => fetchApi(endpoint, {
+    method: 'PUT',
+    body: data ? JSON.stringify(data) : undefined,
+  }),
+  delete: (endpoint: string) => fetchApi(endpoint, {
+    method: 'DELETE',
+  }),
+};
