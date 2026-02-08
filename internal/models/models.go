@@ -375,3 +375,15 @@ type RestoreOperation struct {
 	CompletedAt     *time.Time             `json:"completed_at" db:"completed_at"`
 	CreatedAt       time.Time              `json:"created_at" db:"created_at"`
 }
+
+// APIKey represents an API key for programmatic access
+type APIKey struct {
+	ID          int64      `json:"id" db:"id"`
+	Name        string     `json:"name" db:"name"`
+	KeyHash     string     `json:"-" db:"key_hash"`
+	KeyPrefix   string     `json:"key_prefix" db:"key_prefix"` // First 8 chars for identification
+	Role        UserRole   `json:"role" db:"role"`
+	LastUsedAt  *time.Time `json:"last_used_at" db:"last_used_at"`
+	ExpiresAt   *time.Time `json:"expires_at" db:"expires_at"`
+	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
+}

@@ -128,7 +128,7 @@ func (s *Server) setupRoutes() {
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"*"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-API-Key"},
 		ExposedHeaders:   []string{"Link"},
 		AllowCredentials: true,
 		MaxAge:           300,
@@ -182,6 +182,7 @@ func (s *Server) setupRoutes() {
 			r.Post("/{id}/select", s.handleSelectDrive)
 			r.Post("/{id}/format-tape", s.handleFormatTapeInDrive)
 			r.Get("/{id}/inspect-tape", s.handleInspectTape)
+			r.Post("/{id}/batch-label", s.handleBatchLabel)
 		})
 
 		// Backup Sources
@@ -285,6 +286,14 @@ func (s *Server) setupRoutes() {
 			})
 		})
 
+		// API Keys (admin only)
+		r.Route("/api/v1/api-keys", func(r chi.Router) {
+			r.Use(s.adminOnlyMiddleware)
+			r.Get("/", s.handleListAPIKeys)
+			r.Post("/", s.handleCreateAPIKey)
+			r.Delete("/{id}", s.handleDeleteAPIKey)
+		})
+
 		// Proxmox VE integration
 		r.Route("/api/v1/proxmox", func(r chi.Router) {
 			// Nodes and discovery
@@ -384,6 +393,19 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// Fallback to query parameter for SSE connections (EventSource doesn't support headers)
 		if tokenStr == "" {
 			tokenStr = r.URL.Query().Get("token")
+		}
+
+		// Check for API key authentication
+		apiKey := r.Header.Get("X-API-Key")
+		if apiKey != "" {
+			claims, err := s.authService.ValidateAPIKey(apiKey)
+			if err != nil {
+				s.respondError(w, http.StatusUnauthorized, "invalid API key")
+				return
+			}
+			ctx := context.WithValue(r.Context(), "claims", claims)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
 		}
 
 		if tokenStr == "" {
@@ -1691,6 +1713,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		SELECT j.id, j.name, j.source_id, s.name as source_name, j.pool_id, p.name as pool_name,
 		       j.backup_type, j.schedule_cron, j.retention_days, j.enabled,
 		       j.encryption_enabled, j.encryption_key_id,
+		       COALESCE(j.compression, 'none') as compression,
 		       j.last_run_at, j.next_run_at
 		FROM backup_jobs j
 		LEFT JOIN backup_sources s ON j.source_id = s.id
@@ -1707,9 +1730,11 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var j models.BackupJob
 		var sourceName, poolName *string
+		var compression string
 		if err := rows.Scan(&j.ID, &j.Name, &j.SourceID, &sourceName, &j.PoolID, &poolName,
 			&j.BackupType, &j.ScheduleCron, &j.RetentionDays, &j.Enabled,
 			&j.EncryptionEnabled, &j.EncryptionKeyID,
+			&compression,
 			&j.LastRunAt, &j.NextRunAt); err != nil {
 			continue
 		}
@@ -1726,6 +1751,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			"enabled":            j.Enabled,
 			"encryption_enabled": j.EncryptionEnabled,
 			"encryption_key_id":  j.EncryptionKeyID,
+			"compression":        compression,
 			"last_run_at":        j.LastRunAt,
 			"next_run_at":        j.NextRunAt,
 		}
@@ -1744,6 +1770,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		ScheduleCron    string `json:"schedule_cron"`
 		RetentionDays   int    `json:"retention_days"`
 		EncryptionKeyID *int64 `json:"encryption_key_id"`
+		Compression     string `json:"compression"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.respondError(w, http.StatusBadRequest, "invalid request body")
@@ -1770,10 +1797,15 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		encryptionEnabled = true
 	}
 
+	compression := req.Compression
+	if compression == "" {
+		compression = "none"
+	}
+
 	result, err := s.db.Exec(`
-		INSERT INTO backup_jobs (name, source_id, pool_id, backup_type, schedule_cron, retention_days, enabled, encryption_enabled, encryption_key_id)
-		VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
-	`, req.Name, req.SourceID, req.PoolID, req.BackupType, req.ScheduleCron, req.RetentionDays, encryptionEnabled, req.EncryptionKeyID)
+		INSERT INTO backup_jobs (name, source_id, pool_id, backup_type, schedule_cron, retention_days, enabled, encryption_enabled, encryption_key_id, compression)
+		VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+	`, req.Name, req.SourceID, req.PoolID, req.BackupType, req.ScheduleCron, req.RetentionDays, encryptionEnabled, req.EncryptionKeyID, compression)
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1842,6 +1874,12 @@ func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Compression and encryption settings cannot be changed after creation
+	if req.EncryptionKeyID != nil {
+		s.respondError(w, http.StatusBadRequest, "encryption settings cannot be changed after job creation")
+		return
+	}
+
 	if req.ScheduleCron != nil && *req.ScheduleCron != "" {
 		if err := scheduler.ParseCron(*req.ScheduleCron); err != nil {
 			s.respondError(w, http.StatusBadRequest, "invalid cron expression: "+err.Error())
@@ -1879,21 +1917,6 @@ func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request) {
 	if req.Enabled != nil {
 		updates = append(updates, "enabled = ?")
 		args = append(args, *req.Enabled)
-	}
-	if req.EncryptionKeyID != nil {
-		if *req.EncryptionKeyID > 0 {
-			// Validate the key exists
-			_, err := s.encryptionService.GetKey(r.Context(), *req.EncryptionKeyID)
-			if err != nil {
-				s.respondError(w, http.StatusBadRequest, "encryption key not found")
-				return
-			}
-			updates = append(updates, "encryption_key_id = ?", "encryption_enabled = 1")
-			args = append(args, *req.EncryptionKeyID)
-		} else {
-			// Disable encryption (key_id = 0 means remove)
-			updates = append(updates, "encryption_key_id = NULL", "encryption_enabled = 0")
-		}
 	}
 
 	if len(updates) == 0 {
@@ -4635,6 +4658,254 @@ func (s *Server) handleGetKeySheetText(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", "attachment; filename=tapebackarr-keysheet.txt")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(text))
+}
+
+// API Key handlers
+
+func (s *Server) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
+	keys, err := s.authService.ListAPIKeys()
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if keys == nil {
+		keys = []models.APIKey{}
+	}
+	s.respondJSON(w, http.StatusOK, keys)
+}
+
+func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name      string `json:"name"`
+		Role      string `json:"role"`
+		ExpiresIn *int   `json:"expires_in_days"` // Optional: days until expiry
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Name == "" {
+		s.respondError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+
+	role := models.UserRole(req.Role)
+	if role != models.RoleAdmin && role != models.RoleOperator && role != models.RoleReadOnly {
+		s.respondError(w, http.StatusBadRequest, "invalid role: must be admin, operator, or readonly")
+		return
+	}
+
+	var expiresAt *time.Time
+	if req.ExpiresIn != nil && *req.ExpiresIn > 0 {
+		t := time.Now().AddDate(0, 0, *req.ExpiresIn)
+		expiresAt = &t
+	}
+
+	rawKey, apiKey, err := s.authService.GenerateAPIKey(req.Name, role, expiresAt)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.respondJSON(w, http.StatusCreated, map[string]interface{}{
+		"key":     rawKey,
+		"api_key": apiKey,
+		"message": "Store this key securely - it will not be shown again",
+	})
+}
+
+func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid API key id")
+		return
+	}
+
+	if err := s.authService.DeleteAPIKey(id); err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// handleBatchLabel starts a batch tape labelling operation
+func (s *Server) handleBatchLabel(w http.ResponseWriter, r *http.Request) {
+	driveID, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid drive id")
+		return
+	}
+
+	var req struct {
+		Prefix   string `json:"prefix"`       // e.g., "NAS-OFF-"
+		StartNum int    `json:"start_number"`  // e.g., 1
+		Count    int    `json:"count"`         // How many tapes to label
+		Digits   int    `json:"digits"`        // e.g., 3 for 001, 002
+		PoolID   *int64 `json:"pool_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Prefix == "" {
+		s.respondError(w, http.StatusBadRequest, "prefix is required")
+		return
+	}
+	if req.Count <= 0 || req.Count > 1000 {
+		s.respondError(w, http.StatusBadRequest, "count must be between 1 and 1000")
+		return
+	}
+	if req.Digits < 1 || req.Digits > 6 {
+		req.Digits = 3
+	}
+	if req.StartNum < 0 {
+		req.StartNum = 1
+	}
+
+	// Get drive device path
+	var devicePath string
+	err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", driveID).Scan(&devicePath)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "drive not found or not enabled")
+		return
+	}
+
+	// Start batch labelling in background
+	go s.runBatchLabel(devicePath, driveID, req.Prefix, req.StartNum, req.Count, req.Digits, req.PoolID)
+
+	s.respondJSON(w, http.StatusAccepted, map[string]interface{}{
+		"status":  "started",
+		"message": fmt.Sprintf("Batch labelling started: %s%0*d through %s%0*d", req.Prefix, req.Digits, req.StartNum, req.Prefix, req.Digits, req.StartNum+req.Count-1),
+	})
+}
+
+func (s *Server) runBatchLabel(devicePath string, driveID int64, prefix string, startNum, count, digits int, poolID *int64) {
+	ctx := context.Background()
+	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+
+	poolName := ""
+	if poolID != nil {
+		_ = s.db.QueryRow("SELECT name FROM tape_pools WHERE id = ?", *poolID).Scan(&poolName)
+	}
+
+	for i := 0; i < count; i++ {
+		num := startNum + i
+		label := fmt.Sprintf("%s%0*d", prefix, digits, num)
+
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "info",
+				Category: "tape",
+				Title:    "Batch Label",
+				Message:  fmt.Sprintf("[%d/%d] Waiting for tape to label as '%s'... Insert tape and close drive.", i+1, count, label),
+				Details:  map[string]interface{}{"label": label, "progress": i, "total": count},
+			})
+		}
+
+		// Wait for tape to be inserted (up to 5 minutes)
+		if err := driveSvc.WaitForTape(ctx, 5*time.Minute); err != nil {
+			if s.eventBus != nil {
+				s.eventBus.Publish(SystemEvent{
+					Type:     "error",
+					Category: "tape",
+					Title:    "Batch Label",
+					Message:  fmt.Sprintf("[%d/%d] Timeout waiting for tape. Batch labelling stopped.", i+1, count),
+				})
+			}
+			return
+		}
+
+		// Check if tape already has a label
+		existingLabel, err := driveSvc.ReadTapeLabel(ctx)
+		if err == nil && existingLabel != nil && existingLabel.Label != "" {
+			if s.eventBus != nil {
+				s.eventBus.Publish(SystemEvent{
+					Type:     "warning",
+					Category: "tape",
+					Title:    "Batch Label",
+					Message:  fmt.Sprintf("[%d/%d] Tape already labelled as '%s', skipping. Eject and insert a blank tape.", i+1, count, existingLabel.Label),
+				})
+			}
+			// Eject the already-labelled tape
+			driveSvc.Eject(ctx)
+			i-- // Retry this number
+			continue
+		}
+
+		// Generate UUID for the tape
+		uuidBytes := make([]byte, 16)
+		cryptoRand.Read(uuidBytes)
+		tapeUUID := hex.EncodeToString(uuidBytes)
+
+		// Write label
+		if err := driveSvc.WriteTapeLabel(ctx, label, tapeUUID, poolName); err != nil {
+			if s.eventBus != nil {
+				s.eventBus.Publish(SystemEvent{
+					Type:     "error",
+					Category: "tape",
+					Title:    "Batch Label",
+					Message:  fmt.Sprintf("[%d/%d] Failed to write label '%s': %s", i+1, count, label, err.Error()),
+				})
+			}
+			return
+		}
+
+		// Detect tape type
+		ltoType := ""
+		if detected, err := driveSvc.DetectTapeType(ctx); err == nil && detected != "" {
+			ltoType = detected
+		}
+		capacityBytes := int64(0)
+		if cap, ok := models.LTOCapacities[ltoType]; ok {
+			capacityBytes = cap
+		}
+
+		// Create tape record in database
+		now := time.Now()
+		s.db.Exec(`
+			INSERT INTO tapes (uuid, barcode, label, lto_type, pool_id, status, capacity_bytes, used_bytes, write_count, labeled_at)
+			VALUES (?, ?, ?, ?, ?, 'blank', ?, 0, 0, ?)
+		`, tapeUUID, label, label, ltoType, poolID, capacityBytes, now)
+
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "success",
+				Category: "tape",
+				Title:    "Batch Label",
+				Message:  fmt.Sprintf("[%d/%d] Successfully labelled tape as '%s'. Ejecting...", i+1, count, label),
+				Details:  map[string]interface{}{"label": label, "uuid": tapeUUID, "lto_type": ltoType},
+			})
+		}
+
+		// Eject tape
+		if err := driveSvc.Eject(ctx); err != nil {
+			if s.eventBus != nil {
+				s.eventBus.Publish(SystemEvent{
+					Type:     "warning",
+					Category: "tape",
+					Title:    "Batch Label",
+					Message:  fmt.Sprintf("[%d/%d] Label written but eject failed: %s. Please eject manually.", i+1, count, err.Error()),
+				})
+			}
+		}
+
+		// Invalidate label cache
+		if cache := s.tapeService.GetLabelCache(); cache != nil {
+			cache.Invalidate(devicePath)
+		}
+	}
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "success",
+			Category: "tape",
+			Title:    "Batch Label Complete",
+			Message:  fmt.Sprintf("Batch labelling complete: %d tapes labelled (%s%0*d through %s%0*d)", count, prefix, digits, startNum, prefix, digits, startNum+count-1),
+		})
+	}
 }
 
 // handleHealthCheck returns detailed health status
