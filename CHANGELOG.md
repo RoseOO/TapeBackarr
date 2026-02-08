@@ -10,14 +10,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Docker and Docker Compose support for containerized deployment
 - Proxmox LXC installation script for community scripts compatibility
-- Email notification support (SMTP)
-- Health check API endpoint
+- Email notification support (SMTP) with TLS
+- Health check API endpoints (`/health` and `/api/v1/health`)
+- AES-256-GCM encryption support for backup jobs with key management
+- Encryption key sheet generation for disaster recovery (printable/text)
+- API key authentication for programmatic access
+- Backup compression support (gzip and zstd)
+- PBS-style tape management with UUID labels and lifecycle states
+- Tape export/import workflow (replacing offsite status)
+- Tape format and read-label operations
+- LTO type detection from SCSI density codes
+- Drive scanning and auto-detection
+- Tape inspection (view contents from web UI)
+- Batch tape labeling from drives
+- Scan tape for database backups
+- Job control: cancel, pause, resume running backup jobs
+- Active jobs listing endpoint
+- Tape recommendation for backup jobs
+- Backup set file listing
+- Server-sent events (SSE) for real-time UI updates
+- Settings management via API (view/update config, restart service)
+- Tape pool reuse rules and allocation policies
+- Tape encryption key fingerprint tracking on tape records
+- Drive vendor field for hardware identification
 - CONTRIBUTING.md guidelines
 - SECURITY.md policy
 - CHANGELOG.md version history
 
 ### Changed
+- Tape status values updated: `offsite` replaced by `expired` and `exported`
+- Catalog browse endpoint uses path parameter instead of query parameter
+- Password change moved to dedicated `/api/v1/auth/change-password` endpoint
+- Telegram test notification moved to `/api/v1/settings/telegram/test`
+- Logs export endpoint simplified to `/api/v1/logs/export`
 - Updated documentation with LXC deployment instructions
+- Go version requirement updated to 1.24+
 
 ## [0.1.0] - 2024-01-15
 

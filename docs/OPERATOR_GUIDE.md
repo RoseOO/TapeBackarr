@@ -289,7 +289,7 @@ Required Tapes (in order):
 
 ### Moving Tapes Offsite
 
-1. In TapeBackarr: Mark tape as "Offsite"
+1. In TapeBackarr: Export the tape (marks as "Exported")
 2. Record offsite location in notes
 3. Add to physical offsite log
 4. Transport tape properly (protective case)
@@ -298,7 +298,7 @@ Required Tapes (in order):
 
 1. Transport tape carefully
 2. Inspect for damage
-3. In TapeBackarr: Mark as "Returned"
+3. In TapeBackarr: Import the tape (marks as returned)
 4. Update offsite location to blank
 5. Return to rotation pool
 

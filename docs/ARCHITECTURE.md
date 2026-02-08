@@ -35,6 +35,14 @@
 │  │ - Catalog Update  │ │ - Verification    │ │ - Labeling        │          │
 │  └───────────────────┘ └───────────────────┘ └───────────────────┘          │
 │              │                     │                     │                   │
+│  ┌───────────────────┐ ┌───────────────────┐ ┌───────────────────┐          │
+│  │ Encryption Service│ │Notification Service│ │  Proxmox Client  │          │
+│  │                   │ │                   │ │                   │          │
+│  │ - AES-256 encrypt │ │ - Telegram alerts │ │ - VM/LXC backup  │          │
+│  │ - Key management  │ │ - Email (SMTP)    │ │ - Guest discovery │          │
+│  │ - Key sheets      │ │ - Event routing   │ │ - vzdump stream   │          │
+│  └───────────────────┘ └───────────────────┘ └───────────────────┘          │
+│              │                     │                     │                   │
 │              └─────────────────────┼─────────────────────┘                   │
 │                                    ▼                                          │
 │  ┌─────────────────────────────────────────────────────────────────────────┐ │
@@ -119,6 +127,9 @@
 - **Backup Service**: Manages backup jobs, handles streaming, catalog updates
 - **Restore Service**: Catalog browsing, file selection, guided restore
 - **Tape Service**: Device control, status monitoring, pool management
+- **Encryption Service**: AES-256 encryption, key management, key sheet generation
+- **Notification Service**: Telegram bot alerts, Email (SMTP) notifications
+- **Proxmox Client**: VM/LXC discovery, vzdump streaming, guest restore
 
 ### 4. Tape I/O Layer
 - **mt commands**: Tape positioning, rewinding, ejecting
@@ -133,17 +144,20 @@
 
 | Component | Technology | Rationale |
 |-----------|------------|-----------|
-| Backend | Go | Excellent for long-running I/O, process management, single binary deployment |
+| Backend | Go 1.24+ | Excellent for long-running I/O, process management, single binary deployment |
 | Database | SQLite | No external dependencies, suitable for metadata-only workload |
 | Web UI | SvelteKit | Fast, server-rendered option with minimal complexity |
 | Process Control | systemd | Native Debian integration, reliable service management |
 | Tape Tools | mt, tar, sg_* | Standard Linux utilities, well-tested |
+| Encryption | AES-256-GCM | Industry-standard authenticated encryption |
+| Notifications | Telegram API, SMTP | Real-time operator alerts via multiple channels |
 
 ## Security Model
 
-1. **Authentication**: Local user database with bcrypt password hashing
+1. **Authentication**: Local user database with bcrypt password hashing, API key support
 2. **Authorization**: Role-based (admin, operator, read-only)
-3. **Audit Trail**: All operations logged with timestamp and user
+3. **Encryption**: AES-256-GCM backup encryption with key management
+4. **Audit Trail**: All operations logged with timestamp and user
 
 ## Failure Handling
 
