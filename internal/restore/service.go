@@ -455,13 +455,14 @@ func (s *Service) getFilesInFolders(ctx context.Context, backupSetID int64, fold
 
 		// Query for all files that start with the folder path prefix
 		// This includes files directly in the folder and all subfolders
+		// Using LIKE with prefix matching for efficient index usage
 		rows, err := s.db.Query(`
 			SELECT file_path 
 			FROM catalog_entries 
 			WHERE backup_set_id = ? 
-			AND (file_path = ? OR file_path LIKE ? OR file_path LIKE ?)
+			AND file_path LIKE ?
 			ORDER BY file_path
-		`, backupSetID, normalizedPath, normalizedPath+"/%", normalizedPath+"\\%")
+		`, backupSetID, normalizedPath+"/%")
 		if err != nil {
 			return nil, fmt.Errorf("failed to query files in folder %s: %w", folderPath, err)
 		}
@@ -470,7 +471,7 @@ func (s *Service) getFilesInFolders(ctx context.Context, backupSetID int64, fold
 			var filePath string
 			if err := rows.Scan(&filePath); err != nil {
 				rows.Close()
-				continue
+				return nil, fmt.Errorf("failed to scan file path: %w", err)
 			}
 			allFiles = append(allFiles, filePath)
 		}
@@ -516,7 +517,7 @@ func (s *Service) GetFolderContents(ctx context.Context, backupSetID int64, fold
 	for rows.Next() {
 		var e models.CatalogEntry
 		if err := rows.Scan(&e.ID, &e.BackupSetID, &e.FilePath, &e.FileSize, &e.FileMode, &e.Checksum, &e.BlockOffset); err != nil {
-			continue
+			return nil, nil, fmt.Errorf("failed to scan catalog entry: %w", err)
 		}
 
 		// Get the part of the path after the folder prefix
