@@ -408,7 +408,7 @@
             {#if job.tape_capacity_bytes > 0}
               <div class="stat-item">
                 <span class="stat-label">Tape Space</span>
-                <span class="stat-value">{formatBytes(job.tape_capacity_bytes - job.tape_used_bytes - job.bytes_written)} free</span>
+                <span class="stat-value">{formatBytes(Math.max(0, job.tape_capacity_bytes - job.tape_used_bytes - job.bytes_written))} free</span>
               </div>
             {/if}
           </div>

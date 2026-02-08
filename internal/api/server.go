@@ -1344,7 +1344,10 @@ func (s *Server) handleDriveStatus(w http.ResponseWriter, r *http.Request) {
 
 	// Check if drive is busy (backup in progress) - return cached status
 	var driveStatus string
-	_ = s.db.QueryRow("SELECT status FROM tape_drives WHERE id = ?", driveID).Scan(&driveStatus)
+	if err := s.db.QueryRow("SELECT status FROM tape_drives WHERE id = ?", driveID).Scan(&driveStatus); err != nil {
+		s.respondError(w, http.StatusNotFound, "drive not found")
+		return
+	}
 	if driveStatus == string(models.DriveStatusBusy) {
 		s.respondJSON(w, http.StatusOK, map[string]interface{}{
 			"ready":  true,

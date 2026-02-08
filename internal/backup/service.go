@@ -661,7 +661,12 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 	// Look up tape info for progress display
 	var tapeLabel string
 	var tapeCapacity, tapeUsed int64
-	_ = s.db.QueryRow("SELECT label, capacity_bytes, used_bytes FROM tapes WHERE id = ?", tapeID).Scan(&tapeLabel, &tapeCapacity, &tapeUsed)
+	if err := s.db.QueryRow("SELECT label, capacity_bytes, used_bytes FROM tapes WHERE id = ?", tapeID).Scan(&tapeLabel, &tapeCapacity, &tapeUsed); err != nil {
+		s.logger.Warn("Could not look up tape info for progress display", map[string]interface{}{
+			"tape_id": tapeID,
+			"error":   err.Error(),
+		})
+	}
 
 	// Register active job progress
 	s.mu.Lock()
