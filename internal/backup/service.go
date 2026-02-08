@@ -812,22 +812,48 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		s.mu.Unlock()
 	}
 
-	// Position tape past the label before writing data.
-	// The tape label occupies file position 0 followed by a file mark.
-	// We must seek to file position 1 so that backup data does not overwrite the label.
-	s.updateProgress(job.ID, "positioning", "Positioning tape past label...")
+	// Verify tape label before writing
+	s.updateProgress(job.ID, "positioning", "Verifying tape label...")
 	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
-	if err := driveSvc.Rewind(ctx); err != nil {
-		s.logger.Warn("Failed to rewind tape before positioning", map[string]interface{}{"error": err.Error()})
+
+	// Read expected tape info from DB
+	var expectedLabel, expectedUUID string
+	if err := s.db.QueryRow("SELECT label, uuid FROM tapes WHERE id = ?", tapeID).Scan(&expectedLabel, &expectedUUID); err != nil {
+		s.updateProgress(job.ID, "failed", "Failed to look up tape info: "+err.Error())
+		s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "failed to look up tape info")
+		return nil, fmt.Errorf("failed to look up tape info: %w", err)
 	}
-	if err := driveSvc.SeekToFileNumber(ctx, 1); err != nil {
-		// If seek fails (e.g. no file mark yet on a blank tape), rewind and write a label first
-		s.logger.Warn("Failed to seek past label, tape may be unlabeled", map[string]interface{}{"error": err.Error()})
-		if rewindErr := driveSvc.Rewind(ctx); rewindErr != nil {
-			s.updateProgress(job.ID, "failed", "Failed to position tape: "+rewindErr.Error())
-			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "failed to position tape")
-			return nil, fmt.Errorf("failed to rewind tape: %w", rewindErr)
+
+	// Read the physical tape label
+	physicalLabel, readErr := driveSvc.ReadTapeLabel(ctx)
+	if readErr != nil {
+		s.updateProgress(job.ID, "failed", "Failed to read tape label: "+readErr.Error())
+		s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "failed to read tape label")
+		return nil, fmt.Errorf("failed to read tape label: %w", readErr)
+	}
+	if physicalLabel == nil || physicalLabel.Label != expectedLabel {
+		actualLabel := "unlabeled"
+		if physicalLabel != nil {
+			actualLabel = physicalLabel.Label
 		}
+		errMsg := fmt.Sprintf("tape label mismatch: expected %q but drive has %q", expectedLabel, actualLabel)
+		s.updateProgress(job.ID, "failed", errMsg)
+		s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, errMsg)
+		return nil, fmt.Errorf(errMsg)
+	}
+
+	s.updateProgress(job.ID, "positioning", "Tape label verified, positioning past label...")
+
+	// Position tape past the label. ReadTapeLabel already rewound, so we seek forward.
+	if err := driveSvc.SeekToFileNumber(ctx, 1); err != nil {
+		// Seek failed - re-write the label to ensure label + file mark exist, then position is correct
+		s.logger.Warn("Failed to seek past label, re-writing label to ensure file mark exists", map[string]interface{}{"error": err.Error()})
+		if writeErr := driveSvc.WriteTapeLabel(ctx, expectedLabel, expectedUUID, physicalLabel.Pool, physicalLabel.EncryptionKeyFingerprint); writeErr != nil {
+			s.updateProgress(job.ID, "failed", "Failed to re-write tape label: "+writeErr.Error())
+			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "failed to re-write tape label")
+			return nil, fmt.Errorf("failed to re-write tape label: %w", writeErr)
+		}
+		s.updateProgress(job.ID, "positioning", "Re-wrote tape label with file mark, positioned for backup")
 	}
 
 	// Stream to tape
