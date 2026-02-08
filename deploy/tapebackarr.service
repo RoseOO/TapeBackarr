@@ -1,0 +1,36 @@
+[Unit]
+Description=TapeBackarr Tape Library Management System
+Documentation=https://github.com/RoseOO/TapeBackarr
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/tapebackarr
+
+ExecStart=/opt/tapebackarr/tapebackarr -config /etc/tapebackarr/config.json
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+
+# Logging
+StandardOutput=append:/var/log/tapebackarr/service.log
+StandardError=append:/var/log/tapebackarr/service.log
+
+# Security
+NoNewPrivileges=false
+ProtectSystem=false
+ProtectHome=false
+ReadWritePaths=/var/lib/tapebackarr /var/log/tapebackarr /dev
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Allow tape device access
+SupplementaryGroups=tape
+
+[Install]
+WantedBy=multi-user.target
