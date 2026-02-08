@@ -928,6 +928,15 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		WHERE id = ?
 	`, totalBytes, endTime, tapeID)
 
+	// Update tape with encryption key info for library visibility
+	if encrypted && encryptionKeyID != nil {
+		var keyFingerprint, keyName string
+		s.db.QueryRow("SELECT key_fingerprint, name FROM encryption_keys WHERE id = ?", *encryptionKeyID).Scan(&keyFingerprint, &keyName)
+		if keyFingerprint != "" {
+			s.db.Exec("UPDATE tapes SET encryption_key_fingerprint = ?, encryption_key_name = ? WHERE id = ?", keyFingerprint, keyName, tapeID)
+		}
+	}
+
 	// Update job last run
 	s.db.Exec("UPDATE backup_jobs SET last_run_at = ? WHERE id = ?", endTime, job.ID)
 

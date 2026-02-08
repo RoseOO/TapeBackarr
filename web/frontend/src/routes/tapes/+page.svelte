@@ -17,6 +17,8 @@
     last_written_at: string | null;
     labeled_at: string | null;
     created_at: string;
+    encryption_key_fingerprint: string;
+    encryption_key_name: string;
   }
 
   interface Pool {
@@ -354,6 +356,7 @@
           <th>Status</th>
           <th>Usage</th>
           <th>Writes</th>
+          <th>Encryption</th>
           <th>Labeled</th>
           <th>Actions</th>
         </tr>
@@ -376,6 +379,13 @@
               <span class="usage-text">{formatBytes(tape.used_bytes)} / {formatBytes(tape.capacity_bytes)}</span>
             </td>
             <td>{tape.write_count}</td>
+            <td>
+              {#if tape.encryption_key_fingerprint}
+                <span class="badge badge-warning" title="Fingerprint: {tape.encryption_key_fingerprint}">🔒 {tape.encryption_key_name}</span>
+              {:else}
+                <span class="text-muted">—</span>
+              {/if}
+            </td>
             <td>{tape.labeled_at ? new Date(tape.labeled_at).toLocaleDateString() : 'No'}</td>
             <td>
               <div class="actions">
@@ -402,7 +412,7 @@
         {/each}
         {#if tapes.length === 0}
           <tr>
-            <td colspan="10" class="no-data">No tapes found. Add a tape to get started.</td>
+            <td colspan="11" class="no-data">No tapes found. Add a tape to get started.</td>
           </tr>
         {/if}
       </tbody>

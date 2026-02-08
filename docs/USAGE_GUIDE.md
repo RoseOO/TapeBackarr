@@ -505,6 +505,52 @@ cat /var/log/tapebackarr/tapebackarr.log | jq '.message'
 
 ---
 
+## Tape Inspection
+
+### Viewing Tape Contents
+
+You can inspect the contents of any tape loaded in a drive directly from the web UI:
+
+1. Navigate to **Drives**
+2. Click the **🔍 Inspect** button next to the drive containing the tape
+3. The inspection modal shows:
+   - **Label information**: Label, UUID, Pool, and timestamp from the TapeBackarr header
+   - **Encryption status**: Whether the tape data is encrypted, and the key fingerprint used
+   - **File contents**: A listing of files stored on the tape (up to 1000 entries)
+
+If the tape contains encrypted data, the file listing will not be available — the modal will display the encryption key fingerprint needed for decryption.
+
+### Encryption Management
+
+TapeBackarr tracks encryption key fingerprints on tapes for visibility in the tape library:
+
+- When a backup job uses encryption, the key fingerprint and name are stored on the tape record
+- The **Tapes** page shows a 🔒 lock icon with the key name for encrypted tapes
+- Hovering over the lock icon reveals the full key fingerprint
+- The tape label on the physical tape also stores the encryption fingerprint (6th field in the label format)
+
+### Decryption During Restore
+
+When restoring from an encrypted tape:
+
+1. TapeBackarr automatically detects the encryption key fingerprint from the tape label
+2. Ensure the corresponding encryption key is present in the **Encryption Keys** section
+3. The restore process will use the matching key to decrypt the data transparently
+
+### Restarting TapeBackarr
+
+You can restart the TapeBackarr service from the web UI:
+
+1. Navigate to **Settings**
+2. Click the **System** tab
+3. Click **🔄 Restart TapeBackarr**
+4. Confirm the restart when prompted
+5. The page will automatically reload after 5 seconds
+
+> **Warning:** Restarting will interrupt any active backup or restore operations. Use this after making configuration changes that require a service restart.
+
+---
+
 ## User Management
 
 ### User Roles

@@ -452,3 +452,15 @@ export const api = {
     method: 'DELETE',
   }),
 };
+
+// Inspect tape contents in a drive
+export async function inspectTape(driveId: number) {
+  return fetchApi(`/drives/${driveId}/inspect-tape`);
+}
+
+// Restart TapeBackarr service
+export async function restartService() {
+  return fetchApi('/settings/restart', {
+    method: 'POST',
+  });
+}
