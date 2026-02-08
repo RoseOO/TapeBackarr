@@ -57,6 +57,7 @@ type Server struct {
 	configPath            string
 	config                *config.Config
 	eventBus              *EventBus
+	telegramService       *notifications.TelegramService
 }
 
 // NewServer creates a new API server
@@ -110,6 +111,17 @@ func NewServer(
 	}
 
 	s.setupRoutes()
+
+	// Initialize Telegram bot if configured
+	if cfg != nil && cfg.Notifications.Telegram.Enabled {
+		s.telegramService = notifications.NewTelegramService(notifications.TelegramConfig{
+			Enabled:  cfg.Notifications.Telegram.Enabled,
+			BotToken: cfg.Notifications.Telegram.BotToken,
+			ChatID:   cfg.Notifications.Telegram.ChatID,
+		})
+		go s.StartTelegramBot(context.Background())
+	}
+
 	return s
 }
 
@@ -376,6 +388,213 @@ func (s *Server) Handler() http.Handler {
 	return s.router
 }
 
+// auditLog records an audit log entry for the given action
+func (s *Server) auditLog(r *http.Request, action, resourceType string, resourceID int64, details string) {
+	var userID int64
+	if claims, ok := r.Context().Value("claims").(*auth.Claims); ok {
+		userID = claims.UserID
+	}
+	ipAddress := r.RemoteAddr
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		ipAddress = fwd
+	}
+	s.db.Exec(`
+		INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details, ip_address)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, userID, action, resourceType, resourceID, details, ipAddress)
+}
+
+// StartTelegramBot registers commands and starts polling for Telegram bot interactions
+func (s *Server) StartTelegramBot(ctx context.Context) {
+	if s.telegramService == nil || !s.telegramService.IsEnabled() {
+		return
+	}
+
+	// Register commands with Telegram
+	s.telegramService.RegisterCommands(ctx)
+
+	// Start polling for commands
+	s.telegramService.StartCommandPolling(ctx, func(command, args string) string {
+		switch command {
+		case "status":
+			return s.telegramStatusCommand()
+		case "jobs":
+			return s.telegramJobsCommand()
+		case "tapes":
+			return s.telegramTapesCommand()
+		case "drives":
+			return s.telegramDrivesCommand()
+		case "active":
+			return s.telegramActiveCommand()
+		case "help":
+			return "📼 TapeBackarr Commands:\n\n" +
+				"/status - System status & loaded tape\n" +
+				"/jobs - List backup jobs\n" +
+				"/tapes - List tapes\n" +
+				"/drives - Drive status\n" +
+				"/active - Running operations\n" +
+				"/help - This message"
+		default:
+			return "Unknown command. Use /help to see available commands."
+		}
+	})
+}
+
+func (s *Server) telegramStatusCommand() string {
+	var totalTapes, activeTapes, totalJobs, runningJobs int
+	s.db.QueryRow("SELECT COUNT(*) FROM tapes").Scan(&totalTapes)
+	s.db.QueryRow("SELECT COUNT(*) FROM tapes WHERE status = 'active'").Scan(&activeTapes)
+	s.db.QueryRow("SELECT COUNT(*) FROM backup_jobs").Scan(&totalJobs)
+	s.db.QueryRow("SELECT COUNT(*) FROM backup_sets WHERE status = 'running'").Scan(&runningJobs)
+
+	msg := "📼 TapeBackarr Status\n\n"
+	msg += fmt.Sprintf("Tapes: %d total, %d active\n", totalTapes, activeTapes)
+	msg += fmt.Sprintf("Jobs: %d configured, %d running\n", totalJobs, runningJobs)
+
+	// Drive status
+	ctx := context.Background()
+	statusCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	status, err := s.tapeService.GetStatus(statusCtx)
+	if err != nil {
+		msg += "\nDrive: error"
+	} else if status.Online {
+		msg += "\nDrive: online ✅"
+		if cache := s.tapeService.GetLabelCache(); cache != nil {
+			if cached := cache.Get(s.tapeService.DevicePath(), 5*time.Minute); cached != nil && cached.Label != nil {
+				msg += fmt.Sprintf("\nLoaded tape: %s", cached.Label.Label)
+				if cached.Label.Pool != "" {
+					msg += fmt.Sprintf(" (pool: %s)", cached.Label.Pool)
+				}
+			}
+		}
+	} else {
+		msg += "\nDrive: offline"
+	}
+
+	// Active jobs
+	activeJobs := s.backupService.GetActiveJobs()
+	if len(activeJobs) > 0 {
+		msg += "\n\n⚡ Active Operations:"
+		for _, j := range activeJobs {
+			pct := float64(0)
+			if j.TotalBytes > 0 {
+				pct = float64(j.BytesWritten) / float64(j.TotalBytes) * 100
+			}
+			msg += fmt.Sprintf("\n  %s: %s (%.1f%%)", j.JobName, j.Phase, pct)
+			if j.EstimatedSecondsRemaining > 0 {
+				eta := time.Duration(j.EstimatedSecondsRemaining) * time.Second
+				msg += fmt.Sprintf(" ETA: %s", eta.Round(time.Second))
+			}
+		}
+	}
+
+	return msg
+}
+
+func (s *Server) telegramJobsCommand() string {
+	rows, _ := s.db.Query("SELECT name, backup_type, enabled, schedule_cron, last_run_at FROM backup_jobs ORDER BY name LIMIT 20")
+	if rows == nil {
+		return "Failed to query jobs"
+	}
+	defer rows.Close()
+
+	msg := "📦 Backup Jobs\n"
+	count := 0
+	for rows.Next() {
+		var name, backupType, cron string
+		var enabled bool
+		var lastRun *string
+		rows.Scan(&name, &backupType, &enabled, &cron, &lastRun)
+		status := "✅"
+		if !enabled {
+			status = "⏸"
+		}
+		schedStr := "manual"
+		if cron != "" {
+			schedStr = cron
+		}
+		msg += fmt.Sprintf("\n%s %s (%s) [%s]", status, name, backupType, schedStr)
+		count++
+	}
+	if count == 0 {
+		msg += "\nNo jobs configured"
+	}
+	return msg
+}
+
+func (s *Server) telegramTapesCommand() string {
+	rows, _ := s.db.Query("SELECT label, status, used_bytes, capacity_bytes FROM tapes ORDER BY label LIMIT 20")
+	if rows == nil {
+		return "Failed to query tapes"
+	}
+	defer rows.Close()
+
+	msg := "💾 Tapes\n"
+	count := 0
+	for rows.Next() {
+		var label, status string
+		var used, capacity int64
+		rows.Scan(&label, &status, &used, &capacity)
+		pct := float64(0)
+		if capacity > 0 {
+			pct = float64(used) / float64(capacity) * 100
+		}
+		msg += fmt.Sprintf("\n%s: %s (%.1f%% used)", label, status, pct)
+		count++
+	}
+	if count == 0 {
+		msg += "\nNo tapes"
+	}
+	return msg
+}
+
+func (s *Server) telegramDrivesCommand() string {
+	rows, _ := s.db.Query("SELECT name, device_path, status FROM tape_drives WHERE enabled = 1")
+	if rows == nil {
+		return "Failed to query drives"
+	}
+	defer rows.Close()
+
+	msg := "🔌 Tape Drives\n"
+	for rows.Next() {
+		var name, devicePath, status string
+		rows.Scan(&name, &devicePath, &status)
+		msg += fmt.Sprintf("\n%s (%s): %s", name, devicePath, status)
+	}
+	return msg
+}
+
+func (s *Server) telegramActiveCommand() string {
+	activeJobs := s.backupService.GetActiveJobs()
+	if len(activeJobs) == 0 {
+		return "No active operations"
+	}
+
+	msg := "⚡ Active Operations\n"
+	for _, j := range activeJobs {
+		pct := float64(0)
+		if j.TotalBytes > 0 {
+			pct = float64(j.BytesWritten) / float64(j.TotalBytes) * 100
+		}
+		msg += fmt.Sprintf("\n%s\n", j.JobName)
+		msg += fmt.Sprintf("  Phase: %s | Status: %s\n", j.Phase, j.Status)
+		msg += fmt.Sprintf("  Progress: %.1f%%\n", pct)
+		if j.WriteSpeed > 0 {
+			speedMB := j.WriteSpeed / (1024 * 1024)
+			msg += fmt.Sprintf("  Speed: %.1f MB/s\n", speedMB)
+		}
+		if j.EstimatedSecondsRemaining > 0 {
+			eta := time.Duration(j.EstimatedSecondsRemaining) * time.Second
+			msg += fmt.Sprintf("  ETA: %s\n", eta.Round(time.Second))
+		}
+		if j.TapeLabel != "" {
+			msg += fmt.Sprintf("  Tape: %s\n", j.TapeLabel)
+		}
+	}
+	return msg
+}
+
 // Middleware
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
@@ -493,7 +712,10 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		TotalDataBytes int64  `json:"total_data_bytes"`
 		LoadedTape     string `json:"loaded_tape"`
 		LoadedTapeUUID string `json:"loaded_tape_uuid"`
-		LoadedTapePool string `json:"loaded_tape_pool"`
+		LoadedTapePool        string `json:"loaded_tape_pool"`
+		LoadedTapeEncrypted   bool   `json:"loaded_tape_encrypted"`
+		LoadedTapeEncKeyFP    string `json:"loaded_tape_enc_key_fingerprint"`
+		LoadedTapeCompression string `json:"loaded_tape_compression"`
 	}
 
 	s.db.QueryRow("SELECT COUNT(*) FROM tapes").Scan(&stats.TotalTapes)
@@ -519,6 +741,13 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 					stats.LoadedTape = cached.Label.Label
 					stats.LoadedTapeUUID = cached.Label.UUID
 					stats.LoadedTapePool = cached.Label.Pool
+					if cached.Label.EncryptionKeyFingerprint != "" {
+						stats.LoadedTapeEncrypted = true
+						stats.LoadedTapeEncKeyFP = cached.Label.EncryptionKeyFingerprint
+					}
+					if cached.Label.CompressionType != "" {
+						stats.LoadedTapeCompression = cached.Label.CompressionType
+					}
 				}
 			} else {
 				// Cache miss - read label and cache it
@@ -528,6 +757,13 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 					stats.LoadedTape = labelData.Label
 					stats.LoadedTapeUUID = labelData.UUID
 					stats.LoadedTapePool = labelData.Pool
+					if labelData.EncryptionKeyFingerprint != "" {
+						stats.LoadedTapeEncrypted = true
+						stats.LoadedTapeEncKeyFP = labelData.EncryptionKeyFingerprint
+					}
+					if labelData.CompressionType != "" {
+						stats.LoadedTapeCompression = labelData.CompressionType
+					}
 					cache.Set(s.tapeService.DevicePath(), labelData, true)
 				}
 			}
@@ -879,6 +1115,8 @@ func (s *Server) handleDeleteTape(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.auditLog(r, "delete", "tape", id, "Deleted tape")
+
 	s.respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -1080,6 +1318,8 @@ func (s *Server) handleLabelTape(w http.ResponseWriter, r *http.Request) {
 			Details:  map[string]interface{}{"label": req.Label, "uuid": tapeUUID, "pool": poolName},
 		})
 	}
+
+	s.auditLog(r, "label", "tape", id, fmt.Sprintf("Labelled tape as '%s'", req.Label))
 
 	s.respondJSON(w, http.StatusOK, map[string]string{"status": "labeled"})
 }
@@ -1482,6 +1722,7 @@ func (s *Server) handleDetectTape(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleEjectTape(w http.ResponseWriter, r *http.Request) {
+	driveID, _ := s.getIDParam(r)
 	ctx := r.Context()
 	if s.eventBus != nil {
 		s.eventBus.Publish(SystemEvent{
@@ -1516,6 +1757,7 @@ func (s *Server) handleEjectTape(w http.ResponseWriter, r *http.Request) {
 			Message:  "Tape has been ejected from the drive",
 		})
 	}
+	s.auditLog(r, "eject", "tape_drive", driveID, "Ejected tape")
 	s.respondJSON(w, http.StatusOK, map[string]string{"status": "ejected"})
 }
 
@@ -1604,6 +1846,18 @@ func (s *Server) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id, _ := result.LastInsertId()
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "source",
+			Title:    "Source Created",
+			Message:  fmt.Sprintf("Backup source '%s' created", req.Name),
+		})
+	}
+
+	s.auditLog(r, "create", "backup_source", id, fmt.Sprintf("Created source '%s'", req.Name))
+
 	s.respondJSON(w, http.StatusCreated, map[string]int64{"id": id})
 }
 
@@ -1687,6 +1941,8 @@ func (s *Server) handleUpdateSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.auditLog(r, "update", "backup_source", id, "Updated source settings")
+
 	s.respondJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
@@ -1702,6 +1958,17 @@ func (s *Server) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "source",
+			Title:    "Source Deleted",
+			Message:  fmt.Sprintf("Backup source %d deleted", id),
+		})
+	}
+
+	s.auditLog(r, "delete", "backup_source", id, "Deleted source")
 
 	s.respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
@@ -1827,6 +2094,17 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		s.scheduler.AddJob(job)
 	}
 
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "job",
+			Title:    "Job Created",
+			Message:  fmt.Sprintf("Backup job '%s' created", req.Name),
+		})
+	}
+
+	s.auditLog(r, "create", "backup_job", id, fmt.Sprintf("Created job '%s'", req.Name))
+
 	s.respondJSON(w, http.StatusCreated, map[string]int64{"id": id})
 }
 
@@ -1937,6 +2215,8 @@ func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request) {
 	// Reload scheduler
 	s.scheduler.ReloadJobs()
 
+	s.auditLog(r, "update", "backup_job", id, "Updated job settings")
+
 	s.respondJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
@@ -1954,6 +2234,17 @@ func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.scheduler.RemoveJob(id)
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "job",
+			Title:    "Job Deleted",
+			Message:  fmt.Sprintf("Backup job %d deleted", id),
+		})
+	}
+
+	s.auditLog(r, "delete", "backup_job", id, "Deleted job")
 
 	s.respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
@@ -2027,6 +2318,8 @@ func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 			s.backupService.RunBackup(ctx, &job, &source, tapeID, backupType)
 		}()
 
+		s.auditLog(r, "run", "backup_job", id, "Started backup job")
+
 		s.respondJSON(w, http.StatusAccepted, map[string]interface{}{
 			"status":     "started",
 			"message":    fmt.Sprintf("Backup job started using tape %s from pool", tapeLabel),
@@ -2046,6 +2339,8 @@ func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 		ctx := context.Background()
 		s.backupService.RunBackup(ctx, &job, &source, tapeID, backupType)
 	}()
+
+	s.auditLog(r, "run", "backup_job", id, "Started backup job")
 
 	s.respondJSON(w, http.StatusAccepted, map[string]string{
 		"status":  "started",
@@ -2231,10 +2526,13 @@ func (s *Server) handleListBackupSets(w http.ResponseWriter, r *http.Request) {
 	query := `
 		SELECT bs.id, bs.job_id, j.name as job_name, bs.tape_id, t.label as tape_label,
 		       bs.backup_type, bs.start_time, bs.end_time, bs.status, bs.file_count, bs.total_bytes,
-		       COALESCE(bs.encrypted, 0) as encrypted, bs.encryption_key_id
+		       COALESCE(bs.encrypted, 0) as encrypted, bs.encryption_key_id,
+		       COALESCE(bs.compressed, 0) as compressed, COALESCE(bs.compression_type, 'none') as compression_type,
+		       tp.name as pool_name
 		FROM backup_sets bs
 		LEFT JOIN backup_jobs j ON bs.job_id = j.id
 		LEFT JOIN tapes t ON bs.tape_id = t.id
+		LEFT JOIN tape_pools tp ON t.pool_id = tp.id
 	`
 	var args []interface{}
 
@@ -2260,9 +2558,13 @@ func (s *Server) handleListBackupSets(w http.ResponseWriter, r *http.Request) {
 		var jobName, tapeLabel *string
 		var encrypted bool
 		var encryptionKeyID *int64
+		var compressed bool
+		var compressionType string
+		var poolName *string
 		if err := rows.Scan(&bs.ID, &bs.JobID, &jobName, &bs.TapeID, &tapeLabel,
 			&bs.BackupType, &bs.StartTime, &bs.EndTime, &bs.Status, &bs.FileCount, &bs.TotalBytes,
-			&encrypted, &encryptionKeyID); err != nil {
+			&encrypted, &encryptionKeyID,
+			&compressed, &compressionType, &poolName); err != nil {
 			continue
 		}
 		set := map[string]interface{}{
@@ -2279,6 +2581,9 @@ func (s *Server) handleListBackupSets(w http.ResponseWriter, r *http.Request) {
 			"total_bytes":       bs.TotalBytes,
 			"encrypted":         encrypted,
 			"encryption_key_id": encryptionKeyID,
+			"compressed":        compressed,
+			"compression_type":  compressionType,
+			"pool_name":         poolName,
 		}
 		sets = append(sets, set)
 	}
@@ -4708,6 +5013,8 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.auditLog(r, "create", "api_key", apiKey.ID, fmt.Sprintf("Created API key '%s' with role '%s'", req.Name, req.Role))
+
 	s.respondJSON(w, http.StatusCreated, map[string]interface{}{
 		"key":     rawKey,
 		"api_key": apiKey,
@@ -4726,6 +5033,8 @@ func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+
+	s.auditLog(r, "delete", "api_key", id, "Deleted API key")
 
 	s.respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
@@ -4994,18 +5303,75 @@ func (s *Server) handleInspectTape(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
 
-	// Read label
-	labelData, _ := driveSvc.ReadTapeLabel(ctx)
-
-	// List contents
-	entries, listErr := driveSvc.ListTapeContents(ctx, 1000)
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "tape",
+			Title:    "Tape Inspection Started",
+			Message:  fmt.Sprintf("Inspecting tape in drive %s...", devicePath),
+		})
+	}
 
 	result := map[string]interface{}{
 		"drive_id":    driveID,
 		"device_path": devicePath,
+		"status":      "inspecting",
 	}
 
-	if labelData != nil {
+	// Check drive status first
+	hwStatus, statusErr := driveSvc.GetStatus(ctx)
+	if statusErr != nil {
+		result["status"] = "error"
+		result["error"] = "Failed to query drive status: " + statusErr.Error()
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "error",
+				Category: "tape",
+				Title:    "Tape Inspection Failed",
+				Message:  "Could not query drive status: " + statusErr.Error(),
+			})
+		}
+		s.respondJSON(w, http.StatusOK, result)
+		return
+	}
+	if !hwStatus.Online {
+		result["status"] = "no_tape"
+		result["message"] = "No tape loaded in drive"
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "warning",
+				Category: "tape",
+				Title:    "Tape Inspection",
+				Message:  "No tape loaded in drive " + devicePath,
+			})
+		}
+		s.respondJSON(w, http.StatusOK, result)
+		return
+	}
+
+	result["drive_online"] = true
+
+	// Try to detect tape type
+	if ltoType, err := driveSvc.DetectTapeType(ctx); err == nil && ltoType != "" {
+		result["lto_type"] = ltoType
+		if cap, ok := models.LTOCapacities[ltoType]; ok {
+			result["capacity_bytes"] = cap
+		}
+	}
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "tape",
+			Title:    "Tape Inspection",
+			Message:  "Reading tape label...",
+		})
+	}
+
+	// Read label
+	labelData, labelErr := driveSvc.ReadTapeLabel(ctx)
+
+	if labelData != nil && labelData.Label != "" {
 		result["label"] = labelData.Label
 		result["uuid"] = labelData.UUID
 		result["pool"] = labelData.Pool
@@ -5015,17 +5381,87 @@ func (s *Server) handleInspectTape(w http.ResponseWriter, r *http.Request) {
 			result["encryption_key_fingerprint"] = labelData.EncryptionKeyFingerprint
 			result["encrypted"] = true
 		}
+		if labelData.CompressionType != "" {
+			result["compression_type"] = labelData.CompressionType
+			result["compressed"] = true
+		}
+
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "success",
+				Category: "tape",
+				Title:    "Tape Inspection",
+				Message:  fmt.Sprintf("Found TapeBackarr label: '%s' (UUID: %s)", labelData.Label, labelData.UUID),
+			})
+		}
 	} else {
 		result["has_tapebackarr_label"] = false
-	}
+		labelMsg := "Tape does not have a TapeBackarr label (foreign or blank tape)"
+		if labelErr != nil {
+			labelMsg += ": " + labelErr.Error()
+		}
+		result["label_message"] = labelMsg
 
-	if listErr != nil {
-		result["contents_error"] = listErr.Error()
-		if labelData != nil && labelData.EncryptionKeyFingerprint != "" {
-			result["contents_error"] = "Cannot read tape contents — data appears to be encrypted. Use the encryption key with fingerprint " + labelData.EncryptionKeyFingerprint + " to decrypt."
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "warning",
+				Category: "tape",
+				Title:    "Tape Inspection",
+				Message:  labelMsg,
+			})
 		}
 	}
-	result["contents"] = entries
+
+	// Try to list contents regardless of label status
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "tape",
+			Title:    "Tape Inspection",
+			Message:  "Scanning tape contents...",
+		})
+	}
+
+	// Rewind and try listing from beginning
+	driveSvc.Rewind(ctx)
+
+	// If there was a label, seek past it
+	if labelData != nil && labelData.Label != "" {
+		driveSvc.SeekToFileNumber(ctx, 1)
+	}
+
+	entries, listErr := driveSvc.ListTapeContents(ctx, 1000)
+
+	if listErr != nil {
+		contentsErrMsg := listErr.Error()
+		if labelData != nil && labelData.EncryptionKeyFingerprint != "" {
+			contentsErrMsg = fmt.Sprintf("Cannot read tape contents — data appears to be encrypted (key fingerprint: %s). Use the matching encryption key to decrypt.", labelData.EncryptionKeyFingerprint)
+		}
+		result["contents_error"] = contentsErrMsg
+	}
+
+	if entries != nil {
+		result["contents"] = entries
+	} else {
+		result["contents"] = []interface{}{}
+	}
+
+	result["status"] = "complete"
+
+	if s.eventBus != nil {
+		entryCount := 0
+		if entries != nil {
+			entryCount = len(entries)
+		}
+		s.eventBus.Publish(SystemEvent{
+			Type:     "success",
+			Category: "tape",
+			Title:    "Tape Inspection Complete",
+			Message:  fmt.Sprintf("Inspection complete: %d file entries found", entryCount),
+		})
+	}
+
+	s.auditLog(r, "inspect", "tape_drive", driveID, fmt.Sprintf("Inspected tape in drive %s", devicePath))
 
 	s.respondJSON(w, http.StatusOK, result)
 }
