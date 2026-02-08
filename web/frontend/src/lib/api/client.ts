@@ -172,6 +172,19 @@ export async function getActiveJobs() {
   return fetchApi('/jobs/active');
 }
 
+// Job control
+export async function cancelJob(id: number) {
+  return fetchApi(`/jobs/${id}/cancel`, { method: 'POST' });
+}
+
+export async function pauseJob(id: number) {
+  return fetchApi(`/jobs/${id}/pause`, { method: 'POST' });
+}
+
+export async function resumeJob(id: number) {
+  return fetchApi(`/jobs/${id}/resume`, { method: 'POST' });
+}
+
 // Scan for available tape drives
 export async function scanDrives() {
   return fetchApi('/drives/scan');

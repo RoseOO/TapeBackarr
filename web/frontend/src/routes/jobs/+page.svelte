@@ -25,9 +25,17 @@
     backup_set_id: number;
     phase: string;
     message: string;
+    status: string;
     file_count: number;
     total_files: number;
     total_bytes: number;
+    bytes_written: number;
+    write_speed: number;
+    tape_label: string;
+    tape_capacity_bytes: number;
+    tape_used_bytes: number;
+    device_path: string;
+    estimated_seconds_remaining: number;
     start_time: string;
     updated_at: string;
     log_lines: string[];
@@ -231,6 +239,68 @@
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   }
 
+  function formatSpeed(bytesPerSec: number): string {
+    if (bytesPerSec <= 0) return '---';
+    return formatBytes(bytesPerSec) + '/s';
+  }
+
+  function formatETA(seconds: number): string {
+    if (seconds <= 0) return '---';
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+
+  function getProgressPercent(job: ActiveJob): number {
+    if (job.total_bytes <= 0) return 0;
+    return Math.min(100, (job.bytes_written / job.total_bytes) * 100);
+  }
+
+  function getTapeProgressPercent(job: ActiveJob): number {
+    if (job.tape_capacity_bytes <= 0) return 0;
+    const totalUsed = job.tape_used_bytes + job.bytes_written;
+    return Math.min(100, (totalUsed / job.tape_capacity_bytes) * 100);
+  }
+
+  function formatElapsed(startTime: string): string {
+    const start = new Date(startTime).getTime();
+    const elapsed = (Date.now() - start) / 1000;
+    const h = Math.floor(elapsed / 3600);
+    const m = Math.floor((elapsed % 3600) / 60);
+    const s = Math.floor(elapsed % 60);
+    if (h > 0) return `${h}h ${m}m ${s}s`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+
+  async function handleCancel(jobId: number) {
+    if (!confirm('Are you sure you want to cancel this backup job?')) return;
+    try {
+      await api.cancelJob(jobId);
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to cancel job';
+    }
+  }
+
+  async function handlePause(jobId: number) {
+    try {
+      await api.pauseJob(jobId);
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to pause job';
+    }
+  }
+
+  async function handleResume(jobId: number) {
+    try {
+      await api.resumeJob(jobId);
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to resume job';
+    }
+  }
+
   function getPhaseIcon(phase: string): string {
     switch (phase) {
       case 'initializing': return '⏳';
@@ -268,17 +338,79 @@
       {#each activeJobs as job}
         <div class="terminal-card">
           <div class="terminal-header">
-            <span class="terminal-title">{getPhaseIcon(job.phase)} {job.job_name}</span>
-            <span class="terminal-phase">{job.phase}</span>
+            <span class="terminal-title">
+              {getPhaseIcon(job.phase)} {job.job_name}
+              {#if job.status === 'paused'}
+                <span class="status-badge paused">PAUSED</span>
+              {/if}
+            </span>
+            <div class="terminal-controls">
+              {#if job.status === 'paused'}
+                <button class="ctrl-btn resume-btn" on:click={() => handleResume(job.job_id)} title="Resume">▶ Resume</button>
+              {:else if job.phase !== 'completed' && job.phase !== 'failed' && job.phase !== 'cancelled'}
+                <button class="ctrl-btn pause-btn" on:click={() => handlePause(job.job_id)} title="Pause">⏸ Pause</button>
+              {/if}
+              {#if job.phase !== 'completed' && job.phase !== 'failed' && job.phase !== 'cancelled'}
+                <button class="ctrl-btn cancel-btn" on:click={() => handleCancel(job.job_id)} title="Cancel">⏹ Cancel</button>
+              {/if}
+              <span class="terminal-phase">{job.phase}</span>
+            </div>
           </div>
           <div class="terminal-meta">
-            {#if job.total_files > 0}
-              <span>Files: {job.file_count}/{job.total_files}</span>
+            {#if job.tape_label}
+              <span>📼 Tape: {job.tape_label}</span>
             {/if}
-            {#if job.total_bytes > 0}
-              <span>Size: {formatBytes(job.total_bytes)}</span>
+            {#if job.device_path}
+              <span>🖴 {job.device_path}</span>
             {/if}
+            <span>⏱ Elapsed: {formatElapsed(job.start_time)}</span>
             <span>Started: {new Date(job.start_time).toLocaleTimeString()}</span>
+          </div>
+          <div class="terminal-progress-section">
+            <div class="progress-row">
+              <span class="progress-label">Job Progress</span>
+              <div class="progress-bar-container">
+                <div class="progress-bar-track">
+                  <div class="progress-bar-fill job-fill" style="width: {getProgressPercent(job)}%"></div>
+                </div>
+              </div>
+              <span class="progress-value">{getProgressPercent(job).toFixed(1)}%</span>
+            </div>
+            {#if job.tape_capacity_bytes > 0}
+              <div class="progress-row">
+                <span class="progress-label">Tape Used</span>
+                <div class="progress-bar-container">
+                  <div class="progress-bar-track">
+                    <div class="progress-bar-fill tape-fill" style="width: {getTapeProgressPercent(job)}%"></div>
+                  </div>
+                </div>
+                <span class="progress-value">{getTapeProgressPercent(job).toFixed(1)}%</span>
+              </div>
+            {/if}
+          </div>
+          <div class="terminal-stats">
+            <div class="stat-item">
+              <span class="stat-label">Written</span>
+              <span class="stat-value">{formatBytes(job.bytes_written)} / {formatBytes(job.total_bytes)}</span>
+            </div>
+            <div class="stat-item">
+              <span class="stat-label">Speed</span>
+              <span class="stat-value">{formatSpeed(job.write_speed)}</span>
+            </div>
+            <div class="stat-item">
+              <span class="stat-label">ETA</span>
+              <span class="stat-value">{formatETA(job.estimated_seconds_remaining)}</span>
+            </div>
+            <div class="stat-item">
+              <span class="stat-label">Files</span>
+              <span class="stat-value">{job.file_count}/{job.total_files}</span>
+            </div>
+            {#if job.tape_capacity_bytes > 0}
+              <div class="stat-item">
+                <span class="stat-label">Tape Space</span>
+                <span class="stat-value">{formatBytes(Math.max(0, job.tape_capacity_bytes - job.tape_used_bytes - job.bytes_written))} free</span>
+              </div>
+            {/if}
           </div>
           <div class="terminal-output">
             {#each job.log_lines as line}
@@ -572,6 +704,47 @@
     font-size: 0.9rem;
   }
 
+  .terminal-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .ctrl-btn {
+    background: none;
+    border: 1px solid #555;
+    color: #ccc;
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.7rem;
+    cursor: pointer;
+    font-family: inherit;
+  }
+
+  .ctrl-btn:hover {
+    background: #3a3a5a;
+  }
+
+  .pause-btn { border-color: #f39c12; color: #f39c12; }
+  .pause-btn:hover { background: rgba(243, 156, 18, 0.15); }
+  .resume-btn { border-color: #2ecc71; color: #2ecc71; }
+  .resume-btn:hover { background: rgba(46, 204, 113, 0.15); }
+  .cancel-btn { border-color: #e74c3c; color: #e74c3c; }
+  .cancel-btn:hover { background: rgba(231, 76, 60, 0.15); }
+
+  .status-badge {
+    font-size: 0.6rem;
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    font-weight: 700;
+    margin-left: 0.3rem;
+  }
+
+  .status-badge.paused {
+    background: #f39c12;
+    color: #000;
+  }
+
   .terminal-phase {
     color: #f9e2af;
     font-size: 0.75rem;
@@ -602,6 +775,89 @@
     color: #a6e3a1;
     white-space: pre-wrap;
     word-break: break-all;
+  }
+
+  .terminal-progress-section {
+    padding: 0.5rem 1rem;
+    background: #222238;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+
+  .progress-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .progress-label {
+    color: #888;
+    font-size: 0.7rem;
+    width: 7em;
+    flex-shrink: 0;
+    font-family: monospace;
+  }
+
+  .progress-bar-container {
+    flex: 1;
+  }
+
+  .progress-bar-track {
+    height: 8px;
+    background: #333;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+
+  .progress-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.5s ease;
+  }
+
+  .job-fill {
+    background: linear-gradient(90deg, #4a4aff, #16c784);
+  }
+
+  .tape-fill {
+    background: linear-gradient(90deg, #f39c12, #e74c3c);
+  }
+
+  .progress-value {
+    color: #aaa;
+    font-size: 0.7rem;
+    width: 4em;
+    text-align: right;
+    flex-shrink: 0;
+    font-family: monospace;
+  }
+
+  .terminal-stats {
+    display: flex;
+    gap: 1.5rem;
+    padding: 0.5rem 1rem;
+    background: #252537;
+    flex-wrap: wrap;
+  }
+
+  .stat-item {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .stat-label {
+    color: #666;
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    font-family: monospace;
+  }
+
+  .stat-value {
+    color: #89dceb;
+    font-size: 0.8rem;
+    font-weight: 600;
+    font-family: monospace;
   }
 
   .recommendation-box {

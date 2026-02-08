@@ -2,6 +2,7 @@
   import Sidebar from '$lib/components/Sidebar.svelte';
   import ToastNotifications from '$lib/components/ToastNotifications.svelte';
   import VirtualConsole from '$lib/components/VirtualConsole.svelte';
+  import ProgressToolbar from '$lib/components/ProgressToolbar.svelte';
   import { page } from '$app/stores';
   import { auth } from '$lib/stores/auth';
 
@@ -22,6 +23,7 @@
   </main>
   {#if showSidebar}
     <ToastNotifications />
+    <ProgressToolbar />
     <VirtualConsole />
   {/if}
 </div>

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/RoseOO/TapeBackarr/internal/database"
@@ -35,27 +36,74 @@ type FileInfo struct {
 
 // JobProgress tracks the progress of a running backup job
 type JobProgress struct {
-	JobID       int64     `json:"job_id"`
-	JobName     string    `json:"job_name"`
-	BackupSetID int64     `json:"backup_set_id"`
-	Phase       string    `json:"phase"`
-	Message     string    `json:"message"`
-	FileCount   int64     `json:"file_count"`
-	TotalFiles  int64     `json:"total_files"`
-	TotalBytes  int64     `json:"total_bytes"`
-	StartTime   time.Time `json:"start_time"`
-	UpdatedAt   time.Time `json:"updated_at"`
-	LogLines    []string  `json:"log_lines"`
+	JobID                   int64     `json:"job_id"`
+	JobName                 string    `json:"job_name"`
+	BackupSetID             int64     `json:"backup_set_id"`
+	Phase                   string    `json:"phase"`
+	Message                 string    `json:"message"`
+	Status                  string    `json:"status"` // running, paused, cancelled
+	FileCount               int64     `json:"file_count"`
+	TotalFiles              int64     `json:"total_files"`
+	TotalBytes              int64     `json:"total_bytes"`
+	BytesWritten            int64     `json:"bytes_written"`
+	WriteSpeed              float64   `json:"write_speed"`   // bytes per second (recent average)
+	TapeLabel               string    `json:"tape_label"`
+	TapeCapacityBytes       int64     `json:"tape_capacity_bytes"`
+	TapeUsedBytes           int64     `json:"tape_used_bytes"` // used before this backup
+	DevicePath              string    `json:"device_path"`
+	EstimatedSecondsRemaining float64 `json:"estimated_seconds_remaining"`
+	StartTime               time.Time `json:"start_time"`
+	UpdatedAt               time.Time `json:"updated_at"`
+	LogLines                []string  `json:"log_lines"`
+}
+
+// EventCallback is called when backup progress events occur (for SSE/console)
+type EventCallback func(eventType, category, title, message string)
+
+// countingReader wraps an io.Reader and counts bytes read through it
+type countingReader struct {
+	reader   io.Reader
+	count    int64
+	mu       sync.Mutex
+	callback func(bytesRead int64)
+	paused   *int32 // atomic: 0=running, 1=paused
+}
+
+func (cr *countingReader) Read(p []byte) (int, error) {
+	// Check pause state
+	for cr.paused != nil && atomic.LoadInt32(cr.paused) == 1 {
+		time.Sleep(100 * time.Millisecond)
+	}
+	n, err := cr.reader.Read(p)
+	if n > 0 {
+		cr.mu.Lock()
+		cr.count += int64(n)
+		total := cr.count
+		cr.mu.Unlock()
+		if cr.callback != nil {
+			cr.callback(total)
+		}
+	}
+	return n, err
+}
+
+func (cr *countingReader) bytesRead() int64 {
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+	return cr.count
 }
 
 // Service handles backup operations
 type Service struct {
-	db          *database.DB
-	tapeService *tape.Service
-	logger      *logging.Logger
-	blockSize   int
-	mu          sync.Mutex
-	activeJobs  map[int64]*JobProgress
+	db            *database.DB
+	tapeService   *tape.Service
+	logger        *logging.Logger
+	blockSize     int
+	mu            sync.Mutex
+	activeJobs    map[int64]*JobProgress
+	cancelFuncs   map[int64]context.CancelFunc
+	pauseFlags    map[int64]*int32
+	EventCallback EventCallback
 }
 
 // NewService creates a new backup service
@@ -66,6 +114,8 @@ func NewService(db *database.DB, tapeService *tape.Service, logger *logging.Logg
 		logger:      logger,
 		blockSize:   blockSize,
 		activeJobs:  make(map[int64]*JobProgress),
+		cancelFuncs: make(map[int64]context.CancelFunc),
+		pauseFlags:  make(map[int64]*int32),
 	}
 }
 
@@ -80,9 +130,67 @@ func (s *Service) GetActiveJobs() []*JobProgress {
 	return jobs
 }
 
-func (s *Service) updateProgress(jobID int64, phase, message string) {
+// CancelJob cancels a running backup job
+func (s *Service) CancelJob(jobID int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if cancel, ok := s.cancelFuncs[jobID]; ok {
+		if p, ok := s.activeJobs[jobID]; ok {
+			p.Status = "cancelled"
+			p.Phase = "cancelled"
+			p.Message = "Job cancelled by user"
+			p.UpdatedAt = time.Now()
+			p.LogLines = append(p.LogLines, fmt.Sprintf("[%s] Job cancelled by user", time.Now().Format("15:04:05")))
+		}
+		cancel()
+		return true
+	}
+	return false
+}
+
+// PauseJob pauses a running backup job
+func (s *Service) PauseJob(jobID int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if flag, ok := s.pauseFlags[jobID]; ok {
+		atomic.StoreInt32(flag, 1)
+		if p, ok := s.activeJobs[jobID]; ok {
+			p.Status = "paused"
+			p.Message = "Job paused by user"
+			p.UpdatedAt = time.Now()
+			p.LogLines = append(p.LogLines, fmt.Sprintf("[%s] Job paused by user", time.Now().Format("15:04:05")))
+		}
+		return true
+	}
+	return false
+}
+
+// ResumeJob resumes a paused backup job
+func (s *Service) ResumeJob(jobID int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if flag, ok := s.pauseFlags[jobID]; ok {
+		atomic.StoreInt32(flag, 0)
+		if p, ok := s.activeJobs[jobID]; ok {
+			p.Status = "running"
+			p.Message = "Job resumed by user"
+			p.UpdatedAt = time.Now()
+			p.LogLines = append(p.LogLines, fmt.Sprintf("[%s] Job resumed by user", time.Now().Format("15:04:05")))
+		}
+		return true
+	}
+	return false
+}
+
+// emitEvent sends an event to the EventCallback if configured
+func (s *Service) emitEvent(eventType, category, title, message string) {
+	if s.EventCallback != nil {
+		s.EventCallback(eventType, category, title, message)
+	}
+}
+
+func (s *Service) updateProgress(jobID int64, phase, message string) {
+	s.mu.Lock()
 	if p, ok := s.activeJobs[jobID]; ok {
 		p.Phase = phase
 		p.Message = message
@@ -92,7 +200,26 @@ func (s *Service) updateProgress(jobID int64, phase, message string) {
 		if len(p.LogLines) > 100 {
 			p.LogLines = p.LogLines[len(p.LogLines)-100:]
 		}
+		// Update write speed and ETA
+		elapsed := time.Since(p.StartTime).Seconds()
+		if elapsed > 0 && p.BytesWritten > 0 {
+			p.WriteSpeed = float64(p.BytesWritten) / elapsed
+			remainingBytes := p.TotalBytes - p.BytesWritten
+			if p.WriteSpeed > 0 && remainingBytes > 0 {
+				p.EstimatedSecondsRemaining = float64(remainingBytes) / p.WriteSpeed
+			}
+		}
 	}
+	s.mu.Unlock()
+
+	// Emit event to system console
+	eventType := "info"
+	if phase == "failed" || phase == "cancelled" {
+		eventType = "error"
+	} else if phase == "completed" {
+		eventType = "success"
+	}
+	s.emitEvent(eventType, "backup", fmt.Sprintf("Backup: %s", phase), message)
 }
 
 // ScanSource scans a backup source and returns file information using concurrent directory traversal
@@ -272,7 +399,7 @@ func (s *Service) CompareWithSnapshot(ctx context.Context, currentFiles []FileIn
 }
 
 // StreamToTape streams files directly to tape using tar
-func (s *Service) StreamToTape(ctx context.Context, sourcePath string, files []FileInfo, devicePath string, progressCb func(bytesWritten int64)) error {
+func (s *Service) StreamToTape(ctx context.Context, sourcePath string, files []FileInfo, devicePath string, progressCb func(bytesWritten int64), pauseFlag *int32) error {
 	if len(files) == 0 {
 		return nil
 	}
@@ -310,13 +437,15 @@ func (s *Service) StreamToTape(ctx context.Context, sourcePath string, files []F
 		tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
 		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", "256M", "-o", devicePath)
 
-		// Pipe tar output to mbuffer
+		// Pipe tar output through counting reader to mbuffer
 		tarCmd.Dir = sourcePath
 		pipe, err := tarCmd.StdoutPipe()
 		if err != nil {
 			return fmt.Errorf("failed to create pipe: %w", err)
 		}
-		mbufferCmd.Stdin = pipe
+
+		cr := &countingReader{reader: pipe, callback: progressCb, paused: pauseFlag}
+		mbufferCmd.Stdin = cr
 
 		if err := tarCmd.Start(); err != nil {
 			return fmt.Errorf("failed to start tar: %w", err)
@@ -329,6 +458,9 @@ func (s *Service) StreamToTape(ctx context.Context, sourcePath string, files []F
 		tarErr := tarCmd.Wait()
 		mbufferErr := mbufferCmd.Wait()
 
+		if ctx.Err() != nil {
+			return fmt.Errorf("backup cancelled: %w", ctx.Err())
+		}
 		if tarErr != nil {
 			return fmt.Errorf("tar failed: %w", tarErr)
 		}
@@ -342,6 +474,9 @@ func (s *Service) StreamToTape(ctx context.Context, sourcePath string, files []F
 		cmd.Dir = sourcePath
 
 		output, err := cmd.CombinedOutput()
+		if ctx.Err() != nil {
+			return fmt.Errorf("backup cancelled: %w", ctx.Err())
+		}
 		if err != nil {
 			return fmt.Errorf("tar failed: %s", string(output))
 		}
@@ -351,7 +486,7 @@ func (s *Service) StreamToTape(ctx context.Context, sourcePath string, files []F
 }
 
 // StreamToTapeEncrypted streams files directly to tape with encryption using openssl
-func (s *Service) StreamToTapeEncrypted(ctx context.Context, sourcePath string, files []FileInfo, devicePath string, encryptionKey string, progressCb func(bytesWritten int64)) error {
+func (s *Service) StreamToTapeEncrypted(ctx context.Context, sourcePath string, files []FileInfo, devicePath string, encryptionKey string, progressCb func(bytesWritten int64), pauseFlag *int32) error {
 	if len(files) == 0 {
 		return nil
 	}
@@ -396,12 +531,13 @@ func (s *Service) StreamToTapeEncrypted(ctx context.Context, sourcePath string, 
 	// Check if mbuffer is available
 	_, mbufferErr := exec.LookPath("mbuffer")
 
-	// Set up the pipeline
+	// Set up the pipeline with counting reader for progress tracking
 	tarPipe, err := tarCmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("failed to create tar pipe: %w", err)
 	}
-	opensslCmd.Stdin = tarPipe
+	cr := &countingReader{reader: tarPipe, callback: progressCb, paused: pauseFlag}
+	opensslCmd.Stdin = cr
 
 	if mbufferErr == nil {
 		// Use mbuffer for buffering before writing to tape
@@ -432,6 +568,9 @@ func (s *Service) StreamToTapeEncrypted(ctx context.Context, sourcePath string, 
 		opensslErr := opensslCmd.Wait()
 		mbufferErr := mbufferCmd.Wait()
 
+		if ctx.Err() != nil {
+			return fmt.Errorf("backup cancelled: %w", ctx.Err())
+		}
 		if tarErr != nil {
 			return fmt.Errorf("tar failed: %w", tarErr)
 		}
@@ -462,6 +601,9 @@ func (s *Service) StreamToTapeEncrypted(ctx context.Context, sourcePath string, 
 		tarErr := tarCmd.Wait()
 		opensslErr := opensslCmd.Wait()
 
+		if ctx.Err() != nil {
+			return fmt.Errorf("backup cancelled: %w", ctx.Err())
+		}
 		if tarErr != nil {
 			return fmt.Errorf("tar failed: %w", tarErr)
 		}
@@ -512,29 +654,54 @@ func (s *Service) CreateSnapshot(files []FileInfo) ([]byte, error) {
 func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *models.BackupSource, tapeID int64, backupType models.BackupType) (*models.BackupSet, error) {
 	startTime := time.Now()
 
+	// Create cancellable context
+	ctx, cancel := context.WithCancel(ctx)
+	var pauseFlag int32
+
+	// Look up tape info for progress display
+	var tapeLabel string
+	var tapeCapacity, tapeUsed int64
+	if err := s.db.QueryRow("SELECT label, capacity_bytes, used_bytes FROM tapes WHERE id = ?", tapeID).Scan(&tapeLabel, &tapeCapacity, &tapeUsed); err != nil {
+		s.logger.Warn("Could not look up tape info for progress display", map[string]interface{}{
+			"tape_id": tapeID,
+			"error":   err.Error(),
+		})
+	}
+
 	// Register active job progress
 	s.mu.Lock()
 	s.activeJobs[job.ID] = &JobProgress{
-		JobID:     job.ID,
-		JobName:   job.Name,
-		Phase:     "initializing",
-		Message:   "Starting backup job...",
-		StartTime: startTime,
-		UpdatedAt: startTime,
-		LogLines:  []string{fmt.Sprintf("[%s] Starting backup job: %s", startTime.Format("15:04:05"), job.Name)},
+		JobID:             job.ID,
+		JobName:           job.Name,
+		Phase:             "initializing",
+		Status:            "running",
+		Message:           "Starting backup job...",
+		TapeLabel:         tapeLabel,
+		TapeCapacityBytes: tapeCapacity,
+		TapeUsedBytes:     tapeUsed,
+		StartTime:         startTime,
+		UpdatedAt:         startTime,
+		LogLines:          []string{fmt.Sprintf("[%s] Starting backup job: %s", startTime.Format("15:04:05"), job.Name)},
 	}
+	s.cancelFuncs[job.ID] = cancel
+	s.pauseFlags[job.ID] = &pauseFlag
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
 		delete(s.activeJobs, job.ID)
+		delete(s.cancelFuncs, job.ID)
+		delete(s.pauseFlags, job.ID)
 		s.mu.Unlock()
+		cancel()
 	}()
 
+	s.emitEvent("info", "backup", "Backup Started", fmt.Sprintf("Starting backup job: %s (tape: %s)", job.Name, tapeLabel))
 	s.logger.Info("Starting backup job", map[string]interface{}{
 		"job_id":      job.ID,
 		"job_name":    job.Name,
 		"source_path": source.Path,
 		"backup_type": backupType,
+		"tape_label":  tapeLabel,
 	})
 
 	// Create backup set record
@@ -552,6 +719,10 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		p.BackupSetID = backupSetID
 	}
 	s.mu.Unlock()
+
+	// Mark drive as busy
+	s.db.Exec("UPDATE tape_drives SET status = 'busy' WHERE current_tape_id = ?", tapeID)
+	defer s.db.Exec("UPDATE tape_drives SET status = 'ready' WHERE current_tape_id = ?", tapeID)
 
 	// Scan source
 	s.updateProgress(job.ID, "scanning", fmt.Sprintf("Scanning source: %s", source.Path))
@@ -614,6 +785,33 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		return nil, fmt.Errorf("no drive found with specified tape: %w", err)
 	}
 
+	// Update device path in progress
+	s.mu.Lock()
+	if p, ok := s.activeJobs[job.ID]; ok {
+		p.DevicePath = devicePath
+	}
+	s.mu.Unlock()
+
+	// Progress callback for real-time byte tracking
+	progressCb := func(bytesWritten int64) {
+		s.mu.Lock()
+		if p, ok := s.activeJobs[job.ID]; ok {
+			p.BytesWritten = bytesWritten
+			elapsed := time.Since(p.StartTime).Seconds()
+			if elapsed > 0 {
+				p.WriteSpeed = float64(bytesWritten) / elapsed
+				remainingBytes := p.TotalBytes - bytesWritten
+				if p.WriteSpeed > 0 && remainingBytes > 0 {
+					p.EstimatedSecondsRemaining = float64(remainingBytes) / p.WriteSpeed
+				} else {
+					p.EstimatedSecondsRemaining = 0
+				}
+			}
+			p.UpdatedAt = time.Now()
+		}
+		s.mu.Unlock()
+	}
+
 	// Stream to tape
 	s.updateProgress(job.ID, "streaming", fmt.Sprintf("Streaming %d files (%d bytes) to tape device %s", len(files), totalBytes, devicePath))
 	s.logger.Info("Streaming to tape", map[string]interface{}{
@@ -640,17 +838,19 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 			"key_id": *job.EncryptionKeyID,
 		})
 
-		if err := s.StreamToTapeEncrypted(ctx, source.Path, files, devicePath, encKey, nil); err != nil {
+		if err := s.StreamToTapeEncrypted(ctx, source.Path, files, devicePath, encKey, progressCb, &pauseFlag); err != nil {
 			s.updateProgress(job.ID, "failed", "Stream failed: "+err.Error())
 			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
+			s.emitEvent("error", "backup", "Backup Failed", fmt.Sprintf("Job %s failed: %s", job.Name, err.Error()))
 			return nil, fmt.Errorf("failed to stream encrypted backup to tape: %w", err)
 		}
 		encrypted = true
 		encryptionKeyID = job.EncryptionKeyID
 	} else {
-		if err := s.StreamToTape(ctx, source.Path, files, devicePath, nil); err != nil {
+		if err := s.StreamToTape(ctx, source.Path, files, devicePath, progressCb, &pauseFlag); err != nil {
 			s.updateProgress(job.ID, "failed", "Stream failed: "+err.Error())
 			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
+			s.emitEvent("error", "backup", "Backup Failed", fmt.Sprintf("Job %s failed: %s", job.Name, err.Error()))
 			return nil, fmt.Errorf("failed to stream to tape: %w", err)
 		}
 	}
@@ -732,6 +932,7 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 	s.db.Exec("UPDATE backup_jobs SET last_run_at = ? WHERE id = ?", endTime, job.ID)
 
 	s.updateProgress(job.ID, "completed", fmt.Sprintf("Backup completed: %d files, %d bytes in %s", len(files), totalBytes, endTime.Sub(startTime).String()))
+	s.emitEvent("success", "backup", "Backup Completed", fmt.Sprintf("Job %s completed: %d files, %d bytes in %s", job.Name, len(files), totalBytes, endTime.Sub(startTime).String()))
 	s.logger.Info("Backup completed", map[string]interface{}{
 		"job_id":      job.ID,
 		"file_count":  len(files),

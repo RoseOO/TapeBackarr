@@ -21,9 +21,17 @@
     backup_set_id: number;
     phase: string;
     message: string;
+    status: string;
     file_count: number;
     total_files: number;
     total_bytes: number;
+    bytes_written: number;
+    write_speed: number;
+    tape_label: string;
+    tape_capacity_bytes: number;
+    tape_used_bytes: number;
+    device_path: string;
+    estimated_seconds_remaining: number;
     start_time: string;
     updated_at: string;
     log_lines: string[];
@@ -67,6 +75,26 @@
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  }
+
+  function formatSpeed(bytesPerSec: number): string {
+    if (bytesPerSec <= 0) return '---';
+    return formatBytes(bytesPerSec) + '/s';
+  }
+
+  function formatETA(seconds: number): string {
+    if (seconds <= 0) return '---';
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+
+  function getProgressPercent(job: ActiveJob): number {
+    if (job.total_bytes <= 0) return 0;
+    return Math.min(100, (job.bytes_written / job.total_bytes) * 100);
   }
 
   function getPhaseIcon(phase: string): string {
@@ -184,18 +212,37 @@
       {#each activeJobs as job}
         <div class="terminal-card">
           <div class="terminal-header">
-            <span class="terminal-title">{getPhaseIcon(job.phase)} {job.job_name}</span>
+            <span class="terminal-title">
+              {getPhaseIcon(job.phase)} {job.job_name}
+              {#if job.status === 'paused'}
+                <span class="status-badge paused">PAUSED</span>
+              {/if}
+            </span>
             <span class="terminal-phase badge badge-warning">{job.phase}</span>
           </div>
           <div class="terminal-meta">
-            {#if job.total_files > 0}
-              <span>Files: {job.file_count}/{job.total_files}</span>
+            {#if job.tape_label}
+              <span>📼 {job.tape_label}</span>
             {/if}
-            {#if job.total_bytes > 0}
-              <span>Size: {formatBytes(job.total_bytes)}</span>
+            {#if job.bytes_written > 0}
+              <span>{formatBytes(job.bytes_written)} / {formatBytes(job.total_bytes)}</span>
+            {/if}
+            {#if job.write_speed > 0}
+              <span>⚡ {formatSpeed(job.write_speed)}</span>
+            {/if}
+            {#if job.estimated_seconds_remaining > 0}
+              <span>ETA: {formatETA(job.estimated_seconds_remaining)}</span>
             {/if}
             <span>Started: {new Date(job.start_time).toLocaleTimeString()}</span>
           </div>
+          {#if job.total_bytes > 0}
+            <div class="terminal-progress">
+              <div class="dash-progress-bar">
+                <div class="dash-progress-fill" style="width: {getProgressPercent(job)}%"></div>
+              </div>
+              <span class="dash-progress-text">{getProgressPercent(job).toFixed(1)}%</span>
+            </div>
+          {/if}
           <div class="terminal-output">
             {#each job.log_lines as line}
               <div class="terminal-line">{line}</div>
@@ -390,5 +437,49 @@
     color: #a6e3a1;
     white-space: pre-wrap;
     word-break: break-all;
+  }
+
+  .status-badge {
+    font-size: 0.6rem;
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    font-weight: 700;
+    margin-left: 0.3rem;
+  }
+
+  .status-badge.paused {
+    background: #f39c12;
+    color: #000;
+  }
+
+  .terminal-progress {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 1rem;
+    background: #222238;
+  }
+
+  .dash-progress-bar {
+    flex: 1;
+    height: 8px;
+    background: #333;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+
+  .dash-progress-fill {
+    height: 100%;
+    border-radius: 4px;
+    background: linear-gradient(90deg, #4a4aff, #16c784);
+    transition: width 0.5s ease;
+  }
+
+  .dash-progress-text {
+    color: #aaa;
+    font-size: 0.7rem;
+    font-family: monospace;
+    width: 4em;
+    text-align: right;
   }
 </style>

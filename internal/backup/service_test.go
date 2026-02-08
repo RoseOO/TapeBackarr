@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -331,5 +332,234 @@ func TestFileInfoHashField(t *testing.T) {
 
 	if fi.Hash != "abc123" {
 		t.Errorf("expected hash 'abc123', got '%s'", fi.Hash)
+	}
+}
+
+func TestGetActiveJobs(t *testing.T) {
+	svc := NewService(nil, nil, nil, 65536)
+
+	// Initially no active jobs
+	jobs := svc.GetActiveJobs()
+	if len(jobs) != 0 {
+		t.Errorf("expected 0 active jobs, got %d", len(jobs))
+	}
+
+	// Add an active job manually
+	svc.mu.Lock()
+	svc.activeJobs[1] = &JobProgress{
+		JobID:   1,
+		JobName: "test-job",
+		Phase:   "streaming",
+		Status:  "running",
+	}
+	svc.mu.Unlock()
+
+	jobs = svc.GetActiveJobs()
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 active job, got %d", len(jobs))
+	}
+	if jobs[0].JobName != "test-job" {
+		t.Errorf("expected job name 'test-job', got '%s'", jobs[0].JobName)
+	}
+	if jobs[0].Status != "running" {
+		t.Errorf("expected status 'running', got '%s'", jobs[0].Status)
+	}
+}
+
+func TestCancelJob(t *testing.T) {
+	svc := NewService(nil, nil, nil, 65536)
+
+	// Cancel non-existent job returns false
+	if svc.CancelJob(999) {
+		t.Error("expected CancelJob to return false for non-existent job")
+	}
+
+	// Add a cancellable job
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	svc.mu.Lock()
+	svc.activeJobs[1] = &JobProgress{
+		JobID:   1,
+		JobName: "test-job",
+		Phase:   "streaming",
+		Status:  "running",
+	}
+	svc.cancelFuncs[1] = cancel
+	svc.mu.Unlock()
+
+	// Cancel should succeed
+	if !svc.CancelJob(1) {
+		t.Error("expected CancelJob to return true")
+	}
+
+	// Verify context is cancelled
+	if ctx.Err() == nil {
+		t.Error("expected context to be cancelled")
+	}
+
+	// Verify status updated
+	svc.mu.Lock()
+	p := svc.activeJobs[1]
+	svc.mu.Unlock()
+	if p.Status != "cancelled" {
+		t.Errorf("expected status 'cancelled', got '%s'", p.Status)
+	}
+}
+
+func TestPauseResumeJob(t *testing.T) {
+	svc := NewService(nil, nil, nil, 65536)
+
+	// Pause non-existent job returns false
+	if svc.PauseJob(999) {
+		t.Error("expected PauseJob to return false for non-existent job")
+	}
+
+	// Add a pausable job
+	var pauseFlag int32
+	svc.mu.Lock()
+	svc.activeJobs[1] = &JobProgress{
+		JobID:   1,
+		JobName: "test-job",
+		Phase:   "streaming",
+		Status:  "running",
+	}
+	svc.pauseFlags[1] = &pauseFlag
+	svc.mu.Unlock()
+
+	// Pause should succeed
+	if !svc.PauseJob(1) {
+		t.Error("expected PauseJob to return true")
+	}
+
+	svc.mu.Lock()
+	p := svc.activeJobs[1]
+	svc.mu.Unlock()
+	if p.Status != "paused" {
+		t.Errorf("expected status 'paused', got '%s'", p.Status)
+	}
+
+	// Resume should succeed
+	if !svc.ResumeJob(1) {
+		t.Error("expected ResumeJob to return true")
+	}
+
+	svc.mu.Lock()
+	p = svc.activeJobs[1]
+	svc.mu.Unlock()
+	if p.Status != "running" {
+		t.Errorf("expected status 'running', got '%s'", p.Status)
+	}
+}
+
+func TestEventCallback(t *testing.T) {
+	svc := NewService(nil, nil, nil, 65536)
+
+	var receivedEvents []string
+	svc.EventCallback = func(eventType, category, title, message string) {
+		receivedEvents = append(receivedEvents, eventType+":"+title)
+	}
+
+	// Register a job
+	svc.mu.Lock()
+	svc.activeJobs[1] = &JobProgress{
+		JobID:   1,
+		JobName: "test-job",
+		Phase:   "initializing",
+		Status:  "running",
+	}
+	svc.mu.Unlock()
+
+	// Update progress should emit event
+	svc.updateProgress(1, "scanning", "Scanning files...")
+
+	if len(receivedEvents) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(receivedEvents))
+	}
+	if receivedEvents[0] != "info:Backup: scanning" {
+		t.Errorf("unexpected event: %s", receivedEvents[0])
+	}
+
+	// Completed event should be success type
+	svc.updateProgress(1, "completed", "Done")
+	if len(receivedEvents) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(receivedEvents))
+	}
+	if receivedEvents[1] != "success:Backup: completed" {
+		t.Errorf("unexpected event: %s", receivedEvents[1])
+	}
+}
+
+func TestCountingReader(t *testing.T) {
+	data := []byte("hello world test data for counting")
+	reader := bytes.NewReader(data)
+
+	var lastCount int64
+	cr := &countingReader{
+		reader: reader,
+		callback: func(bytesRead int64) {
+			lastCount = bytesRead
+		},
+	}
+
+	buf := make([]byte, 10)
+
+	// First read
+	n, err := cr.Read(buf)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if n != 10 {
+		t.Errorf("expected 10 bytes read, got %d", n)
+	}
+	if lastCount != 10 {
+		t.Errorf("expected callback with 10, got %d", lastCount)
+	}
+
+	// Second read
+	n, err = cr.Read(buf)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if lastCount != int64(10+n) {
+		t.Errorf("expected cumulative count %d, got %d", 10+n, lastCount)
+	}
+
+	// Total bytes tracked
+	total := cr.bytesRead()
+	if total != int64(10+n) {
+		t.Errorf("expected total %d, got %d", 10+n, total)
+	}
+}
+
+func TestJobProgressFields(t *testing.T) {
+	p := JobProgress{
+		JobID:                   1,
+		JobName:                 "test",
+		Status:                  "running",
+		Phase:                   "streaming",
+		BytesWritten:            1000,
+		WriteSpeed:              100.5,
+		TapeLabel:               "TAPE001",
+		TapeCapacityBytes:       12000000000000,
+		TapeUsedBytes:           5000000000000,
+		DevicePath:              "/dev/nst0",
+		EstimatedSecondsRemaining: 3600.5,
+	}
+
+	if p.BytesWritten != 1000 {
+		t.Errorf("expected BytesWritten 1000, got %d", p.BytesWritten)
+	}
+	if p.WriteSpeed != 100.5 {
+		t.Errorf("expected WriteSpeed 100.5, got %f", p.WriteSpeed)
+	}
+	if p.TapeLabel != "TAPE001" {
+		t.Errorf("expected TapeLabel 'TAPE001', got '%s'", p.TapeLabel)
+	}
+	if p.DevicePath != "/dev/nst0" {
+		t.Errorf("expected DevicePath '/dev/nst0', got '%s'", p.DevicePath)
+	}
+	if p.Status != "running" {
+		t.Errorf("expected Status 'running', got '%s'", p.Status)
 	}
 }
