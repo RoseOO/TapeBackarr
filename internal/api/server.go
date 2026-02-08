@@ -2609,9 +2609,12 @@ func (s *Server) handleProxmoxUpdateJob(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Note: This query construction is safe because:
+	// 1. Column names in 'updates' are hardcoded strings, not user input
+	// 2. All values are properly parameterized with '?' placeholders
 	args = append(args, id)
 	query := "UPDATE proxmox_backup_jobs SET " + strings.Join(updates, ", ") + " WHERE id = ?"
-	
+
 	_, err = s.db.Exec(query, args...)
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, err.Error())

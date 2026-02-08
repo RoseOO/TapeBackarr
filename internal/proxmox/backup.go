@@ -197,10 +197,6 @@ func (s *BackupService) BackupGuest(ctx context.Context, req *ProxmoxBackupReque
 		vzdumpOptions["compress"] = req.Compress
 	}
 
-	// For tape backup, we need to capture vzdump output and stream to tape
-	// vzdump doesn't support direct tape output, so we use a named pipe
-	pipePath := filepath.Join(s.tmpDir, fmt.Sprintf("vzdump-pipe-%d-%d", req.VMID, time.Now().UnixNano()))
-	
 	// Create metadata for this backup
 	metadata := &ProxmoxBackupMetadata{
 		BackupID:   backupID,
@@ -236,7 +232,7 @@ func (s *BackupService) BackupGuest(ctx context.Context, req *ProxmoxBackupReque
 	}
 
 	// Execute vzdump and stream to tape
-	totalBytes, err := s.executeVzdumpToTape(ctx, req, devicePath, pipePath)
+	totalBytes, err := s.executeVzdumpToTape(ctx, req, devicePath)
 	if err != nil {
 		result.Status = "failed"
 		result.Error = err.Error()
@@ -283,7 +279,7 @@ func (s *BackupService) BackupGuest(ctx context.Context, req *ProxmoxBackupReque
 }
 
 // executeVzdumpToTape runs vzdump and streams output to tape
-func (s *BackupService) executeVzdumpToTape(ctx context.Context, req *ProxmoxBackupRequest, devicePath, pipePath string) (int64, error) {
+func (s *BackupService) executeVzdumpToTape(ctx context.Context, req *ProxmoxBackupRequest, devicePath string) (int64, error) {
 	// Build vzdump command
 	// vzdump outputs to stdout when using --stdout
 	args := []string{

@@ -568,13 +568,13 @@ func (c *Client) GetNodeStorage(ctx context.Context, node string) ([]Storage, er
 func (c *Client) StartVZDump(ctx context.Context, node string, vmid int, options map[string]string) (string, error) {
 	data := url.Values{}
 	data.Set("vmid", fmt.Sprintf("%d", vmid))
-	
+
 	for k, v := range options {
 		data.Set(k, v)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", 
-		fmt.Sprintf("%s/nodes/%s/vzdump", c.baseURL, node), 
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		fmt.Sprintf("%s/nodes/%s/vzdump", c.baseURL, node),
 		strings.NewReader(data.Encode()))
 	if err != nil {
 		return "", err
