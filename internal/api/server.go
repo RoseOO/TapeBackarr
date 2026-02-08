@@ -18,6 +18,7 @@ import (
 	"github.com/RoseOO/TapeBackarr/internal/database"
 	"github.com/RoseOO/TapeBackarr/internal/logging"
 	"github.com/RoseOO/TapeBackarr/internal/models"
+	"github.com/RoseOO/TapeBackarr/internal/proxmox"
 	"github.com/RoseOO/TapeBackarr/internal/restore"
 	"github.com/RoseOO/TapeBackarr/internal/scheduler"
 	"github.com/RoseOO/TapeBackarr/internal/tape"
@@ -29,14 +30,17 @@ import (
 
 // Server represents the API server
 type Server struct {
-	router         *chi.Mux
-	db             *database.DB
-	authService    *auth.Service
-	tapeService    *tape.Service
-	backupService  *backup.Service
-	restoreService *restore.Service
-	scheduler      *scheduler.Service
-	logger         *logging.Logger
+	router                *chi.Mux
+	db                    *database.DB
+	authService           *auth.Service
+	tapeService           *tape.Service
+	backupService         *backup.Service
+	restoreService        *restore.Service
+	scheduler             *scheduler.Service
+	logger                *logging.Logger
+	proxmoxBackupService  *proxmox.BackupService
+	proxmoxRestoreService *proxmox.RestoreService
+	proxmoxClient         *proxmox.Client
 }
 
 // NewServer creates a new API server
@@ -48,16 +52,22 @@ func NewServer(
 	restoreService *restore.Service,
 	scheduler *scheduler.Service,
 	logger *logging.Logger,
+	proxmoxClient *proxmox.Client,
+	proxmoxBackupService *proxmox.BackupService,
+	proxmoxRestoreService *proxmox.RestoreService,
 ) *Server {
 	s := &Server{
-		router:         chi.NewRouter(),
-		db:             db,
-		authService:    authService,
-		tapeService:    tapeService,
-		backupService:  backupService,
-		restoreService: restoreService,
-		scheduler:      scheduler,
-		logger:         logger,
+		router:                chi.NewRouter(),
+		db:                    db,
+		authService:           authService,
+		tapeService:           tapeService,
+		backupService:         backupService,
+		restoreService:        restoreService,
+		scheduler:             scheduler,
+		logger:                logger,
+		proxmoxClient:         proxmoxClient,
+		proxmoxBackupService:  proxmoxBackupService,
+		proxmoxRestoreService: proxmoxRestoreService,
 	}
 
 	s.setupRoutes()
@@ -189,6 +199,37 @@ func (s *Server) setupRoutes() {
 			r.Get("/", s.handleListDatabaseBackups)
 			r.Post("/backup", s.handleBackupDatabase)
 			r.Post("/restore", s.handleRestoreDatabaseBackup)
+		})
+
+		// Proxmox VE integration
+		r.Route("/api/v1/proxmox", func(r chi.Router) {
+			// Nodes and discovery
+			r.Get("/nodes", s.handleProxmoxListNodes)
+			r.Get("/guests", s.handleProxmoxListGuests)
+			r.Get("/guests/{vmid}", s.handleProxmoxGetGuest)
+			r.Get("/guests/{vmid}/config", s.handleProxmoxGetGuestConfig)
+			
+			// Cluster info
+			r.Get("/cluster/status", s.handleProxmoxClusterStatus)
+			
+			// Backup operations
+			r.Get("/backups", s.handleProxmoxListBackups)
+			r.Get("/backups/{id}", s.handleProxmoxGetBackup)
+			r.Post("/backups", s.handleProxmoxCreateBackup)
+			r.Post("/backups/all", s.handleProxmoxBackupAll)
+			
+			// Restore operations
+			r.Get("/restores", s.handleProxmoxListRestores)
+			r.Post("/restores", s.handleProxmoxCreateRestore)
+			r.Post("/restores/plan", s.handleProxmoxRestorePlan)
+			
+			// Backup jobs (scheduled)
+			r.Get("/jobs", s.handleProxmoxListJobs)
+			r.Post("/jobs", s.handleProxmoxCreateJob)
+			r.Get("/jobs/{id}", s.handleProxmoxGetJob)
+			r.Put("/jobs/{id}", s.handleProxmoxUpdateJob)
+			r.Delete("/jobs/{id}", s.handleProxmoxDeleteJob)
+			r.Post("/jobs/{id}/run", s.handleProxmoxRunJob)
 		})
 	})
 
@@ -1883,4 +1924,792 @@ func calculateFileChecksum(path string) (string, error) {
 	}
 
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// ==================== Proxmox Handlers ====================
+
+// handleProxmoxListNodes returns all Proxmox nodes
+func (s *Server) handleProxmoxListNodes(w http.ResponseWriter, r *http.Request) {
+	if s.proxmoxClient == nil {
+		s.respondError(w, http.StatusServiceUnavailable, "Proxmox integration not configured")
+		return
+	}
+
+	nodes, err := s.proxmoxClient.GetNodes(r.Context())
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, nodes)
+}
+
+// handleProxmoxListGuests returns all VMs and LXCs across all nodes
+func (s *Server) handleProxmoxListGuests(w http.ResponseWriter, r *http.Request) {
+	if s.proxmoxClient == nil {
+		s.respondError(w, http.StatusServiceUnavailable, "Proxmox integration not configured")
+		return
+	}
+
+	node := r.URL.Query().Get("node")
+	guestType := r.URL.Query().Get("type")
+
+	var vms []proxmox.VMInfo
+	var lxcs []proxmox.LXCInfo
+	var err error
+
+	if node != "" {
+		// Get guests from specific node
+		if guestType != "lxc" {
+			vms, err = s.proxmoxClient.GetNodeVMs(r.Context(), node)
+			if err != nil {
+				s.respondError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
+		if guestType != "qemu" {
+			lxcs, err = s.proxmoxClient.GetNodeLXCs(r.Context(), node)
+			if err != nil {
+				s.respondError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
+	} else {
+		// Get guests from all nodes
+		vms, lxcs, err = s.proxmoxClient.GetAllGuests(r.Context())
+		if err != nil {
+			s.respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+
+	// Filter by type if requested
+	if guestType == "qemu" {
+		lxcs = nil
+	} else if guestType == "lxc" {
+		vms = nil
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"vms":  vms,
+		"lxcs": lxcs,
+	})
+}
+
+// handleProxmoxGetGuest returns details of a specific guest
+func (s *Server) handleProxmoxGetGuest(w http.ResponseWriter, r *http.Request) {
+	if s.proxmoxClient == nil {
+		s.respondError(w, http.StatusServiceUnavailable, "Proxmox integration not configured")
+		return
+	}
+
+	vmidStr := chi.URLParam(r, "vmid")
+	vmid, err := strconv.Atoi(vmidStr)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid vmid")
+		return
+	}
+
+	node := r.URL.Query().Get("node")
+	if node == "" {
+		// Try to find the node
+		nodes, err := s.proxmoxClient.GetNodes(r.Context())
+		if err != nil {
+			s.respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		for _, n := range nodes {
+			if n.Status != "online" {
+				continue
+			}
+			// Check VMs
+			vms, _ := s.proxmoxClient.GetNodeVMs(r.Context(), n.Node)
+			for _, vm := range vms {
+				if vm.VMID == vmid {
+					s.respondJSON(w, http.StatusOK, vm)
+					return
+				}
+			}
+			// Check LXCs
+			lxcs, _ := s.proxmoxClient.GetNodeLXCs(r.Context(), n.Node)
+			for _, lxc := range lxcs {
+				if lxc.VMID == vmid {
+					s.respondJSON(w, http.StatusOK, lxc)
+					return
+				}
+			}
+		}
+		s.respondError(w, http.StatusNotFound, "guest not found")
+		return
+	}
+
+	// Check VMs first
+	vms, _ := s.proxmoxClient.GetNodeVMs(r.Context(), node)
+	for _, vm := range vms {
+		if vm.VMID == vmid {
+			s.respondJSON(w, http.StatusOK, vm)
+			return
+		}
+	}
+
+	// Check LXCs
+	lxcs, _ := s.proxmoxClient.GetNodeLXCs(r.Context(), node)
+	for _, lxc := range lxcs {
+		if lxc.VMID == vmid {
+			s.respondJSON(w, http.StatusOK, lxc)
+			return
+		}
+	}
+
+	s.respondError(w, http.StatusNotFound, "guest not found")
+}
+
+// handleProxmoxGetGuestConfig returns the configuration of a guest
+func (s *Server) handleProxmoxGetGuestConfig(w http.ResponseWriter, r *http.Request) {
+	if s.proxmoxClient == nil {
+		s.respondError(w, http.StatusServiceUnavailable, "Proxmox integration not configured")
+		return
+	}
+
+	vmidStr := chi.URLParam(r, "vmid")
+	vmid, err := strconv.Atoi(vmidStr)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid vmid")
+		return
+	}
+
+	node := r.URL.Query().Get("node")
+	guestType := r.URL.Query().Get("type")
+
+	if node == "" {
+		s.respondError(w, http.StatusBadRequest, "node parameter required")
+		return
+	}
+
+	if guestType == "lxc" {
+		config, err := s.proxmoxClient.GetLXCConfig(r.Context(), node, vmid)
+		if err != nil {
+			s.respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		s.respondJSON(w, http.StatusOK, config)
+	} else {
+		config, err := s.proxmoxClient.GetVMConfig(r.Context(), node, vmid)
+		if err != nil {
+			s.respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		s.respondJSON(w, http.StatusOK, config)
+	}
+}
+
+// handleProxmoxClusterStatus returns cluster status information
+func (s *Server) handleProxmoxClusterStatus(w http.ResponseWriter, r *http.Request) {
+	if s.proxmoxClient == nil {
+		s.respondError(w, http.StatusServiceUnavailable, "Proxmox integration not configured")
+		return
+	}
+
+	isCluster, err := s.proxmoxClient.IsClusterMode(r.Context())
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	nodes, err := s.proxmoxClient.GetNodes(r.Context())
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"is_cluster":  isCluster,
+		"node_count":  len(nodes),
+		"nodes":       nodes,
+	})
+}
+
+// handleProxmoxListBackups returns all Proxmox backups
+func (s *Server) handleProxmoxListBackups(w http.ResponseWriter, r *http.Request) {
+	if s.proxmoxBackupService == nil {
+		s.respondError(w, http.StatusServiceUnavailable, "Proxmox integration not configured")
+		return
+	}
+
+	limit := 100
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil {
+			limit = parsed
+		}
+	}
+
+	backups, err := s.proxmoxBackupService.ListBackups(r.Context(), limit)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, backups)
+}
+
+// handleProxmoxGetBackup returns details of a specific backup
+func (s *Server) handleProxmoxGetBackup(w http.ResponseWriter, r *http.Request) {
+	if s.proxmoxBackupService == nil {
+		s.respondError(w, http.StatusServiceUnavailable, "Proxmox integration not configured")
+		return
+	}
+
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid backup id")
+		return
+	}
+
+	backup, err := s.proxmoxBackupService.GetBackup(r.Context(), id)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "backup not found")
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, backup)
+}
+
+// handleProxmoxCreateBackup creates a backup of a single guest
+func (s *Server) handleProxmoxCreateBackup(w http.ResponseWriter, r *http.Request) {
+	if s.proxmoxBackupService == nil {
+		s.respondError(w, http.StatusServiceUnavailable, "Proxmox integration not configured")
+		return
+	}
+
+	var req proxmox.ProxmoxBackupRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Validate required fields
+	if req.Node == "" || req.VMID == 0 || req.TapeID == 0 {
+		s.respondError(w, http.StatusBadRequest, "node, vmid, and tape_id are required")
+		return
+	}
+
+	// Set defaults
+	if req.BackupMode == "" {
+		req.BackupMode = proxmox.BackupModeSnapshot
+	}
+	if req.GuestType == "" {
+		req.GuestType = proxmox.GuestTypeVM
+	}
+
+	result, err := s.proxmoxBackupService.BackupGuest(r.Context(), &req)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.respondJSON(w, http.StatusCreated, result)
+}
+
+// handleProxmoxBackupAll backs up all guests
+func (s *Server) handleProxmoxBackupAll(w http.ResponseWriter, r *http.Request) {
+	if s.proxmoxBackupService == nil {
+		s.respondError(w, http.StatusServiceUnavailable, "Proxmox integration not configured")
+		return
+	}
+
+	var req struct {
+		Node     string `json:"node,omitempty"` // Empty = all nodes
+		TapeID   int64  `json:"tape_id"`
+		Mode     string `json:"mode"`
+		Compress string `json:"compress"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.TapeID == 0 {
+		s.respondError(w, http.StatusBadRequest, "tape_id is required")
+		return
+	}
+
+	mode := proxmox.BackupModeSnapshot
+	if req.Mode != "" {
+		mode = proxmox.BackupMode(req.Mode)
+	}
+
+	results, err := s.proxmoxBackupService.BackupAllGuests(r.Context(), req.Node, req.TapeID, mode, req.Compress)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.respondJSON(w, http.StatusCreated, results)
+}
+
+// handleProxmoxListRestores returns all Proxmox restores
+func (s *Server) handleProxmoxListRestores(w http.ResponseWriter, r *http.Request) {
+	if s.proxmoxRestoreService == nil {
+		s.respondError(w, http.StatusServiceUnavailable, "Proxmox integration not configured")
+		return
+	}
+
+	limit := 100
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil {
+			limit = parsed
+		}
+	}
+
+	restores, err := s.proxmoxRestoreService.ListRestores(r.Context(), limit)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, restores)
+}
+
+// handleProxmoxCreateRestore restores a guest from a backup
+func (s *Server) handleProxmoxCreateRestore(w http.ResponseWriter, r *http.Request) {
+	if s.proxmoxRestoreService == nil {
+		s.respondError(w, http.StatusServiceUnavailable, "Proxmox integration not configured")
+		return
+	}
+
+	var req proxmox.RestoreRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.BackupID == 0 {
+		s.respondError(w, http.StatusBadRequest, "backup_id is required")
+		return
+	}
+
+	result, err := s.proxmoxRestoreService.RestoreGuest(r.Context(), &req)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.respondJSON(w, http.StatusCreated, result)
+}
+
+// handleProxmoxRestorePlan returns the tapes needed for a restore
+func (s *Server) handleProxmoxRestorePlan(w http.ResponseWriter, r *http.Request) {
+	if s.proxmoxRestoreService == nil {
+		s.respondError(w, http.StatusServiceUnavailable, "Proxmox integration not configured")
+		return
+	}
+
+	var req struct {
+		BackupID int64 `json:"backup_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	tapes, err := s.proxmoxRestoreService.GetRequiredTapes(r.Context(), req.BackupID)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"required_tapes": tapes,
+	})
+}
+
+// handleProxmoxListJobs returns all Proxmox backup jobs
+func (s *Server) handleProxmoxListJobs(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.db.Query(`
+		SELECT id, name, description, node, vmid_filter, guest_type_filter, tag_filter,
+		       pool_id, backup_mode, compress, schedule_cron, retention_days,
+		       enabled, last_run_at, next_run_at, created_at
+		FROM proxmox_backup_jobs
+		ORDER BY created_at DESC
+	`)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer rows.Close()
+
+	var jobs []map[string]interface{}
+	for rows.Next() {
+		var id int64
+		var name, backupMode, compress, scheduleCron string
+		var description, node, vmidFilter, guestTypeFilter, tagFilter *string
+		var poolID *int64
+		var retentionDays int
+		var enabled bool
+		var lastRunAt, nextRunAt *time.Time
+		var createdAt time.Time
+
+		if err := rows.Scan(&id, &name, &description, &node, &vmidFilter, &guestTypeFilter, &tagFilter,
+			&poolID, &backupMode, &compress, &scheduleCron, &retentionDays,
+			&enabled, &lastRunAt, &nextRunAt, &createdAt); err != nil {
+			continue
+		}
+
+		job := map[string]interface{}{
+			"id":                id,
+			"name":              name,
+			"backup_mode":       backupMode,
+			"compress":          compress,
+			"schedule_cron":     scheduleCron,
+			"retention_days":    retentionDays,
+			"enabled":           enabled,
+			"created_at":        createdAt,
+		}
+		if description != nil {
+			job["description"] = *description
+		}
+		if node != nil {
+			job["node"] = *node
+		}
+		if vmidFilter != nil {
+			job["vmid_filter"] = *vmidFilter
+		}
+		if guestTypeFilter != nil {
+			job["guest_type_filter"] = *guestTypeFilter
+		}
+		if tagFilter != nil {
+			job["tag_filter"] = *tagFilter
+		}
+		if poolID != nil {
+			job["pool_id"] = *poolID
+		}
+		if lastRunAt != nil {
+			job["last_run_at"] = *lastRunAt
+		}
+		if nextRunAt != nil {
+			job["next_run_at"] = *nextRunAt
+		}
+
+		jobs = append(jobs, job)
+	}
+
+	s.respondJSON(w, http.StatusOK, jobs)
+}
+
+// handleProxmoxCreateJob creates a new Proxmox backup job
+func (s *Server) handleProxmoxCreateJob(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name            string  `json:"name"`
+		Description     string  `json:"description,omitempty"`
+		Node            string  `json:"node,omitempty"`
+		VMIDFilter      string  `json:"vmid_filter,omitempty"`
+		GuestTypeFilter string  `json:"guest_type_filter,omitempty"`
+		TagFilter       string  `json:"tag_filter,omitempty"`
+		PoolID          *int64  `json:"pool_id,omitempty"`
+		BackupMode      string  `json:"backup_mode"`
+		Compress        string  `json:"compress"`
+		ScheduleCron    string  `json:"schedule_cron"`
+		RetentionDays   int     `json:"retention_days"`
+		Enabled         bool    `json:"enabled"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Name == "" {
+		s.respondError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if req.BackupMode == "" {
+		req.BackupMode = "snapshot"
+	}
+	if req.Compress == "" {
+		req.Compress = "zstd"
+	}
+	if req.RetentionDays == 0 {
+		req.RetentionDays = 30
+	}
+
+	result, err := s.db.Exec(`
+		INSERT INTO proxmox_backup_jobs (
+			name, description, node, vmid_filter, guest_type_filter, tag_filter,
+			pool_id, backup_mode, compress, schedule_cron, retention_days, enabled
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, req.Name, req.Description, req.Node, req.VMIDFilter, req.GuestTypeFilter, req.TagFilter,
+		req.PoolID, req.BackupMode, req.Compress, req.ScheduleCron, req.RetentionDays, req.Enabled)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	id, _ := result.LastInsertId()
+	s.respondJSON(w, http.StatusCreated, map[string]interface{}{
+		"id":      id,
+		"message": "Proxmox backup job created",
+	})
+}
+
+// handleProxmoxGetJob returns a specific Proxmox backup job
+func (s *Server) handleProxmoxGetJob(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+
+	var name, backupMode, compress, scheduleCron string
+	var description, node, vmidFilter, guestTypeFilter, tagFilter *string
+	var poolID *int64
+	var retentionDays int
+	var enabled bool
+	var lastRunAt, nextRunAt *time.Time
+	var createdAt time.Time
+
+	err = s.db.QueryRow(`
+		SELECT name, description, node, vmid_filter, guest_type_filter, tag_filter,
+		       pool_id, backup_mode, compress, schedule_cron, retention_days,
+		       enabled, last_run_at, next_run_at, created_at
+		FROM proxmox_backup_jobs
+		WHERE id = ?
+	`, id).Scan(&name, &description, &node, &vmidFilter, &guestTypeFilter, &tagFilter,
+		&poolID, &backupMode, &compress, &scheduleCron, &retentionDays,
+		&enabled, &lastRunAt, &nextRunAt, &createdAt)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "job not found")
+		return
+	}
+
+	job := map[string]interface{}{
+		"id":                id,
+		"name":              name,
+		"backup_mode":       backupMode,
+		"compress":          compress,
+		"schedule_cron":     scheduleCron,
+		"retention_days":    retentionDays,
+		"enabled":           enabled,
+		"created_at":        createdAt,
+	}
+	if description != nil {
+		job["description"] = *description
+	}
+	if node != nil {
+		job["node"] = *node
+	}
+	if vmidFilter != nil {
+		job["vmid_filter"] = *vmidFilter
+	}
+	if guestTypeFilter != nil {
+		job["guest_type_filter"] = *guestTypeFilter
+	}
+	if tagFilter != nil {
+		job["tag_filter"] = *tagFilter
+	}
+	if poolID != nil {
+		job["pool_id"] = *poolID
+	}
+	if lastRunAt != nil {
+		job["last_run_at"] = *lastRunAt
+	}
+	if nextRunAt != nil {
+		job["next_run_at"] = *nextRunAt
+	}
+
+	s.respondJSON(w, http.StatusOK, job)
+}
+
+// handleProxmoxUpdateJob updates a Proxmox backup job
+func (s *Server) handleProxmoxUpdateJob(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+
+	var req struct {
+		Name            string  `json:"name,omitempty"`
+		Description     string  `json:"description,omitempty"`
+		Node            string  `json:"node,omitempty"`
+		VMIDFilter      string  `json:"vmid_filter,omitempty"`
+		GuestTypeFilter string  `json:"guest_type_filter,omitempty"`
+		TagFilter       string  `json:"tag_filter,omitempty"`
+		PoolID          *int64  `json:"pool_id,omitempty"`
+		BackupMode      string  `json:"backup_mode,omitempty"`
+		Compress        string  `json:"compress,omitempty"`
+		ScheduleCron    string  `json:"schedule_cron,omitempty"`
+		RetentionDays   *int    `json:"retention_days,omitempty"`
+		Enabled         *bool   `json:"enabled,omitempty"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Build dynamic update query
+	updates := []string{}
+	args := []interface{}{}
+
+	if req.Name != "" {
+		updates = append(updates, "name = ?")
+		args = append(args, req.Name)
+	}
+	if req.Description != "" {
+		updates = append(updates, "description = ?")
+		args = append(args, req.Description)
+	}
+	if req.Node != "" {
+		updates = append(updates, "node = ?")
+		args = append(args, req.Node)
+	}
+	if req.VMIDFilter != "" {
+		updates = append(updates, "vmid_filter = ?")
+		args = append(args, req.VMIDFilter)
+	}
+	if req.GuestTypeFilter != "" {
+		updates = append(updates, "guest_type_filter = ?")
+		args = append(args, req.GuestTypeFilter)
+	}
+	if req.TagFilter != "" {
+		updates = append(updates, "tag_filter = ?")
+		args = append(args, req.TagFilter)
+	}
+	if req.PoolID != nil {
+		updates = append(updates, "pool_id = ?")
+		args = append(args, *req.PoolID)
+	}
+	if req.BackupMode != "" {
+		updates = append(updates, "backup_mode = ?")
+		args = append(args, req.BackupMode)
+	}
+	if req.Compress != "" {
+		updates = append(updates, "compress = ?")
+		args = append(args, req.Compress)
+	}
+	if req.ScheduleCron != "" {
+		updates = append(updates, "schedule_cron = ?")
+		args = append(args, req.ScheduleCron)
+	}
+	if req.RetentionDays != nil {
+		updates = append(updates, "retention_days = ?")
+		args = append(args, *req.RetentionDays)
+	}
+	if req.Enabled != nil {
+		updates = append(updates, "enabled = ?")
+		args = append(args, *req.Enabled)
+	}
+
+	if len(updates) == 0 {
+		s.respondError(w, http.StatusBadRequest, "no fields to update")
+		return
+	}
+
+	// Note: This query construction is safe because:
+	// 1. Column names in 'updates' are hardcoded strings, not user input
+	// 2. All values are properly parameterized with '?' placeholders
+	args = append(args, id)
+	query := "UPDATE proxmox_backup_jobs SET " + strings.Join(updates, ", ") + " WHERE id = ?"
+
+	_, err = s.db.Exec(query, args...)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]string{
+		"message": "Proxmox backup job updated",
+	})
+}
+
+// handleProxmoxDeleteJob deletes a Proxmox backup job
+func (s *Server) handleProxmoxDeleteJob(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+
+	_, err = s.db.Exec("DELETE FROM proxmox_backup_jobs WHERE id = ?", id)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]string{
+		"message": "Proxmox backup job deleted",
+	})
+}
+
+// handleProxmoxRunJob manually runs a Proxmox backup job
+func (s *Server) handleProxmoxRunJob(w http.ResponseWriter, r *http.Request) {
+	if s.proxmoxBackupService == nil {
+		s.respondError(w, http.StatusServiceUnavailable, "Proxmox integration not configured")
+		return
+	}
+
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+
+	var req struct {
+		TapeID int64 `json:"tape_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.TapeID == 0 {
+		s.respondError(w, http.StatusBadRequest, "tape_id is required")
+		return
+	}
+
+	// Get job details
+	var node *string
+	var backupMode, compress string
+	err = s.db.QueryRow(`
+		SELECT node, backup_mode, compress 
+		FROM proxmox_backup_jobs 
+		WHERE id = ?
+	`, id).Scan(&node, &backupMode, &compress)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "job not found")
+		return
+	}
+
+	nodeStr := ""
+	if node != nil {
+		nodeStr = *node
+	}
+
+	// Run backup for all guests matching the job criteria
+	results, err := s.proxmoxBackupService.BackupAllGuests(
+		r.Context(), 
+		nodeStr, 
+		req.TapeID, 
+		proxmox.BackupMode(backupMode), 
+		compress,
+	)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Update job last run time
+	s.db.Exec("UPDATE proxmox_backup_jobs SET last_run_at = CURRENT_TIMESTAMP WHERE id = ?", id)
+
+	s.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"message":  "Proxmox backup job executed",
+		"job_id":   id,
+		"results":  results,
+	})
 }

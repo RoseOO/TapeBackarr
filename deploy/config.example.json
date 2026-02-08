@@ -41,5 +41,19 @@
       "bot_token": "YOUR_TELEGRAM_BOT_TOKEN",
       "chat_id": "YOUR_TELEGRAM_CHAT_ID"
     }
+  },
+  "proxmox": {
+    "enabled": false,
+    "host": "YOUR_PROXMOX_HOST_OR_IP",
+    "port": 8006,
+    "skip_tls_verify": true,
+    "username": "",
+    "password": "",
+    "realm": "pam",
+    "token_id": "root@pam!tapebackarr",
+    "token_secret": "YOUR_API_TOKEN_SECRET",
+    "default_mode": "snapshot",
+    "default_compress": "zstd",
+    "temp_dir": "/var/lib/tapebackarr/proxmox-tmp"
   }
 }

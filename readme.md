@@ -15,6 +15,7 @@ TapeBackarr is a disk-light, tape-first backup system designed to run on Debian 
 - **Telegram Notifications**: Real-time alerts when tapes need to be changed
 - **Database Backup**: Backup the TapeBackarr database itself to tape for disaster recovery
 - **Multi-Drive Support**: Manage and select from multiple tape drives
+- **Proxmox VE Integration**: Backup and restore VMs and LXC containers directly to tape
 
 ### Tape Management
 - Tape labeling and pool assignment (DAILY, WEEKLY, MONTHLY, ARCHIVE)
@@ -263,6 +264,11 @@ Default credentials:
 | `/api/v1/restore/plan` | POST | Plan restore |
 | `/api/v1/restore/run` | POST | Execute restore |
 | `/api/v1/logs/audit` | GET | Audit logs |
+| `/api/v1/proxmox/nodes` | GET | List Proxmox nodes |
+| `/api/v1/proxmox/guests` | GET | List VMs and LXCs |
+| `/api/v1/proxmox/backups` | GET/POST | List/create Proxmox backups |
+| `/api/v1/proxmox/restores` | GET/POST | List/create Proxmox restores |
+| `/api/v1/proxmox/jobs` | GET/POST | List/create Proxmox backup jobs |
 
 ### CLI Commands Used Internally
 
@@ -416,6 +422,7 @@ Access documentation directly from the web interface by clicking **Documentation
 - [**Manual Recovery**](docs/MANUAL_RECOVERY.md) - Recover data without TapeBackarr
 - [**Architecture**](docs/ARCHITECTURE.md) - System design and data flows
 - [**Database Schema**](docs/DATABASE_SCHEMA.md) - Database table definitions
+- [**Proxmox Guide**](docs/PROXMOX_GUIDE.md) - Backup and restore Proxmox VMs and LXCs
 
 ### Disaster Recovery
 

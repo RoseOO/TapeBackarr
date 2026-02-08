@@ -14,6 +14,7 @@ type Config struct {
 	Logging       LoggingConfig       `json:"logging"`
 	Auth          AuthConfig          `json:"auth"`
 	Notifications NotificationsConfig `json:"notifications"`
+	Proxmox       ProxmoxConfig       `json:"proxmox,omitempty"`
 }
 
 // ServerConfig holds HTTP server configuration
@@ -70,6 +71,25 @@ type TelegramConfig struct {
 	ChatID   string `json:"chat_id"`
 }
 
+// ProxmoxConfig holds Proxmox VE connection configuration
+type ProxmoxConfig struct {
+	Enabled       bool   `json:"enabled"`
+	Host          string `json:"host"`                     // Proxmox host/IP
+	Port          int    `json:"port"`                     // API port (default 8006)
+	SkipTLSVerify bool   `json:"skip_tls_verify"`          // Skip SSL certificate verification
+	// Auth option 1: Username/Password
+	Username      string `json:"username,omitempty"`       // e.g., "root"
+	Password      string `json:"password,omitempty"`       // User password
+	Realm         string `json:"realm,omitempty"`          // e.g., "pam" or "pve"
+	// Auth option 2: API Token (recommended)
+	TokenID       string `json:"token_id,omitempty"`       // Format: user@realm!tokenname
+	TokenSecret   string `json:"token_secret,omitempty"`   // API token secret
+	// Backup settings
+	DefaultMode   string `json:"default_mode"`             // snapshot, suspend, or stop
+	DefaultCompress string `json:"default_compress"`       // zstd, lzo, gzip, or empty
+	TempDir       string `json:"temp_dir"`                 // Temp directory for backup operations
+}
+
 // DefaultConfig returns a configuration with sensible defaults
 func DefaultConfig() *Config {
 	return &Config{
@@ -106,6 +126,16 @@ func DefaultConfig() *Config {
 				BotToken: "",
 				ChatID:   "",
 			},
+		},
+		Proxmox: ProxmoxConfig{
+			Enabled:         false,
+			Host:            "",
+			Port:            8006,
+			SkipTLSVerify:   true,
+			Realm:           "pam",
+			DefaultMode:     "snapshot",
+			DefaultCompress: "zstd",
+			TempDir:         "/var/lib/tapebackarr/proxmox-tmp",
 		},
 	}
 }
