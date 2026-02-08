@@ -177,16 +177,30 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 		"folder_count":  len(req.FolderPaths),
 	})
 
-	// Get backup set info
+	// Get backup set info including encryption status
 	var tapeID int64
 	var startBlock int64
+	var encrypted bool
+	var encryptionKeyID *int64
 	err := s.db.QueryRow(`
-		SELECT tape_id, COALESCE(start_block, 0) 
+		SELECT tape_id, COALESCE(start_block, 0), COALESCE(encrypted, 0), encryption_key_id
 		FROM backup_sets 
 		WHERE id = ?
-	`, req.BackupSetID).Scan(&tapeID, &startBlock)
+	`, req.BackupSetID).Scan(&tapeID, &startBlock, &encrypted, &encryptionKeyID)
 	if err != nil {
 		return nil, fmt.Errorf("backup set not found: %w", err)
+	}
+
+	// Get encryption key if backup is encrypted
+	var encryptionKey string
+	if encrypted && encryptionKeyID != nil {
+		err = s.db.QueryRow("SELECT key_data FROM encryption_keys WHERE id = ?", *encryptionKeyID).Scan(&encryptionKey)
+		if err != nil {
+			return nil, fmt.Errorf("encryption key not found for encrypted backup: %w", err)
+		}
+		s.logger.Info("Decrypting backup", map[string]interface{}{
+			"encryption_key_id": *encryptionKeyID,
+		})
 	}
 
 	// Get tape device path
@@ -223,7 +237,6 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 	tarArgs := []string{
 		"-x",                                     // Extract
 		"-b", fmt.Sprintf("%d", s.blockSize/512), // Block size
-		"-f", devicePath, // Input from tape
 		"-C", req.DestPath, // Change to destination
 	}
 
@@ -238,15 +251,79 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 		tarArgs = append(tarArgs, allFilePaths...)
 	}
 
-	cmd := exec.CommandContext(ctx, "tar", tarArgs...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		errMsg := fmt.Sprintf("tar extract failed: %s", string(output))
-		result.Errors = append(result.Errors, errMsg)
-		s.logger.Error("Restore failed", map[string]interface{}{
-			"error": errMsg,
-		})
-		return result, fmt.Errorf("restore failed: %w", err)
+	var output []byte
+	if encrypted && encryptionKey != "" {
+		// For encrypted backups: openssl dec | tar
+		opensslCmd := exec.CommandContext(ctx, "openssl", "enc",
+			"-d", // Decrypt
+			"-aes-256-cbc",
+			"-pbkdf2",
+			"-iter", "100000",
+			"-pass", "pass:"+encryptionKey,
+			"-in", devicePath,
+		)
+
+		tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
+
+		// Pipe openssl output to tar
+		opensslPipe, err := opensslCmd.StdoutPipe()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create openssl pipe: %w", err)
+		}
+		tarCmd.Stdin = opensslPipe
+
+		if err := opensslCmd.Start(); err != nil {
+			return nil, fmt.Errorf("failed to start openssl: %w", err)
+		}
+		if err := tarCmd.Start(); err != nil {
+			opensslCmd.Process.Kill()
+			return nil, fmt.Errorf("failed to start tar: %w", err)
+		}
+
+		opensslErr := opensslCmd.Wait()
+		tarErr := tarCmd.Wait()
+
+		if opensslErr != nil {
+			errMsg := fmt.Sprintf("decryption failed: %v", opensslErr)
+			result.Errors = append(result.Errors, errMsg)
+			s.logger.Error("Restore failed", map[string]interface{}{"error": errMsg})
+			return result, fmt.Errorf("decryption failed: %w", opensslErr)
+		}
+		if tarErr != nil {
+			errMsg := fmt.Sprintf("tar extract failed: %v", tarErr)
+			result.Errors = append(result.Errors, errMsg)
+			s.logger.Error("Restore failed", map[string]interface{}{"error": errMsg})
+			return result, fmt.Errorf("restore failed: %w", tarErr)
+		}
+	} else {
+		// Standard unencrypted restore
+		tarArgs = append([]string{"-f", devicePath}, tarArgs[1:]...) // Add -f at the start after -x
+		tarArgs[0] = "-x"
+		tarArgs = append(tarArgs[:2], append([]string{"-f", devicePath}, tarArgs[2:]...)...)
+		// Rebuild properly
+		tarArgs = []string{
+			"-x",
+			"-b", fmt.Sprintf("%d", s.blockSize/512),
+			"-f", devicePath,
+			"-C", req.DestPath,
+		}
+		if req.Overwrite {
+			tarArgs = append(tarArgs, "--overwrite")
+		} else {
+			tarArgs = append(tarArgs, "--keep-old-files")
+		}
+		if len(allFilePaths) > 0 {
+			tarArgs = append(tarArgs, allFilePaths...)
+		}
+
+		cmd := exec.CommandContext(ctx, "tar", tarArgs...)
+		output, err = cmd.CombinedOutput()
+		if err != nil {
+			errMsg := fmt.Sprintf("tar extract failed: %s", string(output))
+			result.Errors = append(result.Errors, errMsg)
+			s.logger.Error("Restore failed", map[string]interface{}{"error": errMsg})
+			return result, fmt.Errorf("restore failed: %w", err)
+		}
 	}
 
 	// Count restored files

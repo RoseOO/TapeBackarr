@@ -114,18 +114,20 @@ const (
 
 // BackupJob represents a scheduled backup job
 type BackupJob struct {
-	ID            int64      `json:"id" db:"id"`
-	Name          string     `json:"name" db:"name"`
-	SourceID      int64      `json:"source_id" db:"source_id"`
-	PoolID        int64      `json:"pool_id" db:"pool_id"`
-	BackupType    BackupType `json:"backup_type" db:"backup_type"`
-	ScheduleCron  string     `json:"schedule_cron" db:"schedule_cron"`
-	RetentionDays int        `json:"retention_days" db:"retention_days"`
-	Enabled       bool       `json:"enabled" db:"enabled"`
-	LastRunAt     *time.Time `json:"last_run_at" db:"last_run_at"`
-	NextRunAt     *time.Time `json:"next_run_at" db:"next_run_at"`
-	CreatedAt     time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at" db:"updated_at"`
+	ID                int64      `json:"id" db:"id"`
+	Name              string     `json:"name" db:"name"`
+	SourceID          int64      `json:"source_id" db:"source_id"`
+	PoolID            int64      `json:"pool_id" db:"pool_id"`
+	BackupType        BackupType `json:"backup_type" db:"backup_type"`
+	ScheduleCron      string     `json:"schedule_cron" db:"schedule_cron"`
+	RetentionDays     int        `json:"retention_days" db:"retention_days"`
+	Enabled           bool       `json:"enabled" db:"enabled"`
+	EncryptionEnabled bool       `json:"encryption_enabled" db:"encryption_enabled"`
+	EncryptionKeyID   *int64     `json:"encryption_key_id" db:"encryption_key_id"`
+	LastRunAt         *time.Time `json:"last_run_at" db:"last_run_at"`
+	NextRunAt         *time.Time `json:"next_run_at" db:"next_run_at"`
+	CreatedAt         time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at" db:"updated_at"`
 }
 
 // BackupSetStatus represents the status of a backup set
@@ -141,21 +143,23 @@ const (
 
 // BackupSet represents a single backup operation
 type BackupSet struct {
-	ID          int64           `json:"id" db:"id"`
-	JobID       int64           `json:"job_id" db:"job_id"`
-	TapeID      int64           `json:"tape_id" db:"tape_id"`
-	BackupType  BackupType      `json:"backup_type" db:"backup_type"`
-	StartTime   time.Time       `json:"start_time" db:"start_time"`
-	EndTime     *time.Time      `json:"end_time" db:"end_time"`
-	Status      BackupSetStatus `json:"status" db:"status"`
-	FileCount   int64           `json:"file_count" db:"file_count"`
-	TotalBytes  int64           `json:"total_bytes" db:"total_bytes"`
-	StartBlock  int64           `json:"start_block" db:"start_block"`
-	EndBlock    int64           `json:"end_block" db:"end_block"`
-	Checksum    string          `json:"checksum" db:"checksum"`
-	ParentSetID *int64          `json:"parent_set_id" db:"parent_set_id"`
-	CreatedAt   time.Time       `json:"created_at" db:"created_at"`
-	UpdatedAt   time.Time       `json:"updated_at" db:"updated_at"`
+	ID              int64           `json:"id" db:"id"`
+	JobID           int64           `json:"job_id" db:"job_id"`
+	TapeID          int64           `json:"tape_id" db:"tape_id"`
+	BackupType      BackupType      `json:"backup_type" db:"backup_type"`
+	StartTime       time.Time       `json:"start_time" db:"start_time"`
+	EndTime         *time.Time      `json:"end_time" db:"end_time"`
+	Status          BackupSetStatus `json:"status" db:"status"`
+	FileCount       int64           `json:"file_count" db:"file_count"`
+	TotalBytes      int64           `json:"total_bytes" db:"total_bytes"`
+	StartBlock      int64           `json:"start_block" db:"start_block"`
+	EndBlock        int64           `json:"end_block" db:"end_block"`
+	Checksum        string          `json:"checksum" db:"checksum"`
+	Encrypted       bool            `json:"encrypted" db:"encrypted"`
+	EncryptionKeyID *int64          `json:"encryption_key_id" db:"encryption_key_id"`
+	ParentSetID     *int64          `json:"parent_set_id" db:"parent_set_id"`
+	CreatedAt       time.Time       `json:"created_at" db:"created_at"`
+	UpdatedAt       time.Time       `json:"updated_at" db:"updated_at"`
 }
 
 // CatalogEntry represents a file in the backup catalog

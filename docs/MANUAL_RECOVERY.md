@@ -422,6 +422,192 @@ tar -tvf /dev/nst0 | head -50
 
 ---
 
+## Restoring Encrypted Backups
+
+TapeBackarr supports AES-256 encryption for backups. Encrypted backups require the encryption key to restore. This section covers manual decryption without the TapeBackarr application.
+
+### Prerequisites for Encrypted Restore
+
+In addition to the standard tools (mt, tar), you'll need:
+
+```bash
+# Install openssl (usually pre-installed)
+sudo apt-get install openssl
+```
+
+### Obtaining Your Encryption Key
+
+1. **From TapeBackarr UI**: Navigate to Settings → Encryption Keys → Print Key Sheet
+2. **From API**: `GET /api/v1/encryption-keys/keysheet/text`
+3. **From Database** (emergency):
+   ```bash
+   sqlite3 /var/lib/tapebackarr/tapebackarr.db \
+     "SELECT name, key_data FROM encryption_keys"
+   ```
+
+### Restore Encrypted Backup Set
+
+**Method 1: Using OpenSSL (Recommended)**
+
+```bash
+# 1. Position tape to the encrypted backup set
+mt -f /dev/nst0 rewind
+mt -f /dev/nst0 fsf 1  # Skip label, adjust number for specific backup set
+
+# 2. Decrypt and extract in one pipeline
+# Replace YOUR_KEY_BASE64 with the actual key from your key sheet
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 \
+  -pass pass:YOUR_KEY_BASE64 \
+  -in /dev/nst0 | tar -xvf - -C /restore/destination
+```
+
+**Method 2: Decrypt to File First (for verification)**
+
+```bash
+# 1. Position tape
+mt -f /dev/nst0 rewind
+mt -f /dev/nst0 fsf 1
+
+# 2. Decrypt to intermediate file
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 \
+  -pass pass:YOUR_KEY_BASE64 \
+  -in /dev/nst0 -out backup.tar
+
+# 3. Verify tar archive
+tar -tvf backup.tar | head -50
+
+# 4. Extract
+tar -xvf backup.tar -C /restore/destination
+
+# 5. Clean up
+rm backup.tar
+```
+
+### Restore Specific Files from Encrypted Backup
+
+```bash
+# 1. Position tape
+mt -f /dev/nst0 rewind
+mt -f /dev/nst0 fsf 1
+
+# 2. Decrypt and extract specific files
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 \
+  -pass pass:YOUR_KEY_BASE64 \
+  -in /dev/nst0 | tar -xvf - -C /restore/destination \
+  path/to/specific/file.txt \
+  another/path/to/restore/
+```
+
+### Restoring Encrypted Backup to Network Location
+
+```bash
+# 1. Mount network share
+sudo mount -t cifs //server/share /mnt/restore -o username=user,password=pass
+
+# 2. Position and restore
+mt -f /dev/nst0 rewind
+mt -f /dev/nst0 fsf 1
+
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 \
+  -pass pass:YOUR_KEY_BASE64 \
+  -in /dev/nst0 | tar -xvf - -C /mnt/restore
+
+# 3. Unmount
+sudo umount /mnt/restore
+```
+
+### Multi-Tape Encrypted Restore
+
+For encrypted backups spanning multiple tapes:
+
+```bash
+#!/bin/bash
+
+DEVICE="/dev/nst0"
+RESTORE_PATH="/restore/destination"
+KEY="YOUR_KEY_BASE64"
+TAPE_NUM=1
+
+while true; do
+    echo "Insert tape $TAPE_NUM and press Enter..."
+    read
+    
+    mt -f $DEVICE rewind
+    mt -f $DEVICE fsf 1
+    
+    # Decrypt and extract with multi-volume support
+    if openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 \
+        -pass pass:$KEY \
+        -in $DEVICE | tar -xMvf - -C "$RESTORE_PATH"; then
+        echo "Restore complete!"
+        break
+    else
+        echo "Tape ended, need next tape..."
+        mt -f $DEVICE eject
+        ((TAPE_NUM++))
+    fi
+done
+```
+
+### Troubleshooting Encrypted Restore
+
+**"bad decrypt" error:**
+- Verify you're using the correct encryption key
+- Check that the backup was actually encrypted (non-encrypted backups start with tar header)
+- Ensure the key is the exact base64 string without extra spaces or newlines
+
+**Checking if backup is encrypted:**
+```bash
+# Read first few bytes
+mt -f /dev/nst0 rewind
+mt -f /dev/nst0 fsf 1
+dd if=/dev/nst0 bs=1 count=20 2>/dev/null | xxd
+
+# Encrypted data looks random; tar archives start with filename
+```
+
+**Finding which key was used:**
+If you have multiple keys, you can identify the correct one by:
+1. Check TapeBackarr database: `SELECT encryption_key_id FROM backup_sets WHERE id = N`
+2. Match with keys: `SELECT id, name, key_fingerprint FROM encryption_keys`
+
+### Key Sheet Format
+
+When printing your key sheet for paper backup, it will contain:
+
+```
+===============================================================================
+                    TAPEBACKARR ENCRYPTION KEY BACKUP
+===============================================================================
+
+Generated: 2026-02-08T10:00:00Z
+
+IMPORTANT: Store this document in a secure location (safe, security deposit box).
+This sheet contains encryption keys needed to restore encrypted backups.
+
+-------------------------------------------------------------------------------
+                              KEY LISTING
+-------------------------------------------------------------------------------
+
+KEY #1
+  Name:        production-backups
+  ID:          1
+  Algorithm:   aes-256-gcm
+  Fingerprint: a1b2c3d4e5f6...
+  Created:     2026-01-15T08:30:00Z
+  Key (Base64):
+    dGhpcyBpcyBhIHNhbXBsZSBrZXkgZm9yIGRlbW9uc
+    dHJhdGlvbiBwdXJwb3Nlcw==
+
+-------------------------------------------------------------------------------
+                          END OF KEY LISTING
+-------------------------------------------------------------------------------
+
+Store this document securely. Destroy old copies when regenerating.
+```
+
+---
+
 ## Emergency Contact Information
 
 For hardware issues with tape drives:
@@ -437,6 +623,7 @@ For TapeBackarr software issues:
 
 ## Document Version
 
-- Version: 1.0
+- Version: 1.1
 - Last Updated: February 2026
 - Applies to: TapeBackarr 1.x, LTO-5 through LTO-9 drives
+- Added: Encrypted backup restore procedures
