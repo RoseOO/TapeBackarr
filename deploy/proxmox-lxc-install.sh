@@ -259,7 +259,7 @@ start_container() {
     # We use '|| true' to prevent set -e from exiting on command failure
     msg_info "Waiting for container to be fully running..."
     count=0
-    local status
+    local status=""
     while true; do
         status=$(pct exec "$ct_id" -- systemctl is-system-running 2>/dev/null) || true
         # Accept both "running" and "degraded" as valid ready states
