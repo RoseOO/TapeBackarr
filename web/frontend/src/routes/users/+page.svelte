@@ -153,8 +153,8 @@
 
 <!-- Create Modal -->
 {#if showCreateModal}
-  <div class="modal-overlay" on:click={() => showCreateModal = false}>
-    <div class="modal" on:click|stopPropagation>
+  <div class="modal-overlay" on:click={() => showCreateModal = false} role="presentation">
+    <div class="modal" on:click|stopPropagation role="dialog" aria-modal="true" tabindex="-1">
       <h2>Add New User</h2>
       <form on:submit|preventDefault={handleCreate}>
         <div class="form-group">
