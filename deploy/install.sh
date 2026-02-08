@@ -102,7 +102,8 @@ if [ ! -f "$CONFIG_DIR/config.json" ]; then
 {
   "server": {
     "host": "0.0.0.0",
-    "port": 8080
+    "port": 8080,
+    "static_dir": "/opt/tapebackarr/static"
   },
   "database": {
     "path": "$DATA_DIR/tapebackarr.db"

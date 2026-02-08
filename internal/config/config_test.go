@@ -17,6 +17,10 @@ func TestDefaultConfig(t *testing.T) {
 		t.Errorf("expected port 8080, got %d", cfg.Server.Port)
 	}
 
+	if cfg.Server.StaticDir != "/opt/tapebackarr/static" {
+		t.Errorf("expected static_dir /opt/tapebackarr/static, got %s", cfg.Server.StaticDir)
+	}
+
 	if cfg.Tape.DefaultDevice != "/dev/nst0" {
 		t.Errorf("expected device /dev/nst0, got %s", cfg.Tape.DefaultDevice)
 	}

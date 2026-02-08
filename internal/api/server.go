@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -43,6 +44,7 @@ type Server struct {
 	proxmoxBackupService  *proxmox.BackupService
 	proxmoxRestoreService *proxmox.RestoreService
 	proxmoxClient         *proxmox.Client
+	staticDir             string
 }
 
 // NewServer creates a new API server
@@ -58,6 +60,7 @@ func NewServer(
 	proxmoxClient *proxmox.Client,
 	proxmoxBackupService *proxmox.BackupService,
 	proxmoxRestoreService *proxmox.RestoreService,
+	staticDir string,
 ) *Server {
 	s := &Server{
 		router:                chi.NewRouter(),
@@ -72,6 +75,7 @@ func NewServer(
 		proxmoxClient:         proxmoxClient,
 		proxmoxBackupService:  proxmoxBackupService,
 		proxmoxRestoreService: proxmoxRestoreService,
+		staticDir:             staticDir,
 	}
 
 	s.setupRoutes()
@@ -258,6 +262,34 @@ func (s *Server) setupRoutes() {
 
 	// Detailed health check for API v1
 	r.Get("/api/v1/health", s.handleHealthCheck)
+
+	// Serve frontend static files
+	if s.staticDir != "" {
+		// Serve static files with SPA fallback
+		r.NotFound(func(w http.ResponseWriter, r *http.Request) {
+			// Don't serve frontend for API routes
+			if strings.HasPrefix(r.URL.Path, "/api/") {
+				http.Error(w, "404 page not found", http.StatusNotFound)
+				return
+			}
+
+			// Try to serve the requested file
+			filePath := filepath.Join(s.staticDir, filepath.Clean(r.URL.Path))
+			if info, err := os.Stat(filePath); err == nil && !info.IsDir() {
+				http.ServeFile(w, r, filePath)
+				return
+			}
+
+			// Fallback to index.html for SPA routing
+			indexPath := filepath.Join(s.staticDir, "index.html")
+			if _, err := os.Stat(indexPath); err == nil {
+				http.ServeFile(w, r, indexPath)
+				return
+			}
+
+			http.Error(w, "404 page not found", http.StatusNotFound)
+		})
+	}
 }
 
 // Handler returns the HTTP handler
