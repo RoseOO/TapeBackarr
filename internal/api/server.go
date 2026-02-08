@@ -2803,10 +2803,14 @@ func (s *Server) handleFormatTapeInDrive(w http.ResponseWriter, r *http.Request)
 
 	// If the tape was in our database, update its status
 	if oldUUID != "" {
-		s.db.Exec("UPDATE tapes SET status = 'blank', used_bytes = 0, labeled_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE uuid = ?", oldUUID)
+		if _, err := s.db.Exec("UPDATE tapes SET status = 'blank', used_bytes = 0, labeled_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE uuid = ?", oldUUID); err != nil {
+			s.logger.Warn("Failed to update tape status by UUID after format", map[string]interface{}{"error": err.Error(), "uuid": oldUUID})
+		}
 	}
 	if oldLabel != "" {
-		s.db.Exec("UPDATE tapes SET status = 'blank', used_bytes = 0, labeled_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE label = ?", oldLabel)
+		if _, err := s.db.Exec("UPDATE tapes SET status = 'blank', used_bytes = 0, labeled_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE label = ?", oldLabel); err != nil {
+			s.logger.Warn("Failed to update tape status by label after format", map[string]interface{}{"error": err.Error(), "label": oldLabel})
+		}
 	}
 
 	// Publish event

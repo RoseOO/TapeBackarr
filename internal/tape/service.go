@@ -286,6 +286,11 @@ func (s *Service) WriteFileMark(ctx context.Context) error {
 	return nil
 }
 
+const (
+	// vpdHeaderSize is the number of bytes to skip in VPD page 80 before the serial number
+	vpdHeaderSize = 4
+)
+
 // SetBlockSize sets the tape block size
 func (s *Service) SetBlockSize(ctx context.Context, size int) error {
 	cmd := exec.CommandContext(ctx, "mt", "-f", s.devicePath, "setblk", strconv.Itoa(size))
@@ -439,9 +444,9 @@ func (s *Service) GetDriveInfo(ctx context.Context) (map[string]string, error) {
 				return -1
 			}, string(serial))
 			serialStr = strings.TrimSpace(serialStr)
-			if len(serialStr) > 4 {
+			if len(serialStr) > vpdHeaderSize {
 				// Skip the VPD header bytes
-				info["Unit serial number"] = serialStr[4:]
+				info["Unit serial number"] = serialStr[vpdHeaderSize:]
 			}
 		}
 	}
