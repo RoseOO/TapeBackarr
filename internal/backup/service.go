@@ -9,8 +9,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
+	"runtime"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -95,10 +95,8 @@ func (s *Service) updateProgress(jobID int64, phase, message string) {
 	}
 }
 
-// ScanSource scans a backup source and returns file information
+// ScanSource scans a backup source and returns file information using concurrent directory traversal
 func (s *Service) ScanSource(ctx context.Context, source *models.BackupSource) ([]FileInfo, error) {
-	var files []FileInfo
-
 	// Parse include/exclude patterns
 	var includePatterns, excludePatterns []string
 	if source.IncludePatterns != "" {
@@ -108,70 +106,136 @@ func (s *Service) ScanSource(ctx context.Context, source *models.BackupSource) (
 		json.Unmarshal([]byte(source.ExcludePatterns), &excludePatterns)
 	}
 
-	err := filepath.WalkDir(source.Path, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			s.logger.Warn("Error accessing path", map[string]interface{}{
-				"path":  path,
-				"error": err.Error(),
-			})
-			return nil // Continue walking
-		}
+	numWorkers := runtime.NumCPU()
+	if numWorkers < 4 {
+		numWorkers = 4
+	}
 
-		if d.IsDir() {
-			return nil
-		}
+	var (
+		files    []FileInfo
+		filesMu  sync.Mutex
+		dirWg    sync.WaitGroup
+		workerWg sync.WaitGroup
+		dirs     = make(chan string, numWorkers*4)
+	)
 
-		// Get relative path for pattern matching
+	// matchFile checks if a file path matches the include/exclude patterns
+	matchFile := func(path string) bool {
 		relPath, _ := filepath.Rel(source.Path, path)
+		baseName := filepath.Base(path)
 
 		// Check exclude patterns
 		for _, pattern := range excludePatterns {
-			matched, _ := filepath.Match(pattern, relPath)
-			if matched {
-				return nil
+			if matched, _ := filepath.Match(pattern, relPath); matched {
+				return false
 			}
-			matched, _ = filepath.Match(pattern, filepath.Base(path))
-			if matched {
-				return nil
+			if matched, _ := filepath.Match(pattern, baseName); matched {
+				return false
 			}
 		}
 
 		// Check include patterns (if any)
 		if len(includePatterns) > 0 {
-			included := false
 			for _, pattern := range includePatterns {
-				matched, _ := filepath.Match(pattern, relPath)
-				if matched {
-					included = true
-					break
+				if matched, _ := filepath.Match(pattern, relPath); matched {
+					return true
 				}
-				matched, _ = filepath.Match(pattern, filepath.Base(path))
-				if matched {
-					included = true
-					break
+				if matched, _ := filepath.Match(pattern, baseName); matched {
+					return true
 				}
 			}
-			if !included {
-				return nil
-			}
+			return false
 		}
 
-		info, err := d.Info()
+		return true
+	}
+
+	// processDir reads a single directory and enqueues subdirectories for workers
+	var processDir func(string)
+	processDir = func(dirPath string) {
+		defer dirWg.Done()
+
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		entries, err := os.ReadDir(dirPath)
 		if err != nil {
-			return nil
+			if s.logger != nil {
+				s.logger.Warn("Error accessing path", map[string]interface{}{
+					"path":  dirPath,
+					"error": err.Error(),
+				})
+			}
+			return
 		}
 
-		files = append(files, FileInfo{
-			Path:    path,
-			Size:    info.Size(),
-			Mode:    int(info.Mode()),
-			ModTime: info.ModTime(),
-		})
+		var localFiles []FileInfo
+		for _, entry := range entries {
+			path := filepath.Join(dirPath, entry.Name())
 
-		return nil
-	})
+			if entry.IsDir() {
+				dirWg.Add(1)
+				select {
+				case dirs <- path:
+					// Sent to a worker
+				default:
+					// Channel full, process inline to avoid deadlock
+					processDir(path)
+				}
+				continue
+			}
 
-	return files, err
+			if !matchFile(path) {
+				continue
+			}
+
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+
+			localFiles = append(localFiles, FileInfo{
+				Path:    path,
+				Size:    info.Size(),
+				Mode:    int(info.Mode()),
+				ModTime: info.ModTime(),
+			})
+		}
+
+		if len(localFiles) > 0 {
+			filesMu.Lock()
+			files = append(files, localFiles...)
+			filesMu.Unlock()
+		}
+	}
+
+	// Seed root directory
+	dirWg.Add(1)
+	dirs <- source.Path
+
+	// Close channel when all directories are processed
+	go func() {
+		dirWg.Wait()
+		close(dirs)
+	}()
+
+	// Start workers
+	for i := 0; i < numWorkers; i++ {
+		workerWg.Add(1)
+		go func() {
+			defer workerWg.Done()
+			for dir := range dirs {
+				processDir(dir)
+			}
+		}()
+	}
+
+	workerWg.Wait()
+
+	return files, ctx.Err()
 }
 
 // CompareWithSnapshot compares current files with a previous snapshot for incremental backup
