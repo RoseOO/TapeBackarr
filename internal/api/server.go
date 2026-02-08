@@ -348,19 +348,27 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var tokenStr string
+
 		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" {
-			s.respondError(w, http.StatusUnauthorized, "missing authorization header")
+		if authHeader != "" {
+			parts := strings.SplitN(authHeader, " ", 2)
+			if len(parts) == 2 && parts[0] == "Bearer" {
+				tokenStr = parts[1]
+			}
+		}
+
+		// Fallback to query parameter for SSE connections (EventSource doesn't support headers)
+		if tokenStr == "" {
+			tokenStr = r.URL.Query().Get("token")
+		}
+
+		if tokenStr == "" {
+			s.respondError(w, http.StatusUnauthorized, "missing authorization")
 			return
 		}
 
-		parts := strings.SplitN(authHeader, " ", 2)
-		if len(parts) != 2 || parts[0] != "Bearer" {
-			s.respondError(w, http.StatusUnauthorized, "invalid authorization header")
-			return
-		}
-
-		claims, err := s.authService.ValidateToken(parts[1])
+		claims, err := s.authService.ValidateToken(tokenStr)
 		if err != nil {
 			s.respondError(w, http.StatusUnauthorized, err.Error())
 			return

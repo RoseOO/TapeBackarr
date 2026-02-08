@@ -333,6 +333,14 @@ install_tapebackarr() {
     "
     msg_ok "TapeBackarr installed"
     
+    # Create the 'update' command shortcut
+    msg_info "Creating 'update' command shortcut..."
+    pct exec "$ct_id" -- bash -c "
+        ln -sf /opt/TapeBackarr/deploy/updater.sh /usr/local/bin/update
+        chmod +x /opt/TapeBackarr/deploy/updater.sh
+    "
+    msg_ok "'update' command created - run 'update' inside the container to update TapeBackarr"
+    
     # Start the service
     msg_info "Starting TapeBackarr service..."
     pct exec "$ct_id" -- systemctl start tapebackarr
@@ -373,6 +381,7 @@ show_summary() {
     echo
     echo -e "  ${GREEN}Useful Commands:${NC}"
     echo -e "    Container console: ${BLUE}pct enter $ct_id${NC}"
+    echo -e "    Update TapeBackarr:${BLUE}pct exec $ct_id -- update${NC}"
     echo -e "    View logs:         ${BLUE}pct exec $ct_id -- journalctl -u tapebackarr -f${NC}"
     echo -e "    Restart service:   ${BLUE}pct exec $ct_id -- systemctl restart tapebackarr${NC}"
     echo
