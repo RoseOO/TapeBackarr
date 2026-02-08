@@ -295,7 +295,7 @@ install_tapebackarr() {
     # Install Go
     msg_info "Installing Go..."
     pct exec "$ct_id" -- bash -c "
-        wget -q https://go.dev/dl/go1.22.0.linux-amd64.tar.gz -O /tmp/go.tar.gz
+        wget -q https://go.dev/dl/go1.24.12.linux-amd64.tar.gz -O /tmp/go.tar.gz
         rm -rf /usr/local/go
         tar -C /usr/local -xzf /tmp/go.tar.gz
         rm /tmp/go.tar.gz
@@ -318,7 +318,7 @@ install_tapebackarr() {
         cd /opt
         git clone https://github.com/RoseOO/TapeBackarr.git
         cd TapeBackarr
-        go build -o tapebackarr ./cmd/tapebackarr
+        CGO_ENABLED=0 go build -o tapebackarr ./cmd/tapebackarr
         cd web/frontend
         npm install
         npm run build

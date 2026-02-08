@@ -4,7 +4,7 @@
 # ============================================================================
 # Stage 1: Build the Go backend
 # ============================================================================
-FROM golang:1.22-bookworm AS backend-builder
+FROM golang:1.24-bookworm AS backend-builder
 
 WORKDIR /app
 
@@ -19,7 +19,7 @@ COPY internal/ ./internal/
 # Build the binary
 ARG VERSION=dev
 ARG BUILD_TIME=""
-RUN CGO_ENABLED=1 GOOS=linux go build \
+RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags "-X main.version=${VERSION} -X main.buildTime=${BUILD_TIME}" \
     -o tapebackarr ./cmd/tapebackarr
 
