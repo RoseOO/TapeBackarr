@@ -117,7 +117,9 @@ func TestEscapeMarkdown(t *testing.T) {
 		{"hello_world", "hello\\_world"},
 		{"*bold*", "\\*bold\\*"},
 		{"test.file", "test\\.file"},
-		{"path/to/file", "path/to/file"}, // forward slash not escaped
+		{"path/to/file", "path/to/file"},   // forward slash not escaped
+		{"2024-01-15", "2024\\-01\\-15"},   // dashes in dates must be escaped
+		{"TAPE-001", "TAPE\\-001"},          // dashes in tape labels must be escaped
 	}
 
 	for _, tt := range tests {
@@ -222,6 +224,25 @@ func TestSendTestMessageEnabled(t *testing.T) {
 	}
 	if receivedMsg.ParseMode != "MarkdownV2" {
 		t.Errorf("expected parse_mode 'MarkdownV2', got %q", receivedMsg.ParseMode)
+	}
+}
+
+func TestFormatMessageEscapesTimestamp(t *testing.T) {
+	svc := NewTelegramService(TelegramConfig{})
+
+	notification := &Notification{
+		Type:      "test",
+		Title:     "Test Notification",
+		Message:   "Test message",
+		Priority:  "normal",
+		Timestamp: time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC),
+	}
+
+	result := svc.formatMessage("📢", notification)
+
+	// The timestamp dashes and dots must be escaped for MarkdownV2
+	if !bytes.Contains([]byte(result), []byte("2024\\-01\\-15")) {
+		t.Errorf("expected timestamp dashes to be escaped in formatted message, got: %s", result)
 	}
 }
 

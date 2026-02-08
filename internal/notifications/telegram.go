@@ -134,7 +134,7 @@ func (s *TelegramService) formatMessage(emoji string, notification *Notification
 	}
 
 	// Timestamp
-	buf.WriteString(fmt.Sprintf("\n\n_Sent at %s_", notification.Timestamp.Format("2006-01-02 15:04:05")))
+	buf.WriteString(fmt.Sprintf("\n\n_Sent at %s_", escapeMarkdown(notification.Timestamp.Format("2006-01-02 15:04:05"))))
 
 	return buf.String()
 }
