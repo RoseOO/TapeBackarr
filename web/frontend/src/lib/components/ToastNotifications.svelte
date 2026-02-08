@@ -63,15 +63,19 @@
     }
   }
 
-  // Also pipe notifications to the console log
+  // Also pipe notifications to the console log, tracking which ones we've already logged
+  let loggedNotificationIds = new Set<string>();
   $: {
     for (const n of visibleToasts) {
-      const level = n.type === 'error' ? 'error' : n.type === 'warning' ? 'warn' : n.type === 'success' ? 'success' : 'info';
-      consoleStore.add({
-        level,
-        message: `[${n.category}] ${n.title}: ${n.message}`,
-        source: n.category,
-      });
+      if (!loggedNotificationIds.has(n.id)) {
+        loggedNotificationIds.add(n.id);
+        const level = n.type === 'error' ? 'error' : n.type === 'warning' ? 'warn' : n.type === 'success' ? 'success' : 'info';
+        consoleStore.add({
+          level,
+          message: `[${n.category}] ${n.title}: ${n.message}`,
+          source: n.category,
+        });
+      }
     }
   }
 </script>

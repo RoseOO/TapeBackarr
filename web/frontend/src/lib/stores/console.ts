@@ -25,7 +25,7 @@ function createConsoleStore() {
     add: (entry: Omit<ConsoleEntry, 'id' | 'timestamp'>) => {
       const newEntry: ConsoleEntry = {
         ...entry,
-        id: Date.now().toString() + Math.random().toString(36).substr(2, 5),
+        id: Date.now().toString() + Math.random().toString(36).substring(2, 7),
         timestamp: new Date().toISOString(),
       };
       update(entries => {
