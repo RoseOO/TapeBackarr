@@ -82,10 +82,12 @@ type TapeDrive struct {
 	ID            int64       `json:"id" db:"id"`
 	DevicePath    string      `json:"device_path" db:"device_path"`
 	DisplayName   string      `json:"display_name" db:"display_name"`
+	Vendor        string      `json:"vendor" db:"vendor"`
 	SerialNumber  string      `json:"serial_number" db:"serial_number"`
 	Model         string      `json:"model" db:"model"`
 	Status        DriveStatus `json:"status" db:"status"`
 	CurrentTapeID *int64      `json:"current_tape_id" db:"current_tape_id"`
+	CurrentTape   string      `json:"current_tape" db:"-"`
 	Enabled       bool        `json:"enabled" db:"enabled"`
 	CreatedAt     time.Time   `json:"created_at" db:"created_at"`
 	UpdatedAt     time.Time   `json:"updated_at" db:"updated_at"`

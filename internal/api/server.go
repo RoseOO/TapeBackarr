@@ -176,6 +176,7 @@ func (s *Server) setupRoutes() {
 		r.Route("/api/v1/jobs", func(r chi.Router) {
 			r.Get("/", s.handleListJobs)
 			r.Post("/", s.handleCreateJob)
+			r.Get("/active", s.handleActiveJobs)
 			r.Get("/{id}", s.handleGetJob)
 			r.Put("/{id}", s.handleUpdateJob)
 			r.Delete("/{id}", s.handleDeleteJob)
@@ -443,13 +444,17 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 	// Get drive status and loaded tape label
 	ctx := r.Context()
-	status, err := s.tapeService.GetStatus(ctx)
+	statusCtx, statusCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer statusCancel()
+	status, err := s.tapeService.GetStatus(statusCtx)
 	if err != nil {
 		stats.DriveStatus = "error"
 	} else if status.Online {
 		stats.DriveStatus = "online"
-		// Try to read the label from the loaded tape
-		if labelData, err := s.tapeService.ReadTapeLabel(ctx); err == nil && labelData != nil {
+		// Try to read the label with a short timeout to avoid hanging on blank/unlabelled tapes
+		labelCtx, labelCancel := context.WithTimeout(ctx, 5*time.Second)
+		defer labelCancel()
+		if labelData, err := s.tapeService.ReadTapeLabel(labelCtx); err == nil && labelData != nil {
 			stats.LoadedTape = labelData.Label
 			stats.LoadedTapeUUID = labelData.UUID
 			stats.LoadedTapePool = labelData.Pool
@@ -1029,7 +1034,8 @@ func (s *Server) handleDeletePool(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListDrives(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`
-		SELECT id, device_path, COALESCE(display_name, '') as display_name, serial_number, model, status, current_tape_id, COALESCE(enabled, 1) as enabled, created_at
+		SELECT id, device_path, COALESCE(display_name, '') as display_name, COALESCE(vendor, '') as vendor,
+		       serial_number, model, status, current_tape_id, COALESCE(enabled, 1) as enabled, created_at
 		FROM tape_drives ORDER BY device_path
 	`)
 	if err != nil {
@@ -1041,10 +1047,62 @@ func (s *Server) handleListDrives(w http.ResponseWriter, r *http.Request) {
 	drives := make([]models.TapeDrive, 0)
 	for rows.Next() {
 		var d models.TapeDrive
-		if err := rows.Scan(&d.ID, &d.DevicePath, &d.DisplayName, &d.SerialNumber, &d.Model, &d.Status, &d.CurrentTapeID, &d.Enabled, &d.CreatedAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.DevicePath, &d.DisplayName, &d.Vendor, &d.SerialNumber, &d.Model, &d.Status, &d.CurrentTapeID, &d.Enabled, &d.CreatedAt); err != nil {
 			continue
 		}
 		drives = append(drives, d)
+	}
+
+	// Probe live status for each enabled drive
+	ctx := r.Context()
+	for i, d := range drives {
+		if !d.Enabled {
+			continue
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		driveSvc := tape.NewServiceForDevice(d.DevicePath, s.tapeService.GetBlockSize())
+		hwStatus, err := driveSvc.GetStatus(probeCtx)
+		cancel()
+		if err != nil || hwStatus.Error != "" {
+			drives[i].Status = models.DriveStatusOffline
+		} else if hwStatus.Online {
+			drives[i].Status = models.DriveStatusReady
+
+			// Try to get current tape label with a short timeout
+			labelCtx, labelCancel := context.WithTimeout(ctx, 5*time.Second)
+			if labelData, err := driveSvc.ReadTapeLabel(labelCtx); err == nil && labelData != nil {
+				drives[i].CurrentTape = labelData.Label
+				// Update current_tape_id from DB if we have a matching tape
+				var tapeID int64
+				if err := s.db.QueryRow("SELECT id FROM tapes WHERE label = ?", labelData.Label).Scan(&tapeID); err == nil {
+					drives[i].CurrentTapeID = &tapeID
+				}
+			}
+			labelCancel()
+
+			// Try to get vendor/model info if missing
+			if d.Vendor == "" || d.Model == "" {
+				infoCtx, infoCancel := context.WithTimeout(ctx, 3*time.Second)
+				if info, err := driveSvc.GetDriveInfo(infoCtx); err == nil {
+					if v, ok := info["Vendor identification"]; ok && d.Vendor == "" {
+						drives[i].Vendor = v
+					}
+					if v, ok := info["Product identification"]; ok && d.Model == "" {
+						drives[i].Model = v
+					}
+					if v, ok := info["Unit serial number"]; ok && d.SerialNumber == "" {
+						drives[i].SerialNumber = v
+					}
+				}
+				infoCancel()
+			}
+		} else {
+			drives[i].Status = models.DriveStatusOffline
+		}
+
+		// Update the DB with the probed status
+		s.db.Exec(`UPDATE tape_drives SET status = ?, vendor = ?, model = ?, serial_number = ?, current_tape_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			string(drives[i].Status), drives[i].Vendor, drives[i].Model, drives[i].SerialNumber, drives[i].CurrentTapeID, d.ID)
 	}
 
 	s.respondJSON(w, http.StatusOK, drives)
@@ -1239,7 +1297,9 @@ func (s *Server) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`
 		SELECT j.id, j.name, j.source_id, s.name as source_name, j.pool_id, p.name as pool_name,
-		       j.backup_type, j.schedule_cron, j.retention_days, j.enabled, j.last_run_at, j.next_run_at
+		       j.backup_type, j.schedule_cron, j.retention_days, j.enabled,
+		       j.encryption_enabled, j.encryption_key_id,
+		       j.last_run_at, j.next_run_at
 		FROM backup_jobs j
 		LEFT JOIN backup_sources s ON j.source_id = s.id
 		LEFT JOIN tape_pools p ON j.pool_id = p.id
@@ -1256,22 +1316,26 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		var j models.BackupJob
 		var sourceName, poolName *string
 		if err := rows.Scan(&j.ID, &j.Name, &j.SourceID, &sourceName, &j.PoolID, &poolName,
-			&j.BackupType, &j.ScheduleCron, &j.RetentionDays, &j.Enabled, &j.LastRunAt, &j.NextRunAt); err != nil {
+			&j.BackupType, &j.ScheduleCron, &j.RetentionDays, &j.Enabled,
+			&j.EncryptionEnabled, &j.EncryptionKeyID,
+			&j.LastRunAt, &j.NextRunAt); err != nil {
 			continue
 		}
 		job := map[string]interface{}{
-			"id":             j.ID,
-			"name":           j.Name,
-			"source_id":      j.SourceID,
-			"source_name":    sourceName,
-			"pool_id":        j.PoolID,
-			"pool_name":      poolName,
-			"backup_type":    j.BackupType,
-			"schedule_cron":  j.ScheduleCron,
-			"retention_days": j.RetentionDays,
-			"enabled":        j.Enabled,
-			"last_run_at":    j.LastRunAt,
-			"next_run_at":    j.NextRunAt,
+			"id":                 j.ID,
+			"name":               j.Name,
+			"source_id":          j.SourceID,
+			"source_name":        sourceName,
+			"pool_id":            j.PoolID,
+			"pool_name":          poolName,
+			"backup_type":        j.BackupType,
+			"schedule_cron":      j.ScheduleCron,
+			"retention_days":     j.RetentionDays,
+			"enabled":            j.Enabled,
+			"encryption_enabled": j.EncryptionEnabled,
+			"encryption_key_id":  j.EncryptionKeyID,
+			"last_run_at":        j.LastRunAt,
+			"next_run_at":        j.NextRunAt,
 		}
 		jobs = append(jobs, job)
 	}
@@ -1281,12 +1345,13 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name          string `json:"name"`
-		SourceID      int64  `json:"source_id"`
-		PoolID        int64  `json:"pool_id"`
-		BackupType    string `json:"backup_type"`
-		ScheduleCron  string `json:"schedule_cron"`
-		RetentionDays int    `json:"retention_days"`
+		Name            string `json:"name"`
+		SourceID        int64  `json:"source_id"`
+		PoolID          int64  `json:"pool_id"`
+		BackupType      string `json:"backup_type"`
+		ScheduleCron    string `json:"schedule_cron"`
+		RetentionDays   int    `json:"retention_days"`
+		EncryptionKeyID *int64 `json:"encryption_key_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.respondError(w, http.StatusBadRequest, "invalid request body")
@@ -1301,10 +1366,22 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Determine encryption settings
+	encryptionEnabled := false
+	if req.EncryptionKeyID != nil && *req.EncryptionKeyID > 0 {
+		// Validate the key exists
+		_, err := s.encryptionService.GetKey(r.Context(), *req.EncryptionKeyID)
+		if err != nil {
+			s.respondError(w, http.StatusBadRequest, "encryption key not found")
+			return
+		}
+		encryptionEnabled = true
+	}
+
 	result, err := s.db.Exec(`
-		INSERT INTO backup_jobs (name, source_id, pool_id, backup_type, schedule_cron, retention_days, enabled)
-		VALUES (?, ?, ?, ?, ?, ?, 1)
-	`, req.Name, req.SourceID, req.PoolID, req.BackupType, req.ScheduleCron, req.RetentionDays)
+		INSERT INTO backup_jobs (name, source_id, pool_id, backup_type, schedule_cron, retention_days, enabled, encryption_enabled, encryption_key_id)
+		VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+	`, req.Name, req.SourceID, req.PoolID, req.BackupType, req.ScheduleCron, req.RetentionDays, encryptionEnabled, req.EncryptionKeyID)
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1359,13 +1436,14 @@ func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Name          *string `json:"name"`
-		SourceID      *int64  `json:"source_id"`
-		PoolID        *int64  `json:"pool_id"`
-		BackupType    *string `json:"backup_type"`
-		ScheduleCron  *string `json:"schedule_cron"`
-		RetentionDays *int    `json:"retention_days"`
-		Enabled       *bool   `json:"enabled"`
+		Name            *string `json:"name"`
+		SourceID        *int64  `json:"source_id"`
+		PoolID          *int64  `json:"pool_id"`
+		BackupType      *string `json:"backup_type"`
+		ScheduleCron    *string `json:"schedule_cron"`
+		RetentionDays   *int    `json:"retention_days"`
+		Enabled         *bool   `json:"enabled"`
+		EncryptionKeyID *int64  `json:"encryption_key_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.respondError(w, http.StatusBadRequest, "invalid request body")
@@ -1409,6 +1487,21 @@ func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request) {
 	if req.Enabled != nil {
 		updates = append(updates, "enabled = ?")
 		args = append(args, *req.Enabled)
+	}
+	if req.EncryptionKeyID != nil {
+		if *req.EncryptionKeyID > 0 {
+			// Validate the key exists
+			_, err := s.encryptionService.GetKey(r.Context(), *req.EncryptionKeyID)
+			if err != nil {
+				s.respondError(w, http.StatusBadRequest, "encryption key not found")
+				return
+			}
+			updates = append(updates, "encryption_key_id = ?", "encryption_enabled = 1")
+			args = append(args, *req.EncryptionKeyID)
+		} else {
+			// Disable encryption (key_id = 0 means remove)
+			updates = append(updates, "encryption_key_id = NULL", "encryption_enabled = 0")
+		}
 	}
 
 	if len(updates) == 0 {
@@ -1469,9 +1562,9 @@ func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 	// Get job details
 	var job models.BackupJob
 	err = s.db.QueryRow(`
-		SELECT id, name, source_id, pool_id, backup_type, retention_days
+		SELECT id, name, source_id, pool_id, backup_type, retention_days, encryption_enabled, encryption_key_id
 		FROM backup_jobs WHERE id = ?
-	`, id).Scan(&job.ID, &job.Name, &job.SourceID, &job.PoolID, &job.BackupType, &job.RetentionDays)
+	`, id).Scan(&job.ID, &job.Name, &job.SourceID, &job.PoolID, &job.BackupType, &job.RetentionDays, &job.EncryptionEnabled, &job.EncryptionKeyID)
 	if err != nil {
 		s.respondError(w, http.StatusNotFound, "job not found")
 		return
@@ -1504,6 +1597,11 @@ func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 		"status":  "started",
 		"message": "Backup job started in background",
 	})
+}
+
+func (s *Server) handleActiveJobs(w http.ResponseWriter, r *http.Request) {
+	activeJobs := s.backupService.GetActiveJobs()
+	s.respondJSON(w, http.StatusOK, activeJobs)
 }
 
 // Backup set handlers
@@ -2144,6 +2242,7 @@ func (s *Server) handleCreateDrive(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DevicePath   string `json:"device_path"`
 		DisplayName  string `json:"display_name"`
+		Vendor       string `json:"vendor"`
 		SerialNumber string `json:"serial_number"`
 		Model        string `json:"model"`
 	}
@@ -2152,10 +2251,37 @@ func (s *Server) handleCreateDrive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Probe the drive to get initial status and fill in missing info
+	initialStatus := "offline"
+	ctx := r.Context()
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	driveSvc := tape.NewServiceForDevice(req.DevicePath, s.tapeService.GetBlockSize())
+	if hwStatus, err := driveSvc.GetStatus(probeCtx); err == nil && hwStatus.Error == "" && hwStatus.Online {
+		initialStatus = "ready"
+	}
+	cancel()
+
+	// Try to fill vendor/model/serial from hardware if not provided
+	if req.Vendor == "" || req.Model == "" || req.SerialNumber == "" {
+		infoCtx, infoCancel := context.WithTimeout(ctx, 3*time.Second)
+		if info, err := driveSvc.GetDriveInfo(infoCtx); err == nil {
+			if v, ok := info["Vendor identification"]; ok && req.Vendor == "" {
+				req.Vendor = v
+			}
+			if v, ok := info["Product identification"]; ok && req.Model == "" {
+				req.Model = v
+			}
+			if v, ok := info["Unit serial number"]; ok && req.SerialNumber == "" {
+				req.SerialNumber = v
+			}
+		}
+		infoCancel()
+	}
+
 	result, err := s.db.Exec(`
-		INSERT INTO tape_drives (device_path, display_name, serial_number, model, status, enabled)
-		VALUES (?, ?, ?, ?, 'offline', 1)
-	`, req.DevicePath, req.DisplayName, req.SerialNumber, req.Model)
+		INSERT INTO tape_drives (device_path, display_name, vendor, serial_number, model, status, enabled)
+		VALUES (?, ?, ?, ?, ?, ?, 1)
+	`, req.DevicePath, req.DisplayName, req.Vendor, req.SerialNumber, req.Model, initialStatus)
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
 		return

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import * as api from '$lib/api/client';
 
   interface Job {
@@ -13,8 +13,24 @@
     schedule_cron: string;
     retention_days: number;
     enabled: boolean;
+    encryption_enabled: boolean;
+    encryption_key_id: number | null;
     last_run_at: string | null;
     next_run_at: string | null;
+  }
+
+  interface ActiveJob {
+    job_id: number;
+    job_name: string;
+    backup_set_id: number;
+    phase: string;
+    message: string;
+    file_count: number;
+    total_files: number;
+    total_bytes: number;
+    start_time: string;
+    updated_at: string;
+    log_lines: string[];
   }
 
   interface Source {
@@ -33,15 +49,25 @@
     status: string;
   }
 
+  interface EncryptionKey {
+    id: number;
+    name: string;
+    algorithm: string;
+    key_fingerprint: string;
+  }
+
   let jobs: Job[] = [];
   let sources: Source[] = [];
   let pools: Pool[] = [];
   let tapes: Tape[] = [];
+  let encryptionKeys: EncryptionKey[] = [];
+  let activeJobs: ActiveJob[] = [];
   let loading = true;
   let error = '';
   let showCreateModal = false;
   let showRunModal = false;
   let selectedJob: Job | null = null;
+  let pollInterval: ReturnType<typeof setInterval>;
 
   let formData = {
     name: '',
@@ -50,6 +76,7 @@
     backup_type: 'full',
     schedule_cron: '',
     retention_days: 30,
+    encryption_key_id: null as number | null,
   };
 
   let runFormData = {
@@ -59,16 +86,36 @@
 
   onMount(async () => {
     await loadData();
+    await loadActiveJobs();
+    pollInterval = setInterval(loadActiveJobs, 3000);
   });
+
+  onDestroy(() => {
+    if (pollInterval) clearInterval(pollInterval);
+  });
+
+  async function loadActiveJobs() {
+    try {
+      activeJobs = await api.getActiveJobs();
+    } catch {
+      // Silently ignore polling errors
+    }
+  }
 
   async function loadData() {
     try {
-      [jobs, sources, pools, tapes] = await Promise.all([
+      const [jobsResult, sourcesResult, poolsResult, tapesResult, keysResult] = await Promise.all([
         api.getJobs(),
         api.getSources(),
         api.getPools(),
         api.getTapes(),
+        api.getEncryptionKeys(),
       ]);
+      jobs = jobsResult;
+      sources = sourcesResult;
+      pools = poolsResult;
+      tapes = tapesResult;
+      encryptionKeys = keysResult.keys || [];
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load data';
     } finally {
@@ -78,7 +125,11 @@
 
   async function handleCreate() {
     try {
-      await api.createJob(formData);
+      const payload: any = { ...formData };
+      if (!payload.encryption_key_id) {
+        delete payload.encryption_key_id;
+      }
+      await api.createJob(payload);
       showCreateModal = false;
       resetForm();
       await loadData();
@@ -134,12 +185,33 @@
       backup_type: 'full',
       schedule_cron: '',
       retention_days: 30,
+      encryption_key_id: null as number | null,
     };
   }
 
   function formatDate(dateStr: string | null): string {
     if (!dateStr) return '-';
     return new Date(dateStr).toLocaleString();
+  }
+
+  function formatBytes(bytes: number): string {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  }
+
+  function getPhaseIcon(phase: string): string {
+    switch (phase) {
+      case 'initializing': return '⏳';
+      case 'scanning': return '🔍';
+      case 'streaming': return '📼';
+      case 'cataloging': return '📝';
+      case 'completed': return '✅';
+      case 'failed': return '❌';
+      default: return '⏳';
+    }
   }
 
   $: availableTapes = tapes.filter(t => t.status === 'blank' || t.status === 'active');
@@ -161,6 +233,34 @@
 {#if loading}
   <p>Loading...</p>
 {:else}
+  {#if activeJobs.length > 0}
+    <div class="active-operations">
+      <h2>Running Operations</h2>
+      {#each activeJobs as job}
+        <div class="terminal-card">
+          <div class="terminal-header">
+            <span class="terminal-title">{getPhaseIcon(job.phase)} {job.job_name}</span>
+            <span class="terminal-phase">{job.phase}</span>
+          </div>
+          <div class="terminal-meta">
+            {#if job.total_files > 0}
+              <span>Files: {job.file_count}/{job.total_files}</span>
+            {/if}
+            {#if job.total_bytes > 0}
+              <span>Size: {formatBytes(job.total_bytes)}</span>
+            {/if}
+            <span>Started: {new Date(job.start_time).toLocaleTimeString()}</span>
+          </div>
+          <div class="terminal-output">
+            {#each job.log_lines as line}
+              <div class="terminal-line">{line}</div>
+            {/each}
+          </div>
+        </div>
+      {/each}
+    </div>
+  {/if}
+
   <div class="card">
     <table>
       <thead>
@@ -169,9 +269,9 @@
           <th>Source</th>
           <th>Pool</th>
           <th>Type</th>
+          <th>Encryption</th>
           <th>Schedule</th>
           <th>Last Run</th>
-          <th>Next Run</th>
           <th>Status</th>
           <th>Actions</th>
         </tr>
@@ -187,9 +287,15 @@
                 {job.backup_type}
               </span>
             </td>
+            <td>
+              {#if job.encryption_enabled}
+                <span class="badge badge-success">🔒 Encrypted</span>
+              {:else}
+                <span class="badge badge-secondary">None</span>
+              {/if}
+            </td>
             <td><code>{job.schedule_cron || 'Manual'}</code></td>
             <td>{formatDate(job.last_run_at)}</td>
-            <td>{formatDate(job.next_run_at)}</td>
             <td>
               <span class="badge {job.enabled ? 'badge-success' : 'badge-danger'}">
                 {job.enabled ? 'Enabled' : 'Disabled'}
@@ -260,6 +366,16 @@
         <div class="form-group">
           <label for="retention">Retention (days)</label>
           <input type="number" id="retention" bind:value={formData.retention_days} min="1" />
+        </div>
+        <div class="form-group">
+          <label for="encryption-key">Encryption Key</label>
+          <select id="encryption-key" bind:value={formData.encryption_key_id}>
+            <option value={null}>None (unencrypted)</option>
+            {#each encryptionKeys as key}
+              <option value={key.id}>🔒 {key.name}</option>
+            {/each}
+          </select>
+          <small>Select an encryption key to encrypt backups. <a href="/encryption">Manage keys</a></small>
         </div>
         <div class="modal-actions">
           <button type="button" class="btn btn-secondary" on:click={() => showCreateModal = false}>Cancel</button>
@@ -363,5 +479,69 @@
     gap: 0.75rem;
     justify-content: flex-end;
     margin-top: 1.5rem;
+  }
+
+  .active-operations {
+    margin-bottom: 1.5rem;
+  }
+
+  .active-operations h2 {
+    margin: 0 0 1rem;
+    font-size: 1rem;
+    color: #333;
+  }
+
+  .terminal-card {
+    background: #1e1e2e;
+    border-radius: 12px;
+    overflow: hidden;
+    margin-bottom: 1rem;
+  }
+
+  .terminal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    background: #2a2a3e;
+    border-bottom: 1px solid #333;
+  }
+
+  .terminal-title {
+    color: #cdd6f4;
+    font-weight: 600;
+    font-size: 0.9rem;
+  }
+
+  .terminal-phase {
+    color: #f9e2af;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    font-weight: 600;
+  }
+
+  .terminal-meta {
+    display: flex;
+    gap: 1.5rem;
+    padding: 0.5rem 1rem;
+    background: #252537;
+    color: #a6adc8;
+    font-size: 0.8rem;
+    font-family: monospace;
+  }
+
+  .terminal-output {
+    padding: 0.75rem 1rem;
+    max-height: 200px;
+    overflow-y: auto;
+    font-family: 'Courier New', monospace;
+    font-size: 0.8rem;
+    line-height: 1.5;
+  }
+
+  .terminal-line {
+    color: #a6e3a1;
+    white-space: pre-wrap;
+    word-break: break-all;
   }
 </style>
