@@ -533,7 +533,7 @@ func (s *Server) handleCreateTape(w http.ResponseWriter, r *http.Request) {
 
 		// Write label to physical tape
 		if err := driveSvc.WriteTapeLabel(ctx, req.Label, tapeUUID, poolName); err != nil {
-			s.logger.Warn("Failed to write label to tape MAM, continuing with software tracking", map[string]interface{}{
+			s.logger.Warn("Failed to write label to physical tape, continuing with software tracking", map[string]interface{}{
 				"error": err.Error(),
 				"label": req.Label,
 			})
@@ -2189,7 +2189,13 @@ func calculateFileChecksum(path string) (string, error) {
 // generateUUID generates a random UUID v4
 func generateUUID() string {
 	b := make([]byte, 16)
-	_, _ = io.ReadFull(cryptoRand, b)
+	if _, err := io.ReadFull(cryptoRand, b); err != nil {
+		// Fallback: use timestamp-based pseudo-UUID if crypto/rand fails
+		ts := time.Now().UnixNano()
+		for i := range b {
+			b[i] = byte(ts >> (i * 4))
+		}
+	}
 	b[6] = (b[6] & 0x0f) | 0x40 // Version 4
 	b[8] = (b[8] & 0x3f) | 0x80 // Variant 10
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%12x",
@@ -2366,7 +2372,7 @@ func (s *Server) handleImportTape(w http.ResponseWriter, r *http.Request) {
 		labelData, err := driveSvc.ReadTapeLabel(ctx)
 		if err != nil {
 			s.logger.Warn("Could not read tape label during import", map[string]interface{}{"error": err.Error()})
-		} else if labelData != nil && labelData.UUID != "" && labelData.UUID != tapeUUID {
+		} else if labelData != nil && labelData.UUID != "" && strings.ToLower(labelData.UUID) != strings.ToLower(tapeUUID) {
 			s.respondError(w, http.StatusConflict, "tape label UUID mismatch - loaded tape does not match database record")
 			return
 		}

@@ -312,7 +312,7 @@
         {#each tapes as tape}
           <tr>
             <td><strong>{tape.label}</strong></td>
-            <td class="uuid-cell" title={tape.uuid}>{tape.uuid ? tape.uuid.substring(0, 8) + '...' : '-'}</td>
+            <td class="uuid-cell" title={tape.uuid || ''}>{tape.uuid && tape.uuid.length >= 8 ? tape.uuid.substring(0, 8) + '...' : (tape.uuid || '-')}</td>
             <td>{tape.barcode || '-'}</td>
             <td>{tape.pool_name || '-'}</td>
             <td>

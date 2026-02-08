@@ -282,6 +282,13 @@ func (s *Service) SetBlockSize(ctx context.Context, size int) error {
 	return nil
 }
 
+const (
+	// labelMagic is the identifier prefix for TapeBackarr labels
+	labelMagic = "TAPEBACKARR"
+	// labelDelimiter separates fields in the label block
+	labelDelimiter = "|"
+)
+
 // ReadTapeLabel reads the label from the beginning of the tape
 func (s *Service) ReadTapeLabel(ctx context.Context) (*TapeLabelData, error) {
 	// Rewind to beginning
@@ -296,25 +303,31 @@ func (s *Service) ReadTapeLabel(ctx context.Context) (*TapeLabelData, error) {
 		return nil, fmt.Errorf("failed to read label: %w", err)
 	}
 
-	// Parse label (format: "TAPEBACKARR|label|uuid|pool|timestamp")
-	parts := strings.Split(strings.TrimRight(string(output), "\x00"), "|")
-	if len(parts) >= 2 && parts[0] == "TAPEBACKARR" {
-		data := &TapeLabelData{
-			Label: parts[1],
-		}
-		if len(parts) >= 3 {
-			data.UUID = parts[2]
-		}
-		if len(parts) >= 4 {
-			data.Pool = parts[3]
-		}
-		if len(parts) >= 5 {
-			data.Timestamp, _ = strconv.ParseInt(parts[4], 10, 64)
-		}
-		return data, nil
+	// Strip null bytes from padded block
+	raw := strings.TrimRight(string(output), "\x00")
+	if raw == "" {
+		return nil, nil
 	}
 
-	return nil, nil
+	// Parse label (format: "TAPEBACKARR|label|uuid|pool|timestamp")
+	parts := strings.Split(raw, labelDelimiter)
+	if len(parts) < 2 || parts[0] != labelMagic {
+		return nil, nil
+	}
+
+	data := &TapeLabelData{
+		Label: parts[1],
+	}
+	if len(parts) >= 3 {
+		data.UUID = parts[2]
+	}
+	if len(parts) >= 4 {
+		data.Pool = parts[3]
+	}
+	if len(parts) >= 5 {
+		data.Timestamp, _ = strconv.ParseInt(parts[4], 10, 64)
+	}
+	return data, nil
 }
 
 // WriteTapeLabel writes a label to the beginning of the tape
@@ -325,7 +338,7 @@ func (s *Service) WriteTapeLabel(ctx context.Context, label string, uuid string,
 	}
 
 	// Create label block with UUID and pool info
-	labelData := fmt.Sprintf("TAPEBACKARR|%s|%s|%s|%d", label, uuid, pool, time.Now().Unix())
+	labelData := strings.Join([]string{labelMagic, label, uuid, pool, strconv.FormatInt(time.Now().Unix(), 10)}, labelDelimiter)
 	// Pad to 512 bytes
 	padded := make([]byte, 512)
 	copy(padded, []byte(labelData))
