@@ -273,11 +273,18 @@ func (s *Server) setupRoutes() {
 				return
 			}
 
-			// Try to serve the requested file
-			filePath := filepath.Join(s.staticDir, filepath.Clean(r.URL.Path))
-			if info, err := os.Stat(filePath); err == nil && !info.IsDir() {
-				http.ServeFile(w, r, filePath)
-				return
+			// Clean the path and ensure it stays within the static directory
+			cleanPath := filepath.Clean(r.URL.Path)
+			filePath := filepath.Join(s.staticDir, cleanPath)
+			absStaticDir, err := filepath.Abs(s.staticDir)
+			if err == nil {
+				absFilePath, err := filepath.Abs(filePath)
+				if err == nil && (strings.HasPrefix(absFilePath, absStaticDir+string(filepath.Separator)) || absFilePath == absStaticDir) {
+					if info, err := os.Stat(absFilePath); err == nil && !info.IsDir() {
+						http.ServeFile(w, r, absFilePath)
+						return
+					}
+				}
 			}
 
 			// Fallback to index.html for SPA routing

@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -80,7 +81,7 @@ func TestStaticFileServing(t *testing.T) {
 
 			if tt.wantBody != "" {
 				body := rr.Body.String()
-				if !contains(body, tt.wantBody) {
+				if !strings.Contains(body, tt.wantBody) {
 					t.Errorf("expected body to contain %q, got %q", tt.wantBody, body)
 				}
 			}
@@ -103,17 +104,4 @@ func TestNoStaticDir(t *testing.T) {
 	if rr.Code != http.StatusNotFound {
 		t.Errorf("expected 404 for root with no static dir, got %d", rr.Code)
 	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchString(s, substr)
-}
-
-func searchString(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
