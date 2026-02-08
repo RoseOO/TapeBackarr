@@ -86,6 +86,7 @@
     backup_type: 'full',
     schedule_cron: '',
     retention_days: 30,
+    enabled: true,
   };
   let selectedJob: Job | null = null;
   let pollInterval: ReturnType<typeof setInterval>;
@@ -325,6 +326,7 @@
       backup_type: job.backup_type,
       schedule_cron: job.schedule_cron || '',
       retention_days: job.retention_days,
+      enabled: job.enabled,
     };
     showEditModal = true;
   }
@@ -728,6 +730,12 @@
             <div class="locked-field">📦 {editJob.compression} (cannot be changed after creation)</div>
           </div>
         {/if}
+        <div class="form-group checkbox-group">
+          <label class="toggle-label">
+            <input type="checkbox" bind:checked={editFormData.enabled} />
+            <span>Enabled</span>
+          </label>
+        </div>
         <div class="modal-actions">
           <button type="button" class="btn btn-secondary" on:click={() => showEditModal = false}>Cancel</button>
           <button type="submit" class="btn btn-primary">Save Changes</button>
@@ -746,6 +754,24 @@
     font-size: 0.875rem;
     color: var(--text-muted, #999);
     font-style: italic;
+  }
+
+  .checkbox-group {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .checkbox-group input[type="checkbox"] {
+    width: auto;
+  }
+
+  .toggle-label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    font-weight: 500;
   }
 
   .error-card {

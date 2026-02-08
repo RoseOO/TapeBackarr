@@ -241,7 +241,7 @@
             <div class="set-meta">
               <span>📼 {set.tape_label}</span>
               {#if set.pool_name}
-                <span>🗂️ {set.pool_name}</span>
+                <span class="badge badge-info">📀 Pool: {set.pool_name}</span>
               {/if}
               <span>📅 {formatDate(set.start_time)}</span>
             </div>

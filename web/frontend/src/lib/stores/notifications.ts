@@ -96,6 +96,31 @@ function createNotificationStore() {
         // Will auto-reconnect
       };
     },
+    loadHistory: async () => {
+      try {
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+        if (!token) return;
+        const res = await fetch('/api/v1/events', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (res.ok) {
+          const events = await res.json();
+          if (Array.isArray(events)) {
+            // Refresh dismissed IDs from localStorage in case another tab updated them
+            dismissedIds = getDismissedIds();
+            update(n => {
+              const existing = new Set(n.map(e => e.id));
+              const newItems = events.filter((e: Notification) =>
+                !existing.has(e.id) && !dismissedIds.has(e.id)
+              );
+              return [...newItems, ...n].slice(0, 200);
+            });
+          }
+        }
+      } catch {
+        // Ignore fetch errors
+      }
+    },
     disconnect: () => {
       if (eventSource) {
         eventSource.close();
