@@ -150,7 +150,7 @@ TapeBackarr uses the following key dependencies:
 |---------|---------|----------------|
 | `golang.org/x/crypto` | Password hashing | Uses bcrypt |
 | `github.com/golang-jwt/jwt/v5` | JWT tokens | Industry standard |
-| `github.com/mattn/go-sqlite3` | Database | CGO-based SQLite |
+| `modernc.org/sqlite` | Database | Pure Go SQLite (no CGO required) |
 | `github.com/go-chi/chi/v5` | HTTP router | Well-maintained |
 
 We regularly update dependencies to include security patches.
