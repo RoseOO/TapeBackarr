@@ -91,15 +91,15 @@ select_template() {
         return
     fi
     
-    msg_info "Looking for Debian templates..."
+    msg_info "Looking for Debian templates..." >&2
     
     # List available templates and select the best one
     local templates
     templates=$(pveam list local 2>/dev/null | grep -E "debian-1[12]" | head -1 | awk '{print $1}')
     
     if [[ -z "$templates" ]]; then
-        msg_info "No Debian template found. Downloading Debian 12..."
-        pveam update
+        msg_info "No Debian template found. Downloading Debian 12..." >&2
+        pveam update >&2
         
         # Get available Debian 12 templates dynamically from pveam available
         local available_template
@@ -109,8 +109,8 @@ select_template() {
             msg_error "Could not find a Debian 12 template in the available templates. Check your network connection and run 'pveam available --section system' to see available templates."
         fi
         
-        msg_info "Downloading template: $available_template"
-        pveam download local "$available_template"
+        msg_info "Downloading template: $available_template" >&2
+        pveam download local "$available_template" >&2
         
         templates=$(pveam list local 2>/dev/null | grep "debian-12" | head -1 | awk '{print $1}')
     fi
@@ -119,7 +119,7 @@ select_template() {
         msg_error "Could not find or download a suitable Debian template"
     fi
     
-    msg_ok "Using template: $templates"
+    msg_ok "Using template: $templates" >&2
     echo "$templates"
 }
 
@@ -170,7 +170,8 @@ create_container() {
     fi
     
     # Create the container
-    pct create "$ct_id" "local:vztmpl/$template" \
+    # Note: template should be the full volid (e.g., local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst)
+    pct create "$ct_id" "$template" \
         --hostname "$CT_HOSTNAME" \
         --memory "$CT_MEMORY" \
         --cores "$CT_CORES" \
