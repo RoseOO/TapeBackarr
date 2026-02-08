@@ -949,9 +949,18 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 	// Update tape with encryption key info for library visibility
 	if encrypted && encryptionKeyID != nil {
 		var keyFingerprint, keyName string
-		s.db.QueryRow("SELECT key_fingerprint, name FROM encryption_keys WHERE id = ?", *encryptionKeyID).Scan(&keyFingerprint, &keyName)
-		if keyFingerprint != "" {
-			s.db.Exec("UPDATE tapes SET encryption_key_fingerprint = ?, encryption_key_name = ? WHERE id = ?", keyFingerprint, keyName, tapeID)
+		if err := s.db.QueryRow("SELECT key_fingerprint, name FROM encryption_keys WHERE id = ?", *encryptionKeyID).Scan(&keyFingerprint, &keyName); err != nil {
+			s.logger.Warn("Failed to look up encryption key for tape tracking", map[string]interface{}{
+				"encryption_key_id": *encryptionKeyID,
+				"error":             err.Error(),
+			})
+		} else if keyFingerprint != "" {
+			if _, err := s.db.Exec("UPDATE tapes SET encryption_key_fingerprint = ?, encryption_key_name = ? WHERE id = ?", keyFingerprint, keyName, tapeID); err != nil {
+				s.logger.Warn("Failed to update tape encryption tracking", map[string]interface{}{
+					"tape_id": tapeID,
+					"error":   err.Error(),
+				})
+			}
 		}
 	}
 
