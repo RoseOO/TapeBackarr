@@ -490,13 +490,25 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		stats.DriveStatus = "error"
 	} else if status.Online {
 		stats.DriveStatus = "online"
-		// Try to read the label with a short timeout to avoid hanging on blank/unlabelled tapes
-		labelCtx, labelCancel := context.WithTimeout(ctx, 5*time.Second)
-		defer labelCancel()
-		if labelData, err := s.tapeService.ReadTapeLabel(labelCtx); err == nil && labelData != nil {
-			stats.LoadedTape = labelData.Label
-			stats.LoadedTapeUUID = labelData.UUID
-			stats.LoadedTapePool = labelData.Pool
+		// Use cached label data to avoid rewinding the tape on every dashboard load
+		if cache := s.tapeService.GetLabelCache(); cache != nil {
+			if cached := cache.Get(s.tapeService.DevicePath(), 5*time.Minute); cached != nil {
+				if cached.Label != nil {
+					stats.LoadedTape = cached.Label.Label
+					stats.LoadedTapeUUID = cached.Label.UUID
+					stats.LoadedTapePool = cached.Label.Pool
+				}
+			} else {
+				// Cache miss - read label and cache it
+				labelCtx, labelCancel := context.WithTimeout(ctx, 5*time.Second)
+				defer labelCancel()
+				if labelData, err := s.tapeService.ReadTapeLabel(labelCtx); err == nil && labelData != nil {
+					stats.LoadedTape = labelData.Label
+					stats.LoadedTapeUUID = labelData.UUID
+					stats.LoadedTapePool = labelData.Pool
+					cache.Set(s.tapeService.DevicePath(), labelData, true)
+				}
+			}
 		}
 	} else {
 		stats.DriveStatus = "offline"
@@ -1272,9 +1284,25 @@ func (s *Server) handleListDrives(w http.ResponseWriter, r *http.Request) {
 		} else if hwStatus.Online {
 			drives[i].Status = models.DriveStatusReady
 
-			// Try to get current tape label with a short timeout
-			labelCtx, labelCancel := context.WithTimeout(ctx, 5*time.Second)
-			if labelData, err := driveSvc.ReadTapeLabel(labelCtx); err == nil && labelData != nil {
+			// Use cached label data to avoid rewinding tape on every list
+			var labelData *tape.TapeLabelData
+			if mainCache := s.tapeService.GetLabelCache(); mainCache != nil {
+				if cached := mainCache.Get(d.DevicePath, 5*time.Minute); cached != nil {
+					labelData = cached.Label
+				}
+			}
+			if labelData == nil {
+				// Cache miss - read label and cache it
+				labelCtx, labelCancel := context.WithTimeout(ctx, 5*time.Second)
+				if ld, err := driveSvc.ReadTapeLabel(labelCtx); err == nil && ld != nil {
+					labelData = ld
+					if mainCache := s.tapeService.GetLabelCache(); mainCache != nil {
+						mainCache.Set(d.DevicePath, ld, true)
+					}
+				}
+				labelCancel()
+			}
+			if labelData != nil {
 				drives[i].CurrentTape = labelData.Label
 				// Try to match by UUID first, then by label
 				var tapeID int64
@@ -1292,7 +1320,6 @@ func (s *Server) handleListDrives(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				if !found {
-					// Tape is loaded but not in our database - mark as unknown
 					drives[i].UnknownTape = &models.UnknownTapeInfo{
 						Label:     labelData.Label,
 						UUID:      labelData.UUID,
@@ -1315,7 +1342,6 @@ func (s *Server) handleListDrives(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
-			labelCancel()
 
 			// Try to get vendor/model info if missing
 			if d.Vendor == "" || d.Model == "" {
@@ -1454,6 +1480,10 @@ func (s *Server) handleEjectTape(w http.ResponseWriter, r *http.Request) {
 		}
 		s.respondError(w, http.StatusInternalServerError, "failed to eject tape: "+err.Error())
 		return
+	}
+
+	if cache := s.tapeService.GetLabelCache(); cache != nil {
+		cache.Invalidate(s.tapeService.DevicePath())
 	}
 
 	if s.eventBus != nil {

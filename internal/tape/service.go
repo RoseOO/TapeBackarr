@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/RoseOO/TapeBackarr/internal/models"
@@ -63,10 +64,70 @@ type TapeContentEntry struct {
 	Path        string `json:"path"`
 }
 
+// CachedLabel holds a cached tape label for a drive
+type CachedLabel struct {
+	Label       *TapeLabelData
+	CachedAt    time.Time
+	DriveOnline bool
+}
+
+// LabelCache provides thread-safe caching of tape labels per device
+type LabelCache struct {
+	mu    sync.RWMutex
+	cache map[string]*CachedLabel
+}
+
+// NewLabelCache creates a new label cache
+func NewLabelCache() *LabelCache {
+	return &LabelCache{
+		cache: make(map[string]*CachedLabel),
+	}
+}
+
+// Get returns the cached label for a device, or nil if not cached or expired
+func (lc *LabelCache) Get(devicePath string, maxAge time.Duration) *CachedLabel {
+	lc.mu.RLock()
+	defer lc.mu.RUnlock()
+	entry, ok := lc.cache[devicePath]
+	if !ok {
+		return nil
+	}
+	if time.Since(entry.CachedAt) > maxAge {
+		return nil
+	}
+	return entry
+}
+
+// Set stores a label in the cache
+func (lc *LabelCache) Set(devicePath string, label *TapeLabelData, online bool) {
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
+	lc.cache[devicePath] = &CachedLabel{
+		Label:       label,
+		CachedAt:    time.Now(),
+		DriveOnline: online,
+	}
+}
+
+// Invalidate removes the cached label for a device (call on eject/load)
+func (lc *LabelCache) Invalidate(devicePath string) {
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
+	delete(lc.cache, devicePath)
+}
+
+// InvalidateAll clears the entire cache
+func (lc *LabelCache) InvalidateAll() {
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
+	lc.cache = make(map[string]*CachedLabel)
+}
+
 // Service provides tape drive operations
 type Service struct {
 	devicePath string
 	blockSize  int
+	labelCache *LabelCache
 }
 
 // GetBlockSize returns the configured block size
@@ -79,6 +140,7 @@ func NewService(devicePath string, blockSize int) *Service {
 	return &Service{
 		devicePath: devicePath,
 		blockSize:  blockSize,
+		labelCache: NewLabelCache(),
 	}
 }
 
@@ -87,7 +149,18 @@ func NewServiceForDevice(devicePath string, blockSize int) *Service {
 	return &Service{
 		devicePath: devicePath,
 		blockSize:  blockSize,
+		labelCache: NewLabelCache(),
 	}
+}
+
+// DevicePath returns the configured device path
+func (s *Service) DevicePath() string {
+	return s.devicePath
+}
+
+// GetLabelCache returns the label cache for external use
+func (s *Service) GetLabelCache() *LabelCache {
+	return s.labelCache
 }
 
 // ScanDrives scans the system for available tape drives
@@ -252,6 +325,9 @@ func (s *Service) Eject(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("eject failed: %s", string(output))
 	}
+	if s.labelCache != nil {
+		s.labelCache.Invalidate(s.devicePath)
+	}
 	return nil
 }
 
@@ -261,6 +337,9 @@ func (s *Service) Load(ctx context.Context) error {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("load failed: %s", string(output))
+	}
+	if s.labelCache != nil {
+		s.labelCache.Invalidate(s.devicePath)
 	}
 	return nil
 }
@@ -406,7 +485,26 @@ func (s *Service) WriteTapeLabel(ctx context.Context, label string, uuid string,
 	}
 
 	// Write file mark after label
-	return s.WriteFileMark(ctx)
+	if err := s.WriteFileMark(ctx); err != nil {
+		return err
+	}
+	// Update cache with newly written label
+	if s.labelCache != nil {
+		cachedLabel := &TapeLabelData{
+			Label:     label,
+			UUID:      uuid,
+			Pool:      pool,
+			Timestamp: time.Now().Unix(),
+		}
+		if len(metadata) > 0 && metadata[0] != "" {
+			cachedLabel.EncryptionKeyFingerprint = metadata[0]
+		}
+		if len(metadata) > 1 && metadata[1] != "" {
+			cachedLabel.CompressionType = metadata[1]
+		}
+		s.labelCache.Set(s.devicePath, cachedLabel, true)
+	}
+	return nil
 }
 
 // EraseTape erases/formats the tape, removing all data including labels
@@ -423,6 +521,9 @@ func (s *Service) EraseTape(ctx context.Context) error {
 		return fmt.Errorf("erase failed: %s", string(output))
 	}
 
+	if s.labelCache != nil {
+		s.labelCache.Invalidate(s.devicePath)
+	}
 	// Rewind again after erase
 	return s.Rewind(ctx)
 }
