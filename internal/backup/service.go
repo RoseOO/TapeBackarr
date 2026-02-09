@@ -105,7 +105,7 @@ func (st *speedTracker) Speed() float64 {
 	first := st.samples[0]
 	last := st.samples[len(st.samples)-1]
 	dt := last.time.Sub(first.time).Seconds()
-	if dt < 1 {
+	if dt < 1.0 {
 		return 0
 	}
 	return float64(last.bytes-first.bytes) / dt
@@ -406,9 +406,8 @@ func (s *Service) ScanSource(ctx context.Context, source *models.BackupSource, p
 		if err != nil {
 			return nil, err
 		}
-		entries, err := f.ReadDir(-1)
-		f.Close()
-		return entries, err
+		defer f.Close()
+		return f.ReadDir(-1)
 	}
 
 	// processDir reads a single directory and enqueues subdirectories for workers
@@ -1146,7 +1145,7 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 	s.updateProgress(job.ID, "scanning", fmt.Sprintf("Scanning source: %s", source.Path))
 	s.logger.Info("Scanning source", map[string]interface{}{"path": source.Path})
 
-	scanCb := ScanProgressFunc(func(filesFound, dirsScanned, bytesFound int64) {
+	scanCb := func(filesFound, dirsScanned, bytesFound int64) {
 		s.mu.Lock()
 		if p, ok := s.activeJobs[job.ID]; ok {
 			p.ScanFilesFound = filesFound
@@ -1155,7 +1154,7 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 			p.UpdatedAt = time.Now()
 		}
 		s.mu.Unlock()
-	})
+	}
 
 	files, err := s.ScanSource(ctx, source, scanCb)
 	if err != nil {
