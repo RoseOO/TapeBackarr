@@ -815,18 +815,9 @@ func (s *Service) StreamToTapeCompressedEncrypted(ctx context.Context, sourcePat
 	tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
 	tarCmd.Dir = sourcePath
 
-	var compCmd *exec.Cmd
-	switch compression {
-	case models.CompressionGzip:
-		if _, err := exec.LookPath("pigz"); err == nil {
-			compCmd = exec.CommandContext(ctx, "pigz", "-1", "-c")
-		} else {
-			compCmd = exec.CommandContext(ctx, "gzip", "-1", "-c")
-		}
-	case models.CompressionZstd:
-		compCmd = exec.CommandContext(ctx, "zstd", "-T0", "-c", "--no-progress")
-	default:
-		return fmt.Errorf("unsupported compression type: %s", compression)
+	compCmd, err := buildCompressionCmd(ctx, compression)
+	if err != nil {
+		return err
 	}
 
 	opensslCmd := exec.CommandContext(ctx, "openssl", "enc",

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/RoseOO/TapeBackarr/internal/database"
+	"github.com/RoseOO/TapeBackarr/internal/models"
 )
 
 func setupTestDB(t *testing.T) *database.DB {
@@ -263,5 +264,80 @@ func TestRestoreResultFoldersRestored(t *testing.T) {
 
 	if result.FoldersRestored != 3 {
 		t.Errorf("expected 3 folders restored, got %d", result.FoldersRestored)
+	}
+}
+
+func TestBuildDecompressionCmdGzip(t *testing.T) {
+	ctx := context.Background()
+
+	cmd, err := buildDecompressionCmd(ctx, models.CompressionGzip)
+	if err != nil {
+		t.Fatalf("buildDecompressionCmd failed: %v", err)
+	}
+
+	args := cmd.Args
+	// Should use either pigz or gzip depending on availability
+	if args[0] != "pigz" && args[0] != "gzip" {
+		t.Errorf("expected pigz or gzip, got %s", args[0])
+	}
+
+	// Must include -d (decompress)
+	foundD := false
+	for _, a := range args {
+		if a == "-d" {
+			foundD = true
+			break
+		}
+	}
+	if !foundD {
+		t.Errorf("expected -d flag for decompression, got args: %v", args)
+	}
+}
+
+func TestBuildDecompressionCmdZstd(t *testing.T) {
+	ctx := context.Background()
+
+	cmd, err := buildDecompressionCmd(ctx, models.CompressionZstd)
+	if err != nil {
+		t.Fatalf("buildDecompressionCmd failed: %v", err)
+	}
+
+	if cmd.Args[0] != "zstd" {
+		t.Errorf("expected zstd, got %s", cmd.Args[0])
+	}
+
+	// Must include -d (decompress) and -T0 (multi-threaded)
+	foundD, foundT := false, false
+	for _, a := range cmd.Args {
+		if a == "-d" {
+			foundD = true
+		}
+		if a == "-T0" {
+			foundT = true
+		}
+	}
+	if !foundD {
+		t.Errorf("expected -d flag for decompression, got args: %v", cmd.Args)
+	}
+	if !foundT {
+		t.Errorf("expected -T0 flag for multi-threaded decompression, got args: %v", cmd.Args)
+	}
+}
+
+func TestBuildDecompressionCmdUnsupported(t *testing.T) {
+	ctx := context.Background()
+
+	_, err := buildDecompressionCmd(ctx, models.CompressionType("lz4"))
+	if err == nil {
+		t.Error("expected error for unsupported compression type")
+	}
+}
+
+func TestBuildDecompressionCmdNone(t *testing.T) {
+	ctx := context.Background()
+
+	_, err := buildDecompressionCmd(ctx, models.CompressionNone)
+	if err == nil {
+		t.Error("expected error for CompressionNone")
 	}
 }

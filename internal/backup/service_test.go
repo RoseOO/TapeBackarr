@@ -847,3 +847,73 @@ func TestSaveFailedJobStateNilDB(t *testing.T) {
 	// Should not panic
 	svc.saveFailedJobState(1, p, "network error")
 }
+
+func TestBuildCompressionCmdGzip(t *testing.T) {
+	ctx := context.Background()
+
+	cmd, err := buildCompressionCmd(ctx, models.CompressionGzip)
+	if err != nil {
+		t.Fatalf("buildCompressionCmd failed: %v", err)
+	}
+
+	args := cmd.Args
+	// Should use either pigz or gzip depending on availability
+	if args[0] != "pigz" && args[0] != "gzip" {
+		t.Errorf("expected pigz or gzip, got %s", args[0])
+	}
+
+	// Must include -1 (fastest compression) to avoid tape throughput bottleneck
+	found := false
+	for _, a := range args {
+		if a == "-1" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected -1 flag for fast compression, got args: %v", args)
+	}
+}
+
+func TestBuildCompressionCmdZstd(t *testing.T) {
+	ctx := context.Background()
+
+	cmd, err := buildCompressionCmd(ctx, models.CompressionZstd)
+	if err != nil {
+		t.Fatalf("buildCompressionCmd failed: %v", err)
+	}
+
+	if cmd.Args[0] != "zstd" {
+		t.Errorf("expected zstd, got %s", cmd.Args[0])
+	}
+
+	// Must include -T0 for multi-threaded compression
+	found := false
+	for _, a := range cmd.Args {
+		if a == "-T0" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected -T0 flag for multi-threaded compression, got args: %v", cmd.Args)
+	}
+}
+
+func TestBuildCompressionCmdUnsupported(t *testing.T) {
+	ctx := context.Background()
+
+	_, err := buildCompressionCmd(ctx, models.CompressionType("lz4"))
+	if err == nil {
+		t.Error("expected error for unsupported compression type")
+	}
+}
+
+func TestBuildCompressionCmdNone(t *testing.T) {
+	ctx := context.Background()
+
+	_, err := buildCompressionCmd(ctx, models.CompressionNone)
+	if err == nil {
+		t.Error("expected error for CompressionNone")
+	}
+}

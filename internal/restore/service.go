@@ -66,6 +66,23 @@ func NewService(db *database.DB, tapeService *tape.Service, logger *logging.Logg
 	}
 }
 
+// buildDecompressionCmd returns the exec.Cmd for the given compression type.
+// For gzip it uses pigz (parallel gzip) with -d when available,
+// falling back to gzip -d. For zstd it uses automatic multi-threading.
+func buildDecompressionCmd(ctx context.Context, compression models.CompressionType) (*exec.Cmd, error) {
+	switch compression {
+	case models.CompressionGzip:
+		if _, err := exec.LookPath("pigz"); err == nil {
+			return exec.CommandContext(ctx, "pigz", "-d", "-c"), nil
+		}
+		return exec.CommandContext(ctx, "gzip", "-d", "-c"), nil
+	case models.CompressionZstd:
+		return exec.CommandContext(ctx, "zstd", "-d", "-T0", "-c"), nil
+	default:
+		return nil, fmt.Errorf("unsupported compression type: %s", compression)
+	}
+}
+
 // GetRequiredTapes returns the tapes needed for a restore operation
 func (s *Service) GetRequiredTapes(ctx context.Context, req *RestoreRequest) ([]TapeRequirement, error) {
 	var requirements []TapeRequirement
@@ -177,16 +194,19 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 		"folder_count":  len(req.FolderPaths),
 	})
 
-	// Get backup set info including encryption status
+	// Get backup set info including encryption and compression status
 	var tapeID int64
 	var startBlock int64
 	var encrypted bool
 	var encryptionKeyID *int64
+	var compressed bool
+	var compressionType string
 	err := s.db.QueryRow(`
-		SELECT tape_id, COALESCE(start_block, 0), COALESCE(encrypted, 0), encryption_key_id
+		SELECT tape_id, COALESCE(start_block, 0), COALESCE(encrypted, 0), encryption_key_id,
+		       COALESCE(compressed, 0), COALESCE(compression_type, 'none')
 		FROM backup_sets 
 		WHERE id = ?
-	`, req.BackupSetID).Scan(&tapeID, &startBlock, &encrypted, &encryptionKeyID)
+	`, req.BackupSetID).Scan(&tapeID, &startBlock, &encrypted, &encryptionKeyID, &compressed, &compressionType)
 	if err != nil {
 		return nil, fmt.Errorf("backup set not found: %w", err)
 	}
@@ -252,8 +272,74 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 	}
 
 	var output []byte
-	if encrypted && encryptionKey != "" {
-		// For encrypted backups: openssl dec | tar
+	if encrypted && encryptionKey != "" && compressed {
+		// For compressed+encrypted backups: openssl dec | decompress | tar
+		opensslCmd := exec.CommandContext(ctx, "openssl", "enc",
+			"-d", // Decrypt
+			"-aes-256-cbc",
+			"-pbkdf2",
+			"-iter", "100000",
+			"-pass", "pass:"+encryptionKey,
+			"-in", devicePath,
+		)
+
+		decompCmd, err := buildDecompressionCmd(ctx, models.CompressionType(compressionType))
+		if err != nil {
+			return nil, fmt.Errorf("failed to build decompression command: %w", err)
+		}
+
+		tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
+
+		// Pipeline: openssl -> decompress -> tar
+		opensslPipe, err := opensslCmd.StdoutPipe()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create openssl pipe: %w", err)
+		}
+		decompCmd.Stdin = opensslPipe
+
+		decompPipe, err := decompCmd.StdoutPipe()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create decompression pipe: %w", err)
+		}
+		tarCmd.Stdin = decompPipe
+
+		if err := opensslCmd.Start(); err != nil {
+			return nil, fmt.Errorf("failed to start openssl: %w", err)
+		}
+		if err := decompCmd.Start(); err != nil {
+			opensslCmd.Process.Kill()
+			return nil, fmt.Errorf("failed to start decompression: %w", err)
+		}
+		if err := tarCmd.Start(); err != nil {
+			opensslCmd.Process.Kill()
+			decompCmd.Process.Kill()
+			return nil, fmt.Errorf("failed to start tar: %w", err)
+		}
+
+		opensslErr := opensslCmd.Wait()
+		decompErr := decompCmd.Wait()
+		tarErr := tarCmd.Wait()
+
+		if opensslErr != nil {
+			errMsg := fmt.Sprintf("decryption failed: %v", opensslErr)
+			result.Errors = append(result.Errors, errMsg)
+			s.logger.Error("Restore failed", map[string]interface{}{"error": errMsg})
+			return result, fmt.Errorf("decryption failed: %w", opensslErr)
+		}
+		if decompErr != nil {
+			errMsg := fmt.Sprintf("decompression failed: %v", decompErr)
+			result.Errors = append(result.Errors, errMsg)
+			s.logger.Error("Restore failed", map[string]interface{}{"error": errMsg})
+			return result, fmt.Errorf("decompression failed: %w", decompErr)
+		}
+		if tarErr != nil {
+			errMsg := fmt.Sprintf("tar extract failed: %v", tarErr)
+			result.Errors = append(result.Errors, errMsg)
+			s.logger.Error("Restore failed", map[string]interface{}{"error": errMsg})
+			return result, fmt.Errorf("restore failed: %w", tarErr)
+		}
+	} else if encrypted && encryptionKey != "" {
+		// For encrypted-only backups: openssl dec | tar
 		opensslCmd := exec.CommandContext(ctx, "openssl", "enc",
 			"-d", // Decrypt
 			"-aes-256-cbc",
@@ -295,12 +381,54 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 			s.logger.Error("Restore failed", map[string]interface{}{"error": errMsg})
 			return result, fmt.Errorf("restore failed: %w", tarErr)
 		}
+	} else if compressed {
+		// For compressed-only backups: decompress < device | tar
+		decompCmd, err := buildDecompressionCmd(ctx, models.CompressionType(compressionType))
+		if err != nil {
+			return nil, fmt.Errorf("failed to build decompression command: %w", err)
+		}
+
+		tapeFile, err := os.Open(devicePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open tape device: %w", err)
+		}
+		defer tapeFile.Close()
+
+		decompCmd.Stdin = tapeFile
+
+		tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
+
+		decompPipe, err := decompCmd.StdoutPipe()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create decompression pipe: %w", err)
+		}
+		tarCmd.Stdin = decompPipe
+
+		if err := decompCmd.Start(); err != nil {
+			return nil, fmt.Errorf("failed to start decompression: %w", err)
+		}
+		if err := tarCmd.Start(); err != nil {
+			decompCmd.Process.Kill()
+			return nil, fmt.Errorf("failed to start tar: %w", err)
+		}
+
+		decompErr := decompCmd.Wait()
+		tarErr := tarCmd.Wait()
+
+		if decompErr != nil {
+			errMsg := fmt.Sprintf("decompression failed: %v", decompErr)
+			result.Errors = append(result.Errors, errMsg)
+			s.logger.Error("Restore failed", map[string]interface{}{"error": errMsg})
+			return result, fmt.Errorf("decompression failed: %w", decompErr)
+		}
+		if tarErr != nil {
+			errMsg := fmt.Sprintf("tar extract failed: %v", tarErr)
+			result.Errors = append(result.Errors, errMsg)
+			s.logger.Error("Restore failed", map[string]interface{}{"error": errMsg})
+			return result, fmt.Errorf("restore failed: %w", tarErr)
+		}
 	} else {
-		// Standard unencrypted restore
-		tarArgs = append([]string{"-f", devicePath}, tarArgs[1:]...) // Add -f at the start after -x
-		tarArgs[0] = "-x"
-		tarArgs = append(tarArgs[:2], append([]string{"-f", devicePath}, tarArgs[2:]...)...)
-		// Rebuild properly
+		// Standard unencrypted, uncompressed restore
 		tarArgs = []string{
 			"-x",
 			"-b", fmt.Sprintf("%d", s.blockSize/512),
