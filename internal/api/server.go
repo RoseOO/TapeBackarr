@@ -231,6 +231,7 @@ func (s *Server) setupRoutes() {
 			r.Get("/", s.handleListJobs)
 			r.Post("/", s.handleCreateJob)
 			r.Get("/active", s.handleActiveJobs)
+			r.Get("/resumable", s.handleResumableJobs)
 			r.Get("/{id}", s.handleGetJob)
 			r.Put("/{id}", s.handleUpdateJob)
 			r.Delete("/{id}", s.handleDeleteJob)
@@ -238,6 +239,7 @@ func (s *Server) setupRoutes() {
 			r.Post("/{id}/cancel", s.handleCancelJob)
 			r.Post("/{id}/pause", s.handlePauseJob)
 			r.Post("/{id}/resume", s.handleResumeJob)
+			r.Post("/{id}/retry", s.handleRetryJob)
 			r.Get("/{id}/recommend-tape", s.handleRecommendTape)
 		})
 
@@ -1459,7 +1461,9 @@ func (s *Server) handleLabelTape(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListPools(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`
 		SELECT tp.id, tp.name, tp.description, tp.retention_days, tp.allow_reuse, tp.allocation_policy, tp.created_at,
-		       COUNT(t.id) as tape_count
+		       COUNT(t.id) as tape_count,
+		       COALESCE(SUM(t.capacity_bytes), 0) as total_capacity_bytes,
+		       COALESCE(SUM(t.used_bytes), 0) as total_used_bytes
 		FROM tape_pools tp
 		LEFT JOIN tapes t ON t.pool_id = tp.id
 		GROUP BY tp.id
@@ -1475,18 +1479,22 @@ func (s *Server) handleListPools(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var p models.TapePool
 		var tapeCount int
-		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.RetentionDays, &p.AllowReuse, &p.AllocationPolicy, &p.CreatedAt, &tapeCount); err != nil {
+		var totalCapacity, totalUsed int64
+		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.RetentionDays, &p.AllowReuse, &p.AllocationPolicy, &p.CreatedAt, &tapeCount, &totalCapacity, &totalUsed); err != nil {
 			continue
 		}
 		pools = append(pools, map[string]interface{}{
-			"id":                p.ID,
-			"name":              p.Name,
-			"description":       p.Description,
-			"retention_days":    p.RetentionDays,
-			"allow_reuse":       p.AllowReuse,
-			"allocation_policy": p.AllocationPolicy,
-			"tape_count":        tapeCount,
-			"created_at":        p.CreatedAt,
+			"id":                   p.ID,
+			"name":                 p.Name,
+			"description":          p.Description,
+			"retention_days":       p.RetentionDays,
+			"allow_reuse":          p.AllowReuse,
+			"allocation_policy":    p.AllocationPolicy,
+			"tape_count":           tapeCount,
+			"total_capacity_bytes": totalCapacity,
+			"total_used_bytes":     totalUsed,
+			"total_free_bytes":     totalCapacity - totalUsed,
+			"created_at":           p.CreatedAt,
 		})
 	}
 
@@ -1544,7 +1552,28 @@ func (s *Server) handleGetPool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.respondJSON(w, http.StatusOK, p)
+	// Fetch storage statistics for the pool
+	var tapeCount int
+	var totalCapacity, totalUsed int64
+	s.db.QueryRow(`
+		SELECT COUNT(id), COALESCE(SUM(capacity_bytes), 0), COALESCE(SUM(used_bytes), 0)
+		FROM tapes WHERE pool_id = ?
+	`, id).Scan(&tapeCount, &totalCapacity, &totalUsed)
+
+	s.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"id":                   p.ID,
+		"name":                 p.Name,
+		"description":          p.Description,
+		"retention_days":       p.RetentionDays,
+		"allow_reuse":          p.AllowReuse,
+		"allocation_policy":    p.AllocationPolicy,
+		"tape_count":           tapeCount,
+		"total_capacity_bytes": totalCapacity,
+		"total_used_bytes":     totalUsed,
+		"total_free_bytes":     totalCapacity - totalUsed,
+		"created_at":           p.CreatedAt,
+		"updated_at":           p.UpdatedAt,
+	})
 }
 
 func (s *Server) handleUpdatePool(w http.ResponseWriter, r *http.Request) {
@@ -2645,6 +2674,154 @@ func (s *Server) handleResumeJob(w http.ResponseWriter, r *http.Request) {
 	} else {
 		s.respondError(w, http.StatusNotFound, "no active job found with that id")
 	}
+}
+
+// handleRetryJob retries a failed or paused backup job, optionally resuming from where it left off
+func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+
+	var req struct {
+		TapeID      int64 `json:"tape_id"`       // Optional: use a different tape
+		UsePool     *bool `json:"use_pool"`       // If true, select tape from pool
+		FromScratch bool  `json:"from_scratch"`   // If true, start fresh instead of resuming
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+
+	// Get job details
+	var job models.BackupJob
+	err = s.db.QueryRow(`
+		SELECT id, name, source_id, pool_id, backup_type, retention_days, encryption_enabled, encryption_key_id, compression
+		FROM backup_jobs WHERE id = ?
+	`, id).Scan(&job.ID, &job.Name, &job.SourceID, &job.PoolID, &job.BackupType, &job.RetentionDays, &job.EncryptionEnabled, &job.EncryptionKeyID, &job.Compression)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "job not found")
+		return
+	}
+
+	// Get source details
+	var source models.BackupSource
+	err = s.db.QueryRow(`
+		SELECT id, name, source_type, path, include_patterns, exclude_patterns
+		FROM backup_sources WHERE id = ?
+	`, job.SourceID).Scan(&source.ID, &source.Name, &source.SourceType, &source.Path, &source.IncludePatterns, &source.ExcludePatterns)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "source not found")
+		return
+	}
+
+	// Look for a resumable execution if not starting from scratch
+	var resumeState string
+	if !req.FromScratch {
+		_ = s.db.QueryRow(`
+			SELECT resume_state FROM job_executions
+			WHERE job_id = ? AND can_resume = 1 AND status IN ('paused', 'failed')
+			ORDER BY created_at DESC LIMIT 1
+		`, id).Scan(&resumeState)
+	}
+
+	// Determine tape to use
+	tapeID := req.TapeID
+	usePool := req.TapeID == 0
+	if req.UsePool != nil {
+		usePool = *req.UsePool
+	}
+
+	var tapeLabel string
+	if usePool && job.PoolID > 0 {
+		selectedTapeID, selectedLabel, err := s.selectTapeFromPool(job.PoolID, job.RetentionDays)
+		if err != nil {
+			s.respondError(w, http.StatusBadRequest, fmt.Sprintf("no suitable tape found in pool: %v", err))
+			return
+		}
+		tapeID = selectedTapeID
+		tapeLabel = selectedLabel
+	} else if tapeID == 0 {
+		s.respondError(w, http.StatusBadRequest, "tape_id is required when not using pool-based selection")
+		return
+	} else {
+		_ = s.db.QueryRow("SELECT label FROM tapes WHERE id = ?", tapeID).Scan(&tapeLabel)
+	}
+
+	// Mark previous failed/paused executions as superseded
+	s.db.Exec(`
+		UPDATE job_executions SET can_resume = 0
+		WHERE job_id = ? AND can_resume = 1 AND status IN ('paused', 'failed')
+	`, id)
+
+	// Run backup in background with optional resume state
+	go func() {
+		ctx := context.Background()
+		if resumeState != "" {
+			s.backupService.RunBackupWithResume(ctx, &job, &source, tapeID, job.BackupType, resumeState)
+		} else {
+			s.backupService.RunBackup(ctx, &job, &source, tapeID, job.BackupType)
+		}
+	}()
+
+	s.auditLog(r, "retry", "backup_job", id, "Retried backup job")
+
+	msg := "Backup job retried"
+	if resumeState != "" {
+		msg = "Backup job resumed from checkpoint"
+	}
+	if tapeLabel != "" {
+		msg += fmt.Sprintf(" using tape %s", tapeLabel)
+	}
+
+	s.respondJSON(w, http.StatusAccepted, map[string]interface{}{
+		"status":        "started",
+		"message":       msg,
+		"tape_id":       tapeID,
+		"tape_label":    tapeLabel,
+		"resumed":       resumeState != "",
+	})
+}
+
+// handleResumableJobs lists jobs that have paused or failed executions that can be resumed
+func (s *Server) handleResumableJobs(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.db.Query(`
+		SELECT je.id, je.job_id, j.name as job_name, je.status, je.files_processed, je.bytes_processed,
+		       je.error_message, je.can_resume, je.created_at, je.updated_at
+		FROM job_executions je
+		JOIN backup_jobs j ON je.job_id = j.id
+		WHERE je.can_resume = 1 AND je.status IN ('paused', 'failed')
+		ORDER BY je.updated_at DESC
+	`)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer rows.Close()
+
+	executions := make([]map[string]interface{}, 0)
+	for rows.Next() {
+		var id, jobID, filesProcessed, bytesProcessed int64
+		var jobName, status, errorMessage string
+		var canResume bool
+		var createdAt, updatedAt time.Time
+		if err := rows.Scan(&id, &jobID, &jobName, &status, &filesProcessed, &bytesProcessed,
+			&errorMessage, &canResume, &createdAt, &updatedAt); err != nil {
+			continue
+		}
+		executions = append(executions, map[string]interface{}{
+			"id":              id,
+			"job_id":          jobID,
+			"job_name":        jobName,
+			"status":          status,
+			"files_processed": filesProcessed,
+			"bytes_processed": bytesProcessed,
+			"error_message":   errorMessage,
+			"can_resume":      canResume,
+			"created_at":      createdAt,
+			"updated_at":      updatedAt,
+		})
+	}
+
+	s.respondJSON(w, http.StatusOK, executions)
 }
 
 // Backup set handlers
