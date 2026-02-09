@@ -54,11 +54,24 @@
   let showCreateJobModal = false;
   let showBackupModal = false;
   let showEditJobModal = false;
+  let showRestoreModal = false;
   let editingJob: ProxmoxJob | null = null;
   let backupTarget: ProxmoxGuest | null = null;
   let backupForm = { pool_id: 0, mode: 'snapshot', compress: 'zstd' };
   let tapes: any[] = [];
   let pools: any[] = [];
+  let drives: { id: number; device_path: string; display_name: string; vendor: string; model: string; status: string; enabled: boolean; current_tape: string }[] = [];
+  let restoreTarget: ProxmoxBackup | null = null;
+  let restoreStep: 'config' | 'running' | 'done' | 'error' = 'config';
+  let restoreError = '';
+  let restoreResult: any = null;
+  let restoreForm = {
+    drive_id: null as number | null,
+    target_vmid: 0,
+    storage: 'local',
+    overwrite: false,
+    start_after: false,
+  };
 
   const defaultJobForm = {
     name: '',
@@ -112,14 +125,21 @@
         }
       }
 
-      // Also load tapes and pools for backup form
+      // Also load tapes, pools, and drives for backup/restore forms
       try {
-        const [tapeResult, poolResult] = await Promise.allSettled([
+        const [tapeResult, poolResult, driveResult] = await Promise.allSettled([
           api.get('/tapes'),
           api.get('/pools'),
+          api.get('/drives'),
         ]);
         if (tapeResult.status === 'fulfilled') tapes = Array.isArray(tapeResult.value) ? tapeResult.value : [];
         if (poolResult.status === 'fulfilled') pools = Array.isArray(poolResult.value) ? poolResult.value : [];
+        if (driveResult.status === 'fulfilled') {
+          drives = (Array.isArray(driveResult.value) ? driveResult.value : []).filter((d: any) => d.enabled);
+          if (drives.length > 0 && restoreForm.drive_id === null) {
+            restoreForm.drive_id = drives[0].id;
+          }
+        }
       } catch {}
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load data';
@@ -254,6 +274,44 @@
     if (!d) return '-';
     return new Date(d).toLocaleString();
   }
+
+  function openRestoreModal(backup: ProxmoxBackup) {
+    restoreTarget = backup;
+    restoreForm = {
+      drive_id: drives.length > 0 ? drives[0].id : null,
+      target_vmid: backup.vmid,
+      storage: 'local',
+      overwrite: false,
+      start_after: false,
+    };
+    restoreStep = 'config';
+    restoreError = '';
+    restoreResult = null;
+    showRestoreModal = true;
+  }
+
+  async function executeProxmoxRestore() {
+    if (!restoreTarget) return;
+    restoreStep = 'running';
+    restoreError = '';
+    try {
+      const payload: any = {
+        backup_id: restoreTarget.id,
+        target_vmid: restoreForm.target_vmid || undefined,
+        storage: restoreForm.storage,
+        overwrite: restoreForm.overwrite,
+        start_after: restoreForm.start_after,
+      };
+      if (restoreForm.drive_id) {
+        payload.drive_id = restoreForm.drive_id;
+      }
+      restoreResult = await api.post('/proxmox/restores', payload);
+      restoreStep = 'done';
+    } catch (e) {
+      restoreError = e instanceof Error ? e.message : 'Restore failed';
+      restoreStep = 'error';
+    }
+  }
 </script>
 
 <div class="page-header">
@@ -362,6 +420,7 @@
             <th>Status</th>
             <th>Started</th>
             <th>Completed</th>
+            <th>Actions</th>
           </tr>
         </thead>
         <tbody>
@@ -381,10 +440,17 @@
               </td>
               <td>{formatDate(backup.start_time)}</td>
               <td>{formatDate(backup.end_time)}</td>
+              <td>
+                {#if backup.status === 'completed'}
+                  <button class="btn btn-primary btn-sm" on:click={() => openRestoreModal(backup)}>
+                    🔄 Restore
+                  </button>
+                {/if}
+              </td>
             </tr>
           {/each}
           {#if backups.length === 0}
-            <tr><td colspan="8" style="text-align:center; color: var(--text-muted);">No Proxmox backups found</td></tr>
+            <tr><td colspan="9" style="text-align:center; color: var(--text-muted);">No Proxmox backups found</td></tr>
           {/if}
         </tbody>
       </table>
@@ -633,6 +699,94 @@
           <button type="submit" class="btn btn-success" disabled={!backupForm.pool_id}>Start Backup</button>
         </div>
       </form>
+    </div>
+  </div>
+{/if}
+
+{#if showRestoreModal && restoreTarget}
+  <div class="modal-overlay" on:click={() => { if (restoreStep !== 'running') showRestoreModal = false; }}>
+    <div class="modal modal-lg" on:click|stopPropagation={() => {}}>
+      {#if restoreStep === 'config'}
+        <h2>🔄 Restore: {restoreTarget.vm_name} (VMID {restoreTarget.vmid})</h2>
+        <div style="margin-bottom: 1rem;">
+          <div style="display: flex; gap: 1rem; flex-wrap: wrap; font-size: 0.85rem; color: var(--text-secondary);">
+            <span>📼 Tape: <strong>{restoreTarget.tape_label || '-'}</strong></span>
+            <span>📦 Size: <strong>{formatBytes(restoreTarget.file_size)}</strong></span>
+            <span>🖥️ Node: <strong>{restoreTarget.node}</strong></span>
+          </div>
+        </div>
+        <form on:submit|preventDefault={executeProxmoxRestore}>
+          <div class="form-group">
+            <label for="rx-drive">Tape Drive</label>
+            <select id="rx-drive" bind:value={restoreForm.drive_id}>
+              {#each drives as drive}
+                <option value={drive.id}>
+                  {drive.display_name || drive.device_path}
+                  {#if drive.vendor || drive.model} ({drive.vendor} {drive.model}){/if}
+                  {#if drive.current_tape} — 📼 {drive.current_tape}{/if}
+                </option>
+              {/each}
+              {#if drives.length === 0}
+                <option value={null}>No drives available</option>
+              {/if}
+            </select>
+            <small style="color: var(--text-muted)">Select the tape drive to read from. The correct tape must be loaded.</small>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="rx-vmid">Target VMID</label>
+              <input type="number" id="rx-vmid" bind:value={restoreForm.target_vmid} min="100" />
+              <small style="color: var(--text-muted)">Use original VMID or assign a new one</small>
+            </div>
+            <div class="form-group">
+              <label for="rx-storage">Target Storage</label>
+              <input type="text" id="rx-storage" bind:value={restoreForm.storage} placeholder="local" />
+              <small style="color: var(--text-muted)">Proxmox storage for restored disks</small>
+            </div>
+          </div>
+          <div class="form-group" style="display:flex;flex-direction:column;gap:0.5rem;">
+            <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;">
+              <input type="checkbox" bind:checked={restoreForm.overwrite} style="width:auto;" />
+              Overwrite if VMID exists
+            </label>
+            <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;">
+              <input type="checkbox" bind:checked={restoreForm.start_after} style="width:auto;" />
+              Start VM/container after restore
+            </label>
+          </div>
+          <div class="modal-actions">
+            <button type="button" class="btn btn-secondary" on:click={() => showRestoreModal = false}>Cancel</button>
+            <button type="submit" class="btn btn-success" disabled={drives.length === 0}>🚀 Start Restore</button>
+          </div>
+        </form>
+      {:else if restoreStep === 'running'}
+        <h2>🔄 Restoring...</h2>
+        <div style="text-align: center; padding: 2rem 0;">
+          <div style="font-size: 2rem; margin-bottom: 1rem;">📼</div>
+          <p>Restoring <strong>{restoreTarget.vm_name}</strong> (VMID {restoreTarget.vmid}) from tape...</p>
+          <p style="color: var(--text-muted); font-size: 0.85rem;">Please wait. Do not eject the tape.</p>
+        </div>
+      {:else if restoreStep === 'done'}
+        <h2>✅ Restore Complete</h2>
+        <div style="text-align: center; padding: 2rem 0;">
+          <div style="font-size: 2rem; margin-bottom: 1rem;">✅</div>
+          <p><strong>{restoreTarget.vm_name}</strong> (VMID {restoreForm.target_vmid}) has been restored successfully.</p>
+          <div class="modal-actions" style="justify-content: center;">
+            <button class="btn btn-primary" on:click={() => showRestoreModal = false}>Done</button>
+          </div>
+        </div>
+      {:else if restoreStep === 'error'}
+        <h2>❌ Restore Failed</h2>
+        <div style="padding: 1rem 0;">
+          <div style="background: var(--badge-danger-bg); color: var(--badge-danger-text); padding: 1rem; border-radius: 8px; margin-bottom: 1rem;">
+            {restoreError}
+          </div>
+          <div class="modal-actions">
+            <button class="btn btn-secondary" on:click={() => showRestoreModal = false}>Close</button>
+            <button class="btn btn-primary" on:click={() => restoreStep = 'config'}>← Try Again</button>
+          </div>
+        </div>
+      {/if}
     </div>
   </div>
 {/if}

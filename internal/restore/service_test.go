@@ -517,3 +517,135 @@ func TestRestorePipeline(t *testing.T) {
 		})
 	}
 }
+
+func TestRestoreRequestDriveID(t *testing.T) {
+	// Test that RestoreRequest supports the optional drive_id field
+	driveID := int64(42)
+	req := RestoreRequest{
+		BackupSetID: 1,
+		DestPath:    "/restore/dest",
+		DriveID:     &driveID,
+	}
+
+	if req.DriveID == nil {
+		t.Fatal("expected DriveID to be set")
+	}
+	if *req.DriveID != 42 {
+		t.Errorf("expected DriveID 42, got %d", *req.DriveID)
+	}
+
+	// When not set, should be nil
+	req2 := RestoreRequest{
+		BackupSetID: 2,
+		DestPath:    "/restore/dest",
+	}
+	if req2.DriveID != nil {
+		t.Errorf("expected DriveID to be nil, got %v", req2.DriveID)
+	}
+}
+
+func TestSetNotifier(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	svc := NewService(db, nil, nil, 65536)
+
+	// Initially nil
+	if svc.notifier != nil {
+		t.Error("expected notifier to be nil initially")
+	}
+
+	// Set a notifier
+	svc.SetNotifier(&mockNotifier{})
+	if svc.notifier == nil {
+		t.Error("expected notifier to be set after SetNotifier")
+	}
+}
+
+type mockNotifier struct {
+	tapeChangeCalls int
+	wrongTapeCalls  int
+}
+
+func (m *mockNotifier) SendRestoreTapeChangeRequired(_ context.Context, _, _ string) error {
+	m.tapeChangeCalls++
+	return nil
+}
+
+func (m *mockNotifier) SendRestoreWrongTape(_ context.Context, _, _ string) error {
+	m.wrongTapeCalls++
+	return nil
+}
+
+func TestResolveDriveDevicePathByDriveID(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	// Insert a tape drive
+	_, err := db.Exec(`INSERT INTO tape_drives (device_path, display_name, status, enabled) VALUES (?, ?, ?, ?)`,
+		"/dev/nst0", "Drive 0", "ready", 1)
+	if err != nil {
+		t.Fatalf("failed to insert tape drive: %v", err)
+	}
+
+	svc := &Service{db: db, blockSize: 65536}
+
+	driveID := int64(1)
+	req := &RestoreRequest{DriveID: &driveID}
+	devicePath, err := svc.resolveDriveDevicePath(req, 999)
+	if err != nil {
+		t.Fatalf("resolveDriveDevicePath failed: %v", err)
+	}
+	if devicePath != "/dev/nst0" {
+		t.Errorf("expected /dev/nst0, got %s", devicePath)
+	}
+}
+
+func TestResolveDriveDevicePathByTapeID(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	// Insert a tape (from setupTestData we get tape ID=1)
+	setupTestData(t, db)
+
+	// Insert a tape drive with current_tape_id = 1
+	_, err := db.Exec(`INSERT INTO tape_drives (device_path, display_name, status, enabled, current_tape_id) VALUES (?, ?, ?, ?, ?)`,
+		"/dev/nst1", "Drive 1", "ready", 1, 1)
+	if err != nil {
+		t.Fatalf("failed to insert tape drive: %v", err)
+	}
+
+	svc := &Service{db: db, blockSize: 65536}
+
+	// No DriveID => resolve by tape ID
+	req := &RestoreRequest{}
+	devicePath, err := svc.resolveDriveDevicePath(req, 1)
+	if err != nil {
+		t.Fatalf("resolveDriveDevicePath failed: %v", err)
+	}
+	if devicePath != "/dev/nst1" {
+		t.Errorf("expected /dev/nst1, got %s", devicePath)
+	}
+}
+
+func TestResolveDriveDevicePathNotFound(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	svc := &Service{db: db, blockSize: 65536}
+
+	// Non-existent drive
+	driveID := int64(9999)
+	req := &RestoreRequest{DriveID: &driveID}
+	_, err := svc.resolveDriveDevicePath(req, 999)
+	if err == nil {
+		t.Error("expected error for non-existent drive")
+	}
+
+	// No drive matches tape
+	req2 := &RestoreRequest{}
+	_, err = svc.resolveDriveDevicePath(req2, 9999)
+	if err == nil {
+		t.Error("expected error when no drive has the tape loaded")
+	}
+}
