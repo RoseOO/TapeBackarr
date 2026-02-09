@@ -141,6 +141,23 @@ type TapeDrive struct {
 	UpdatedAt     time.Time        `json:"updated_at" db:"updated_at"`
 }
 
+// TapeFormatType represents the tape format used for writing data
+type TapeFormatType string
+
+const (
+	// TapeFormatRaw uses tar-based streaming directly to the tape device.
+	// Data is written as sequential tar archives with custom label/TOC blocks.
+	// This is the traditional format used by TapeBackarr.
+	TapeFormatRaw TapeFormatType = "raw"
+	// TapeFormatLTFS uses the Linear Tape File System (LTFS) format.
+	// LTFS makes each tape self-describing by storing data as a standard
+	// POSIX filesystem on the tape. Files can be accessed by mounting the
+	// tape with any LTFS-compatible tool, without needing the TapeBackarr
+	// database. Requires LTFS software (mkltfs, ltfs) and LTO-5 or later.
+	// Inspired by github.com/samuelncui/yatm which uses LTFS for tape management.
+	TapeFormatLTFS TapeFormatType = "ltfs"
+)
+
 // CompressionType represents the compression algorithm used
 type CompressionType string
 

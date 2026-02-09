@@ -52,3 +52,28 @@ func TestDensityToLTOTypeCoversAllCapacities(t *testing.T) {
 		}
 	}
 }
+
+func TestTapeFormatType(t *testing.T) {
+	tests := []struct {
+		name    string
+		format  TapeFormatType
+		wantStr string
+	}{
+		{"raw format", TapeFormatRaw, "raw"},
+		{"ltfs format", TapeFormatLTFS, "ltfs"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if string(tt.format) != tt.wantStr {
+				t.Errorf("expected %q, got %q", tt.wantStr, string(tt.format))
+			}
+		})
+	}
+}
+
+func TestTapeFormatTypeDistinct(t *testing.T) {
+	if TapeFormatRaw == TapeFormatLTFS {
+		t.Error("TapeFormatRaw and TapeFormatLTFS should be distinct values")
+	}
+}

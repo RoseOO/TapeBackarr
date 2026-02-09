@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1312,6 +1313,46 @@ func (s *Service) StreamToTapeCompressedEncrypted(ctx context.Context, sourcePat
 	}
 }
 
+// StreamToTapeLTFS writes files to a mounted LTFS volume instead of using a
+// tar-based streaming pipeline. This provides a self-describing tape format
+// that can be read by any LTFS-compatible tool without needing the TapeBackarr
+// database. Files are written in the order provided (caller should pre-sort by
+// path for optimal sequential source reads).
+//
+// Inspired by github.com/samuelncui/yatm's LTFS-based tape management and
+// github.com/samuelncui/acp's sorted copy approach for optimal write speeds.
+func (s *Service) StreamToTapeLTFS(ctx context.Context, sourcePath string, files []FileInfo, ltfsMountPoint string, progressCb func(bytesWritten int64), pauseFlag *int32) (int64, error) {
+	if len(files) == 0 {
+		return 0, nil
+	}
+
+	ltfsSvc := tape.NewLTFSService("", ltfsMountPoint)
+	if !ltfsSvc.IsMounted() {
+		return 0, fmt.Errorf("LTFS volume not mounted at %s", ltfsMountPoint)
+	}
+
+	// Build sorted file path list
+	filePaths := make([]string, len(files))
+	for i, f := range files {
+		filePaths[i] = f.Path
+	}
+
+	// Write files to LTFS with progress tracking
+	totalBytes, _, err := ltfsSvc.WriteFiles(ctx, sourcePath, filePaths, func(bytesWritten int64) {
+		// Honour pause flag
+		if pauseFlag != nil {
+			for atomic.LoadInt32(pauseFlag) == 1 {
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+		if progressCb != nil {
+			progressCb(bytesWritten)
+		}
+	})
+
+	return totalBytes, err
+}
+
 // GetEncryptionKey retrieves the base64 encryption key for a given key ID
 func (s *Service) GetEncryptionKey(ctx context.Context, keyID int64) (string, error) {
 	var keyData string
@@ -1640,6 +1681,15 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 	for _, f := range files {
 		totalBytes += f.Size
 	}
+
+	// Sort files by path to optimise sequential read access on the source
+	// filesystem. Grouping files by directory ensures that reads from NFS/SMB
+	// shares or local disks are sequential rather than random, which prevents
+	// I/O stalls that starve the tape pipeline and cause shoe-shining.
+	// Inspired by github.com/samuelncui/acp's sorted-copy approach.
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].Path < files[j].Path
+	})
 
 	// Update progress with file/byte totals
 	s.mu.Lock()

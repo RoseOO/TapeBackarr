@@ -45,6 +45,13 @@ type TapeConfig struct {
 	PipelineDepthMB  int           `json:"pipeline_depth_mb"`
 	WriteRetries     int           `json:"write_retries"`
 	VerifyAfterWrite bool          `json:"verify_after_write"`
+	// LTFS enables the Linear Tape File System format for tape operations.
+	// When enabled, tapes are formatted with LTFS and files are written as a
+	// standard POSIX filesystem instead of tar archives. This makes each tape
+	// self-describing and readable with any LTFS-compatible tool.
+	// Requires LTO-5 or later drives and LTFS software (mkltfs, ltfs).
+	EnableLTFS     bool   `json:"enable_ltfs"`
+	LTFSMountPoint string `json:"ltfs_mount_point,omitempty"`
 }
 
 // LoggingConfig holds logging configuration
@@ -128,6 +135,8 @@ func DefaultConfig() *Config {
 			PipelineDepthMB:  64,
 			WriteRetries:     3,
 			VerifyAfterWrite: true,
+			EnableLTFS:       false,
+			LTFSMountPoint:   "/mnt/ltfs",
 		},
 		Logging: LoggingConfig{
 			Level:      "info",
