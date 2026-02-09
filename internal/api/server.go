@@ -2910,7 +2910,7 @@ func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request) {
 
 	// Delete child records that reference backup_sets belonging to this job.
 	// Table names are hardcoded; no user input is used in the query.
-	backupSetChildren := []string{"catalog_entries", "job_executions", "snapshots", "restore_operations", "tape_spanning_members"}
+	backupSetChildren := []string{"catalog_entries", "snapshots", "restore_operations", "tape_spanning_members"}
 	for _, table := range backupSetChildren {
 		query := fmt.Sprintf("DELETE FROM %s WHERE backup_set_id IN (SELECT id FROM backup_sets WHERE job_id = ?)", table)
 		if _, err := s.db.Exec(query, id); err != nil {
@@ -2920,14 +2920,14 @@ func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Delete tape_change_requests referencing job_executions for this job
+	// Delete tape_change_requests referencing job_executions for this job (before deleting job_executions)
 	if _, err := s.db.Exec("DELETE FROM tape_change_requests WHERE job_execution_id IN (SELECT id FROM job_executions WHERE job_id = ?)", id); err != nil {
 		if s.logger != nil {
 			s.logger.Warn("failed to delete tape_change_requests for job", map[string]interface{}{"job_id": id, "error": err.Error()})
 		}
 	}
 
-	// Delete job_executions referencing this job directly
+	// Delete job_executions referencing this job
 	if _, err := s.db.Exec("DELETE FROM job_executions WHERE job_id = ?", id); err != nil {
 		if s.logger != nil {
 			s.logger.Warn("failed to delete job_executions for job", map[string]interface{}{"job_id": id, "error": err.Error()})
