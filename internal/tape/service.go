@@ -714,6 +714,11 @@ const (
 // The TOC is written as the last file section on the tape, after all backup data,
 // allowing the tape to be self-describing even without access to the database.
 //
+// Each tape in a multi-tape backup receives its own TOC containing only the
+// files written to that specific tape. The SpanningSetID, SequenceNumber, and
+// TotalTapes fields link the tape to the broader spanning set so the full
+// backup can be reconstructed from individual tapes.
+//
 // Tape layout:
 //
 //	[Label (512B)] [FM] [Backup Data (tar)] [FM] [TOC (JSON)] [FM] [EOD]
@@ -724,13 +729,16 @@ const (
 // (typically a few KB to several MB for large backup sets). The TOC is padded
 // to the nearest 64KB boundary.
 type TapeTOC struct {
-	Magic      string         `json:"magic"`
-	Version    int            `json:"version"`
-	TapeLabel  string         `json:"tape_label"`
-	TapeUUID   string         `json:"tape_uuid"`
-	Pool       string         `json:"pool,omitempty"`
-	CreatedAt  time.Time      `json:"created_at"`
-	BackupSets []TOCBackupSet `json:"backup_sets"`
+	Magic          string         `json:"magic"`
+	Version        int            `json:"version"`
+	TapeLabel      string         `json:"tape_label"`
+	TapeUUID       string         `json:"tape_uuid"`
+	Pool           string         `json:"pool,omitempty"`
+	CreatedAt      time.Time      `json:"created_at"`
+	SpanningSetID  int64          `json:"spanning_set_id,omitempty"`
+	SequenceNumber int            `json:"sequence_number,omitempty"`
+	TotalTapes     int            `json:"total_tapes,omitempty"`
+	BackupSets     []TOCBackupSet `json:"backup_sets"`
 }
 
 // TOCBackupSet represents a single backup set entry in the TOC
