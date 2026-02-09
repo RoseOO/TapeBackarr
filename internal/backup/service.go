@@ -847,14 +847,16 @@ func (s *Service) StreamToTapeEncrypted(ctx context.Context, sourcePath string, 
 		}
 		return tapeCr.bytesRead(), nil
 	} else {
-		// Direct to tape device
+		// Direct to tape device with buffered writes to avoid small I/O
+		// causing tape shoe-shining (start/stop cycles).
 		tapeFile, err := os.OpenFile(devicePath, os.O_WRONLY, 0)
 		if err != nil {
 			return 0, fmt.Errorf("failed to open tape device: %w", err)
 		}
 		defer tapeFile.Close()
 
-		tapeCw := &countingWriter{writer: tapeFile}
+		bufferedTape := bufio.NewWriterSize(tapeFile, s.blockSize)
+		tapeCw := &countingWriter{writer: bufferedTape}
 		opensslCmd.Stdout = tapeCw
 
 		if err := tarCmd.Start(); err != nil {
@@ -876,6 +878,9 @@ func (s *Service) StreamToTapeEncrypted(ctx context.Context, sourcePath string, 
 		}
 		if opensslErr != nil {
 			return 0, fmt.Errorf("openssl encryption failed: %w", opensslErr)
+		}
+		if err := bufferedTape.Flush(); err != nil {
+			return 0, fmt.Errorf("failed to flush tape buffer: %w", err)
 		}
 		return tapeCw.bytesWritten(), nil
 	}
@@ -971,13 +976,16 @@ func (s *Service) StreamToTapeCompressed(ctx context.Context, sourcePath string,
 		}
 		return tapeCr.bytesRead(), nil
 	} else {
+		// Direct to tape device with buffered writes to avoid small I/O
+		// causing tape shoe-shining (start/stop cycles).
 		tapeFile, err := os.OpenFile(devicePath, os.O_WRONLY, 0)
 		if err != nil {
 			return 0, fmt.Errorf("failed to open tape device: %w", err)
 		}
 		defer tapeFile.Close()
 
-		tapeCw := &countingWriter{writer: tapeFile}
+		bufferedTape := bufio.NewWriterSize(tapeFile, s.blockSize)
+		tapeCw := &countingWriter{writer: bufferedTape}
 		compCmd.Stdout = tapeCw
 
 		if err := tarCmd.Start(); err != nil {
@@ -999,6 +1007,9 @@ func (s *Service) StreamToTapeCompressed(ctx context.Context, sourcePath string,
 		}
 		if compErr != nil {
 			return 0, fmt.Errorf("compression failed: %w", compErr)
+		}
+		if err := bufferedTape.Flush(); err != nil {
+			return 0, fmt.Errorf("failed to flush tape buffer: %w", err)
 		}
 		return tapeCw.bytesWritten(), nil
 	}
@@ -1113,13 +1124,16 @@ func (s *Service) StreamToTapeCompressedEncrypted(ctx context.Context, sourcePat
 		}
 		return tapeCr.bytesRead(), nil
 	} else {
+		// Direct to tape device with buffered writes to avoid small I/O
+		// causing tape shoe-shining (start/stop cycles).
 		tapeFile, err := os.OpenFile(devicePath, os.O_WRONLY, 0)
 		if err != nil {
 			return 0, fmt.Errorf("failed to open tape device: %w", err)
 		}
 		defer tapeFile.Close()
 
-		tapeCw := &countingWriter{writer: tapeFile}
+		bufferedTape := bufio.NewWriterSize(tapeFile, s.blockSize)
+		tapeCw := &countingWriter{writer: bufferedTape}
 		opensslCmd.Stdout = tapeCw
 
 		if err := tarCmd.Start(); err != nil {
@@ -1150,6 +1164,9 @@ func (s *Service) StreamToTapeCompressedEncrypted(ctx context.Context, sourcePat
 		}
 		if opensslErr != nil {
 			return 0, fmt.Errorf("openssl encryption failed: %w", opensslErr)
+		}
+		if err := bufferedTape.Flush(); err != nil {
+			return 0, fmt.Errorf("failed to flush tape buffer: %w", err)
 		}
 		return tapeCw.bytesWritten(), nil
 	}
@@ -2755,4 +2772,3 @@ func (d *DummyScanner) Scan() bool   { return false }
 func (d *DummyScanner) Text() string { return "" }
 
 var _ interface{ Scan() bool } = &DummyScanner{}
-var _ = bufio.Scanner{}

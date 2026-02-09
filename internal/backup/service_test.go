@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -1175,6 +1176,82 @@ func TestCountingWriter(t *testing.T) {
 	if buf.String() != "hello world more data" {
 		t.Errorf("expected 'hello world more data', got '%s'", buf.String())
 	}
+}
+
+func TestCountingWriterWithBufferedIO(t *testing.T) {
+	// Verify that a bufio.Writer aggregates small writes into large ones,
+	// which is critical for tape performance (avoids shoe-shining).
+	var writeSizes []int
+	tw := &trackingWriter{writeSizes: &writeSizes}
+
+	blockSize := 256 * 1024 // 256KB, matching LTO default
+	buffered := bufio.NewWriterSize(tw, blockSize)
+	cw := &countingWriter{writer: buffered}
+
+	// Simulate many small writes (like Go's io.Copy with 32KB buffer)
+	smallBuf := make([]byte, 32*1024) // 32KB
+	for i := range smallBuf {
+		smallBuf[i] = byte(i % 256)
+	}
+
+	totalWritten := 0
+	// Write 8 × 32KB = 256KB (fills the buffer exactly)
+	for i := 0; i < 8; i++ {
+		n, err := cw.Write(smallBuf)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		totalWritten += n
+	}
+
+	// Buffer is full but not yet flushed (bufio flushes on next write overflow)
+	if len(writeSizes) != 0 {
+		t.Errorf("expected 0 writes while buffer fills, got %d", len(writeSizes))
+	}
+
+	// Next write triggers flush of the full 256KB block, then buffers new data
+	partialBuf := make([]byte, 100)
+	n, err := cw.Write(partialBuf)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	totalWritten += n
+
+	// The full block should have been flushed as one large write
+	if len(writeSizes) != 1 {
+		t.Fatalf("expected 1 large write after overflow, got %d", len(writeSizes))
+	}
+	if writeSizes[0] != blockSize {
+		t.Errorf("expected write of %d bytes (full block), got %d", blockSize, writeSizes[0])
+	}
+
+	// Final flush writes the remaining partial data
+	if err := buffered.Flush(); err != nil {
+		t.Fatalf("flush failed: %v", err)
+	}
+
+	if len(writeSizes) != 2 {
+		t.Errorf("expected 2 total writes after flush, got %d", len(writeSizes))
+	}
+	if len(writeSizes) > 1 && writeSizes[1] != len(partialBuf) {
+		t.Errorf("expected final write of %d bytes, got %d", len(partialBuf), writeSizes[1])
+	}
+
+	// Verify total bytes counted matches all data written
+	expectedTotal := int64(totalWritten)
+	if cw.bytesWritten() != expectedTotal {
+		t.Errorf("expected %d total bytes, got %d", expectedTotal, cw.bytesWritten())
+	}
+}
+
+// trackingWriter records the size of each Write call
+type trackingWriter struct {
+	writeSizes *[]int
+}
+
+func (tw *trackingWriter) Write(p []byte) (int, error) {
+	*tw.writeSizes = append(*tw.writeSizes, len(p))
+	return len(p), nil
 }
 
 func TestSplitFilesForTape(t *testing.T) {
