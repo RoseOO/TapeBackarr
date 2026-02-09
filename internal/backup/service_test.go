@@ -767,14 +767,14 @@ func TestPauseJobPersistsState(t *testing.T) {
 	var pauseFlag int32
 	svc.mu.Lock()
 	svc.activeJobs[1] = &JobProgress{
-		JobID:       1,
-		JobName:     "test-job",
-		Phase:       "streaming",
-		Status:      "running",
+		JobID:        1,
+		JobName:      "test-job",
+		Phase:        "streaming",
+		Status:       "running",
 		BytesWritten: 50000,
-		TotalFiles:  100,
-		TotalBytes:  100000,
-		BackupSetID: 5,
+		TotalFiles:   100,
+		TotalBytes:   100000,
+		BackupSetID:  5,
 	}
 	svc.pauseFlags[1] = &pauseFlag
 	svc.mu.Unlock()
@@ -830,10 +830,10 @@ func TestSaveJobExecutionStateNilDB(t *testing.T) {
 	// Ensure saveJobExecutionState doesn't panic with nil DB
 	svc := NewService(nil, nil, nil, 65536, 512)
 	p := &JobProgress{
-		JobID:       1,
+		JobID:        1,
 		BytesWritten: 1000,
-		TotalFiles:  10,
-		TotalBytes:  5000,
+		TotalFiles:   10,
+		TotalBytes:   5000,
 	}
 	// Should not panic
 	svc.saveJobExecutionState(1, p)
@@ -843,10 +843,10 @@ func TestSaveFailedJobStateNilDB(t *testing.T) {
 	// Ensure saveFailedJobState doesn't panic with nil DB
 	svc := NewService(nil, nil, nil, 65536, 512)
 	p := &JobProgress{
-		JobID:       1,
+		JobID:        1,
 		BytesWritten: 1000,
-		TotalFiles:  10,
-		TotalBytes:  5000,
+		TotalFiles:   10,
+		TotalBytes:   5000,
 	}
 	// Should not panic
 	svc.saveFailedJobState(1, p, "network error")
@@ -1182,11 +1182,11 @@ func TestSplitFilesForTape(t *testing.T) {
 
 	// Create files of known sizes
 	files := []FileInfo{
-		{Path: "/data/file1.dat", Size: 100_000_000},   // 100 MB
-		{Path: "/data/file2.dat", Size: 200_000_000},   // 200 MB
-		{Path: "/data/file3.dat", Size: 300_000_000},   // 300 MB
-		{Path: "/data/file4.dat", Size: 400_000_000},   // 400 MB
-		{Path: "/data/file5.dat", Size: 500_000_000},   // 500 MB
+		{Path: "/data/file1.dat", Size: 100_000_000}, // 100 MB
+		{Path: "/data/file2.dat", Size: 200_000_000}, // 200 MB
+		{Path: "/data/file3.dat", Size: 300_000_000}, // 300 MB
+		{Path: "/data/file4.dat", Size: 400_000_000}, // 400 MB
+		{Path: "/data/file5.dat", Size: 500_000_000}, // 500 MB
 	}
 
 	// Total: 1.5 GB. Tape capacity: 1.5 TB (plenty of room).
@@ -1216,7 +1216,7 @@ func TestSplitFilesForTapeMaximizeUsage(t *testing.T) {
 	// A 1.5 TB tape should allow ~1.485 TB of file data, not just ~1.35 TB.
 	svc := &Service{}
 
-	tapeCapacity := int64(1_500_000_000_000) // 1.5 TB
+	tapeCapacity := int64(1_500_000_000_000)    // 1.5 TB
 	usableExpected := (tapeCapacity * 99) / 100 // 1.485 TB
 
 	// Create one large file that fits in 99% but not 90%

@@ -396,14 +396,14 @@ const (
 
 // DriveAlert represents an alert or warning from a tape drive
 type DriveAlert struct {
-	ID          int64              `json:"id" db:"id"`
-	DriveID     int64              `json:"drive_id" db:"drive_id"`
-	Severity    DriveAlertSeverity `json:"severity" db:"severity"`
-	Category    string             `json:"category" db:"category"`
-	Message     string             `json:"message" db:"message"`
-	Resolved    bool               `json:"resolved" db:"resolved"`
-	ResolvedAt  *time.Time         `json:"resolved_at" db:"resolved_at"`
-	CreatedAt   time.Time          `json:"created_at" db:"created_at"`
+	ID         int64              `json:"id" db:"id"`
+	DriveID    int64              `json:"drive_id" db:"drive_id"`
+	Severity   DriveAlertSeverity `json:"severity" db:"severity"`
+	Category   string             `json:"category" db:"category"`
+	Message    string             `json:"message" db:"message"`
+	Resolved   bool               `json:"resolved" db:"resolved"`
+	ResolvedAt *time.Time         `json:"resolved_at" db:"resolved_at"`
+	CreatedAt  time.Time          `json:"created_at" db:"created_at"`
 }
 
 // DriveStatistics represents usage and performance statistics for a tape drive

@@ -446,9 +446,9 @@ func TestParseDataCompressionPage(t *testing.T) {
 	svc := NewService("/dev/nst0", 65536)
 
 	tests := []struct {
-		name     string
-		output   string
-		wantRead int64
+		name      string
+		output    string
+		wantRead  int64
 		wantWrite int64
 	}{
 		{

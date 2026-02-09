@@ -800,17 +800,17 @@ type TapeTOC struct {
 
 // TOCBackupSet represents a single backup set entry in the TOC
 type TOCBackupSet struct {
-	FileNumber      int              `json:"file_number"`
-	JobName         string           `json:"job_name,omitempty"`
-	BackupType      string           `json:"backup_type"`
-	StartTime       time.Time        `json:"start_time"`
-	EndTime         time.Time        `json:"end_time"`
-	FileCount       int64            `json:"file_count"`
-	TotalBytes      int64            `json:"total_bytes"`
-	Encrypted       bool             `json:"encrypted"`
-	Compressed      bool             `json:"compressed"`
-	CompressionType string           `json:"compression_type,omitempty"`
-	Files           []TOCFileEntry   `json:"files"`
+	FileNumber      int            `json:"file_number"`
+	JobName         string         `json:"job_name,omitempty"`
+	BackupType      string         `json:"backup_type"`
+	StartTime       time.Time      `json:"start_time"`
+	EndTime         time.Time      `json:"end_time"`
+	FileCount       int64          `json:"file_count"`
+	TotalBytes      int64          `json:"total_bytes"`
+	Encrypted       bool           `json:"encrypted"`
+	Compressed      bool           `json:"compressed"`
+	CompressionType string         `json:"compression_type,omitempty"`
+	Files           []TOCFileEntry `json:"files"`
 }
 
 // TOCFileEntry represents a single file entry in the TOC

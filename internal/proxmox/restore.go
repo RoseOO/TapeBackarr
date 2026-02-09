@@ -171,7 +171,7 @@ func (s *RestoreService) RestoreGuest(ctx context.Context, req *RestoreRequest) 
 	if err := s.db.QueryRow("SELECT label FROM tapes WHERE id = ?", backup.TapeID).Scan(&expectedLabel); err == nil && expectedLabel != "" {
 		s.logger.Info("Verifying tape label", map[string]interface{}{
 			"expected_label": expectedLabel,
-			"device_path":   devicePath,
+			"device_path":    devicePath,
 		})
 		label, err := driveSvc.ReadTapeLabel(ctx)
 		if err != nil {

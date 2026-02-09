@@ -471,10 +471,10 @@ func TestRestorePipeline(t *testing.T) {
 			wantPipeline:  "encrypted-only",
 		},
 		{
-			name:          "compressed-only (no encryption)",
-			encrypted:     false,
-			compressed:    true,
-			wantPipeline:  "compressed-only",
+			name:         "compressed-only (no encryption)",
+			encrypted:    false,
+			compressed:   true,
+			wantPipeline: "compressed-only",
 		},
 		{
 			name:          "encrypted and compressed",

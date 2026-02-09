@@ -166,7 +166,7 @@ func TestHandleDashboardPoolStorage(t *testing.T) {
 	}
 
 	var result struct {
-		TotalTapes int `json:"total_tapes"`
+		TotalTapes  int `json:"total_tapes"`
 		PoolStorage []struct {
 			ID                 int64  `json:"id"`
 			Name               string `json:"name"`

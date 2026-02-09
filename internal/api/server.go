@@ -2280,22 +2280,22 @@ func (s *Server) handleDriveStatistics(w http.ResponseWriter, r *http.Request) {
 	_ = s.db.QueryRow("SELECT last_cleaned_at FROM drive_statistics WHERE drive_id = ?", driveID).Scan(&lastCleanedAt)
 
 	result := map[string]interface{}{
-		"drive_id":               driveID,
-		"total_bytes_read":       liveStats.TotalBytesRead,
-		"total_bytes_written":    liveStats.TotalBytesWritten,
-		"read_errors":            liveStats.ReadErrors,
-		"write_errors":           liveStats.WriteErrors,
-		"total_load_count":       liveStats.TotalLoadCount,
-		"cleaning_required":      liveStats.CleaningRequired,
-		"last_cleaned_at":        lastCleanedAt,
-		"power_on_hours":         liveStats.PowerOnHours,
-		"tape_motion_hours":      liveStats.TapeMotionHours,
-		"temperature_c":          liveStats.TemperatureC,
-		"lifetime_power_cycles":  liveStats.LifetimePowerCycles,
-		"read_compression_pct":   liveStats.ReadCompressionPct,
-		"write_compression_pct":  liveStats.WriteCompressionPct,
-		"tape_alert_flags":       liveStats.TapeAlertFlags,
-		"updated_at":             now,
+		"drive_id":              driveID,
+		"total_bytes_read":      liveStats.TotalBytesRead,
+		"total_bytes_written":   liveStats.TotalBytesWritten,
+		"read_errors":           liveStats.ReadErrors,
+		"write_errors":          liveStats.WriteErrors,
+		"total_load_count":      liveStats.TotalLoadCount,
+		"cleaning_required":     liveStats.CleaningRequired,
+		"last_cleaned_at":       lastCleanedAt,
+		"power_on_hours":        liveStats.PowerOnHours,
+		"tape_motion_hours":     liveStats.TapeMotionHours,
+		"temperature_c":         liveStats.TemperatureC,
+		"lifetime_power_cycles": liveStats.LifetimePowerCycles,
+		"read_compression_pct":  liveStats.ReadCompressionPct,
+		"write_compression_pct": liveStats.WriteCompressionPct,
+		"tape_alert_flags":      liveStats.TapeAlertFlags,
+		"updated_at":            now,
 	}
 	s.respondJSON(w, http.StatusOK, result)
 }
@@ -3298,9 +3298,9 @@ func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		TapeID      int64 `json:"tape_id"`       // Optional: use a different tape
-		UsePool     *bool `json:"use_pool"`       // If true, select tape from pool
-		FromScratch bool  `json:"from_scratch"`   // If true, start fresh instead of resuming
+		TapeID      int64 `json:"tape_id"`      // Optional: use a different tape
+		UsePool     *bool `json:"use_pool"`     // If true, select tape from pool
+		FromScratch bool  `json:"from_scratch"` // If true, start fresh instead of resuming
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 
@@ -3394,11 +3394,11 @@ func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.respondJSON(w, http.StatusAccepted, map[string]interface{}{
-		"status":        "started",
-		"message":       msg,
-		"tape_id":       tapeID,
-		"tape_label":    tapeLabel,
-		"resumed":       resumeState != "",
+		"status":     "started",
+		"message":    msg,
+		"tape_id":    tapeID,
+		"tape_label": tapeLabel,
+		"resumed":    resumeState != "",
 	})
 }
 
@@ -5702,22 +5702,22 @@ func (s *Server) handleProxmoxUpdateJob(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var req struct {
-		Name            string `json:"name,omitempty"`
-		Description     string `json:"description,omitempty"`
-		Node            string `json:"node,omitempty"`
-		VMIDs           string `json:"vmids,omitempty"`
-		VMIDFilter      string `json:"vmid_filter,omitempty"`
-		GuestTypeFilter string `json:"guest_type_filter,omitempty"`
-		TagFilter       string `json:"tag_filter,omitempty"`
-		PoolID          *int64 `json:"pool_id,omitempty"`
-		BackupMode      string `json:"backup_mode,omitempty"`
-		Compress        string `json:"compress,omitempty"`
-		Compression     string `json:"compression,omitempty"`
-		ScheduleCron    string `json:"schedule_cron,omitempty"`
-		RetentionDays   *int   `json:"retention_days,omitempty"`
-		Enabled         *bool  `json:"enabled,omitempty"`
-		NotifyOnSuccess *bool  `json:"notify_on_success,omitempty"`
-		NotifyOnFailure *bool  `json:"notify_on_failure,omitempty"`
+		Name            string  `json:"name,omitempty"`
+		Description     string  `json:"description,omitempty"`
+		Node            string  `json:"node,omitempty"`
+		VMIDs           string  `json:"vmids,omitempty"`
+		VMIDFilter      string  `json:"vmid_filter,omitempty"`
+		GuestTypeFilter string  `json:"guest_type_filter,omitempty"`
+		TagFilter       string  `json:"tag_filter,omitempty"`
+		PoolID          *int64  `json:"pool_id,omitempty"`
+		BackupMode      string  `json:"backup_mode,omitempty"`
+		Compress        string  `json:"compress,omitempty"`
+		Compression     string  `json:"compression,omitempty"`
+		ScheduleCron    string  `json:"schedule_cron,omitempty"`
+		RetentionDays   *int    `json:"retention_days,omitempty"`
+		Enabled         *bool   `json:"enabled,omitempty"`
+		NotifyOnSuccess *bool   `json:"notify_on_success,omitempty"`
+		NotifyOnFailure *bool   `json:"notify_on_failure,omitempty"`
 		Notes           *string `json:"notes,omitempty"`
 	}
 
@@ -7181,11 +7181,11 @@ func (s *Server) handleLibraryInventory(w http.ResponseWriter, r *http.Request) 
 	}
 
 	s.respondJSON(w, http.StatusOK, map[string]interface{}{
-		"slots":         slots,
-		"num_storage":   numStorage,
-		"num_drives":    numDrives,
-		"num_ie":        numIE,
-		"message":       "Inventory completed",
+		"slots":       slots,
+		"num_storage": numStorage,
+		"num_drives":  numDrives,
+		"num_ie":      numIE,
+		"message":     "Inventory completed",
 	})
 }
 
