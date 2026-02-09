@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -700,189 +701,147 @@ func (s *Service) ListTapeContents(ctx context.Context, maxEntries int) ([]TapeC
 	return entries, nil
 }
 
-// DriveStatisticsData holds parsed drive statistics from tapeinfo/sg_logs
-type DriveStatisticsData struct {
-	TotalBytesRead    int64   `json:"total_bytes_read"`
-	TotalBytesWritten int64   `json:"total_bytes_written"`
-	ReadErrors        int64   `json:"read_errors"`
-	WriteErrors       int64   `json:"write_errors"`
-	TotalLoadCount    int64   `json:"total_load_count"`
-	CleaningRequired  bool    `json:"cleaning_required"`
-	PowerOnHours      int64   `json:"power_on_hours"`
-	TapeMotionHours   float64 `json:"tape_motion_hours"`
+const (
+	// tocMagic is the identifier prefix for TapeBackarr TOC blocks
+	tocMagic = "TAPEBACKARR_TOC"
+	// tocVersion is the current TOC format version
+	tocVersion = 1
+	// tocBlockSize is the block size used for writing the TOC (64KB)
+	tocBlockSize = 65536
+)
+
+// TapeTOC represents the Table of Contents written to tape after backup data.
+// The TOC is written as the last file section on the tape, after all backup data,
+// allowing the tape to be self-describing even without access to the database.
+//
+// Tape layout:
+//
+//	[Label (512B)] [FM] [Backup Data (tar)] [FM] [TOC (JSON)] [FM] [EOD]
+//	  File #0             File #1                  File #2
+//
+// The TOC is written after a rewind to the end of the backup data, and uses a
+// fixed 64KB block size. The TOC size depends on the number of files cataloged
+// (typically a few KB to several MB for large backup sets). The TOC is padded
+// to the nearest 64KB boundary.
+type TapeTOC struct {
+	Magic      string         `json:"magic"`
+	Version    int            `json:"version"`
+	TapeLabel  string         `json:"tape_label"`
+	TapeUUID   string         `json:"tape_uuid"`
+	Pool       string         `json:"pool,omitempty"`
+	CreatedAt  time.Time      `json:"created_at"`
+	BackupSets []TOCBackupSet `json:"backup_sets"`
 }
 
-// ForceClean sends a rewind-offline command to eject the current tape from the drive,
-// preparing it for a cleaning cartridge to be loaded. Once a cleaning tape is inserted,
-// the drive automatically detects it and initiates a cleaning cycle.
-func (s *Service) ForceClean(ctx context.Context) error {
-	// rewoffl (rewind-offline) ejects the tape, which is the preparatory step for
-	// loading a cleaning cartridge. LTO drives auto-detect cleaning tapes on load.
-	cmd := exec.CommandContext(ctx, "mt", "-f", s.devicePath, "rewoffl")
+// TOCBackupSet represents a single backup set entry in the TOC
+type TOCBackupSet struct {
+	FileNumber      int              `json:"file_number"`
+	JobName         string           `json:"job_name,omitempty"`
+	BackupType      string           `json:"backup_type"`
+	StartTime       time.Time        `json:"start_time"`
+	EndTime         time.Time        `json:"end_time"`
+	FileCount       int64            `json:"file_count"`
+	TotalBytes      int64            `json:"total_bytes"`
+	Encrypted       bool             `json:"encrypted"`
+	Compressed      bool             `json:"compressed"`
+	CompressionType string           `json:"compression_type,omitempty"`
+	Files           []TOCFileEntry   `json:"files"`
+}
+
+// TOCFileEntry represents a single file entry in the TOC
+type TOCFileEntry struct {
+	Path     string `json:"path"`
+	Size     int64  `json:"size"`
+	Mode     int    `json:"mode,omitempty"`
+	ModTime  string `json:"mod_time,omitempty"`
+	Checksum string `json:"checksum,omitempty"`
+}
+
+// NewTapeTOC creates a new TapeTOC with the given tape metadata
+func NewTapeTOC(tapeLabel, tapeUUID, pool string) *TapeTOC {
+	return &TapeTOC{
+		Magic:      tocMagic,
+		Version:    tocVersion,
+		TapeLabel:  tapeLabel,
+		TapeUUID:   tapeUUID,
+		Pool:       pool,
+		CreatedAt:  time.Now(),
+		BackupSets: []TOCBackupSet{},
+	}
+}
+
+// MarshalTOC serializes a TapeTOC to JSON bytes
+func MarshalTOC(toc *TapeTOC) ([]byte, error) {
+	return json.Marshal(toc)
+}
+
+// UnmarshalTOC deserializes JSON bytes into a TapeTOC
+func UnmarshalTOC(data []byte) (*TapeTOC, error) {
+	var toc TapeTOC
+	if err := json.Unmarshal(data, &toc); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal TOC: %w", err)
+	}
+	if toc.Magic != tocMagic {
+		return nil, fmt.Errorf("invalid TOC magic: expected %q, got %q", tocMagic, toc.Magic)
+	}
+	return &toc, nil
+}
+
+// WriteTOC writes the Table of Contents to the tape at the current position.
+// The TOC is written as raw JSON padded to 64KB block boundaries, followed by a file mark.
+// This should be called after writing all backup data and its trailing file mark.
+func (s *Service) WriteTOC(ctx context.Context, toc *TapeTOC) error {
+	tocData, err := json.MarshalIndent(toc, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal TOC: %w", err)
+	}
+
+	// Pad to 64KB block boundary
+	padSize := tocBlockSize - (len(tocData) % tocBlockSize)
+	if padSize < tocBlockSize {
+		tocData = append(tocData, make([]byte, padSize)...)
+	}
+
+	// Write TOC data to tape using dd
+	cmd := exec.CommandContext(ctx, "dd",
+		fmt.Sprintf("of=%s", s.devicePath),
+		fmt.Sprintf("bs=%d", tocBlockSize),
+		fmt.Sprintf("count=%d", len(tocData)/tocBlockSize),
+	)
+	cmd.Stdin = bytes.NewReader(tocData)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("force clean failed: %s", string(output))
+		return fmt.Errorf("failed to write TOC to tape: %s", string(output))
 	}
-	if s.labelCache != nil {
-		s.labelCache.Invalidate(s.devicePath)
+
+	// Write file mark after TOC
+	if err := s.WriteFileMark(ctx); err != nil {
+		return fmt.Errorf("failed to write file mark after TOC: %w", err)
 	}
+
 	return nil
 }
 
-// Retension runs a full tape retension pass (winds tape to EOT then rewinds to BOT).
-// This can help with tape tension issues and improve read/write reliability.
-func (s *Service) Retension(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "mt", "-f", s.devicePath, "retension")
-	output, err := cmd.CombinedOutput()
+// ReadTOC reads the Table of Contents from the tape at the current position.
+// The caller must position the tape to the TOC file section before calling this method.
+// Typically, the TOC is at file #2 (after the label at #0 and backup data at #1).
+func (s *Service) ReadTOC(ctx context.Context) (*TapeTOC, error) {
+	// Read TOC data from tape using dd with a reasonable max size (16MB)
+	cmd := exec.CommandContext(ctx, "dd",
+		fmt.Sprintf("if=%s", s.devicePath),
+		fmt.Sprintf("bs=%d", tocBlockSize),
+		"count=256", // Up to 16MB of TOC data
+	)
+	output, err := cmd.Output()
 	if err != nil {
-		return fmt.Errorf("retension failed: %s", string(output))
-	}
-	return nil
-}
-
-// GetDriveStatistics collects drive statistics using tapeinfo and sg_logs.
-// Returns parsed statistics or an error.
-func (s *Service) GetDriveStatistics(ctx context.Context) (*DriveStatisticsData, error) {
-	stats := &DriveStatisticsData{}
-
-	// Try tapeinfo first for basic statistics
-	cmd := exec.CommandContext(ctx, "tapeinfo", "-f", s.devicePath)
-	output, err := cmd.CombinedOutput()
-	if err == nil {
-		s.parseTapeInfoStats(string(output), stats)
+		return nil, fmt.Errorf("failed to read TOC from tape: %w", err)
 	}
 
-	// Try sg_logs for more detailed statistics (log pages)
-	cmd = exec.CommandContext(ctx, "sg_logs", "-p", "0x0c", s.devicePath) // Sequential access device page
-	output, err = cmd.CombinedOutput()
-	if err == nil {
-		s.parseSgLogsStats(string(output), stats)
+	// Strip null padding bytes
+	raw := bytes.TrimRight(output, "\x00")
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("empty TOC data on tape")
 	}
 
-	// Try sg_logs for write/read error counters
-	cmd = exec.CommandContext(ctx, "sg_logs", "-p", "0x02", s.devicePath) // Write error counters
-	output, err = cmd.CombinedOutput()
-	if err == nil {
-		s.parseErrorCounters(string(output), stats, true)
-	}
-
-	cmd = exec.CommandContext(ctx, "sg_logs", "-p", "0x03", s.devicePath) // Read error counters
-	output, err = cmd.CombinedOutput()
-	if err == nil {
-		s.parseErrorCounters(string(output), stats, false)
-	}
-
-	return stats, nil
-}
-
-// parseTapeInfoStats parses tapeinfo output for drive statistics
-func (s *Service) parseTapeInfoStats(output string, stats *DriveStatisticsData) {
-	scanner := bufio.NewScanner(strings.NewReader(output))
-	for scanner.Scan() {
-		line := scanner.Text()
-		parts := strings.SplitN(line, ":", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
-
-		switch {
-		case key == "Total Loads" || key == "LoadCount":
-			stats.TotalLoadCount, _ = strconv.ParseInt(value, 10, 64)
-		case key == "Total Written" || strings.Contains(key, "TotalWritten"):
-			stats.TotalBytesWritten, _ = strconv.ParseInt(value, 10, 64)
-		case key == "Total Read" || strings.Contains(key, "TotalRead"):
-			stats.TotalBytesRead, _ = strconv.ParseInt(value, 10, 64)
-		case key == "Write Errors" || strings.Contains(key, "WriteErrors"):
-			stats.WriteErrors, _ = strconv.ParseInt(value, 10, 64)
-		case key == "Read Errors" || strings.Contains(key, "ReadErrors"):
-			stats.ReadErrors, _ = strconv.ParseInt(value, 10, 64)
-		case key == "CleaningRequired" || strings.Contains(key, "Cleaning"):
-			stats.CleaningRequired = strings.Contains(strings.ToLower(value), "yes") || value == "1"
-		case key == "PowerOnHours" || strings.Contains(key, "Power On"):
-			stats.PowerOnHours, _ = strconv.ParseInt(value, 10, 64)
-		}
-	}
-}
-
-// parseSgLogsStats parses sg_logs sequential access device page output
-func (s *Service) parseSgLogsStats(output string, stats *DriveStatisticsData) {
-	scanner := bufio.NewScanner(strings.NewReader(output))
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		switch {
-		case strings.Contains(line, "ytes written"):
-			if v := extractSgLogsValue(line); v > 0 {
-				stats.TotalBytesWritten = v
-			}
-		case strings.Contains(line, "ytes read"):
-			if v := extractSgLogsValue(line); v > 0 {
-				stats.TotalBytesRead = v
-			}
-		case strings.Contains(line, "load count") || strings.Contains(line, "Load count"):
-			if v := extractSgLogsValue(line); v > 0 {
-				stats.TotalLoadCount = v
-			}
-		case strings.Contains(line, "cleaning") && strings.Contains(strings.ToLower(line), "required"):
-			stats.CleaningRequired = true
-		case strings.Contains(line, "tape motion hours"):
-			if fv := extractSgLogsFloat(line); fv > 0 {
-				stats.TapeMotionHours = fv
-			}
-		case strings.Contains(line, "power on") && strings.Contains(line, "hour"):
-			if v := extractSgLogsValue(line); v > 0 {
-				stats.PowerOnHours = v
-			}
-		}
-	}
-}
-
-// parseErrorCounters parses sg_logs error counter page output
-func (s *Service) parseErrorCounters(output string, stats *DriveStatisticsData, isWrite bool) {
-	scanner := bufio.NewScanner(strings.NewReader(output))
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if strings.Contains(line, "total error") || strings.Contains(line, "Total errors") || strings.Contains(line, "uncorrected") {
-			if v := extractSgLogsValue(line); v > 0 {
-				if isWrite {
-					stats.WriteErrors += v
-				} else {
-					stats.ReadErrors += v
-				}
-			}
-		}
-	}
-}
-
-// extractSgLogsValue extracts an integer value from an sg_logs output line
-func extractSgLogsValue(line string) int64 {
-	// sg_logs output format: "  Description = value"
-	eqIdx := strings.LastIndex(line, "=")
-	if eqIdx < 0 {
-		return 0
-	}
-	val := strings.TrimSpace(line[eqIdx+1:])
-	// Remove any units suffix
-	fields := strings.Fields(val)
-	if len(fields) > 0 {
-		v, _ := strconv.ParseInt(fields[0], 10, 64)
-		return v
-	}
-	return 0
-}
-
-// extractSgLogsFloat extracts a float value from an sg_logs output line
-func extractSgLogsFloat(line string) float64 {
-	eqIdx := strings.LastIndex(line, "=")
-	if eqIdx < 0 {
-		return 0
-	}
-	val := strings.TrimSpace(line[eqIdx+1:])
-	fields := strings.Fields(val)
-	if len(fields) > 0 {
-		v, _ := strconv.ParseFloat(fields[0], 64)
-		return v
-	}
-	return 0
+	return UnmarshalTOC(raw)
 }

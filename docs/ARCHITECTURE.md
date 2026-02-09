@@ -92,9 +92,40 @@
                             ▼                     ▼                     ▼
                      ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
                      │ Catalog DB   │     │ Block Offset │     │ Tape Header  │
-                     │ (file list)  │     │ Tracking     │     │ + Label      │
+                     │ (file list)  │     │ Tracking     │     │ + Label + TOC│
                      └──────────────┘     └──────────────┘     └──────────────┘
 ```
+
+### Tape Layout
+
+TapeBackarr writes data to tape in a self-describing format with three sections
+separated by file marks (FM):
+
+```
+[Label (512B)] [FM] [Backup Data (tar)] [FM] [TOC (JSON)] [FM] [EOD]
+  File #0               File #1               File #2
+```
+
+- **File #0 — Label Block** (512 bytes): Contains tape identity in the format
+  `TAPEBACKARR|label|uuid|pool|timestamp|encryption_fingerprint|compression_type`.
+  Written once when the tape is first labeled. Read with
+  `dd if=/dev/nst0 bs=512 count=1`.
+
+- **File #1 — Backup Data**: Standard tar archive streamed directly from the backup
+  source. May be encrypted (AES-256-CBC) and/or compressed (gzip/zstd). Uses a
+  configurable block size (default 64KB / 128×512-byte blocks).
+
+- **File #2 — Table of Contents (TOC)**: A JSON document written after the backup
+  data completes. Contains the full file catalog (paths, sizes, checksums, timestamps)
+  so the tape is self-describing even without access to the database. The TOC is padded
+  to 64KB block boundaries. Its size depends on the number of backed-up files (typically
+  a few KB to several MB). Read with `mt -f /dev/nst0 fsf 2 && dd if=/dev/nst0 bs=64k`.
+
+The TOC is written **after** the backup data and its trailing file mark, once all file
+checksums have been calculated. It does **not** require a rewind — it is appended
+sequentially. The same catalog data is also stored in the SQLite database for fast
+searching, but the on-tape TOC ensures disaster recovery is possible without the database.
+
 
 ### Restore Flow
 

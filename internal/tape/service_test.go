@@ -1,230 +1,352 @@
 package tape
 
 import (
+	"encoding/json"
 	"testing"
+	"time"
 )
 
-func TestParseTapeInfoStats(t *testing.T) {
-	svc := NewService("/dev/nst0", 65536)
+func TestNewTapeTOC(t *testing.T) {
+	toc := NewTapeTOC("TAPE001", "uuid-1234", "default")
 
-	tests := []struct {
-		name     string
-		output   string
-		wantFunc func(t *testing.T, stats *DriveStatisticsData)
-	}{
-		{
-			name: "parse total loads",
-			output: `Product Type: Tape Drive
-Vendor: IBM
-Total Loads: 1234
-Total Written: 567890123456
-Total Read: 987654321012
-Write Errors: 3
-Read Errors: 5
-CleaningRequired: yes
-PowerOnHours: 5678
-`,
-			wantFunc: func(t *testing.T, stats *DriveStatisticsData) {
-				if stats.TotalLoadCount != 1234 {
-					t.Errorf("expected TotalLoadCount 1234, got %d", stats.TotalLoadCount)
-				}
-				if stats.TotalBytesWritten != 567890123456 {
-					t.Errorf("expected TotalBytesWritten 567890123456, got %d", stats.TotalBytesWritten)
-				}
-				if stats.TotalBytesRead != 987654321012 {
-					t.Errorf("expected TotalBytesRead 987654321012, got %d", stats.TotalBytesRead)
-				}
-				if stats.WriteErrors != 3 {
-					t.Errorf("expected WriteErrors 3, got %d", stats.WriteErrors)
-				}
-				if stats.ReadErrors != 5 {
-					t.Errorf("expected ReadErrors 5, got %d", stats.ReadErrors)
-				}
-				if !stats.CleaningRequired {
-					t.Error("expected CleaningRequired to be true")
-				}
-				if stats.PowerOnHours != 5678 {
-					t.Errorf("expected PowerOnHours 5678, got %d", stats.PowerOnHours)
-				}
-			},
-		},
-		{
-			name: "parse cleaning not required",
-			output: `CleaningRequired: no
-`,
-			wantFunc: func(t *testing.T, stats *DriveStatisticsData) {
-				if stats.CleaningRequired {
-					t.Error("expected CleaningRequired to be false")
-				}
-			},
-		},
-		{
-			name:   "empty output",
-			output: "",
-			wantFunc: func(t *testing.T, stats *DriveStatisticsData) {
-				if stats.TotalLoadCount != 0 {
-					t.Errorf("expected TotalLoadCount 0, got %d", stats.TotalLoadCount)
-				}
-			},
-		},
+	if toc.Magic != tocMagic {
+		t.Errorf("expected magic %q, got %q", tocMagic, toc.Magic)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			stats := &DriveStatisticsData{}
-			svc.parseTapeInfoStats(tt.output, stats)
-			tt.wantFunc(t, stats)
-		})
+	if toc.Version != tocVersion {
+		t.Errorf("expected version %d, got %d", tocVersion, toc.Version)
+	}
+	if toc.TapeLabel != "TAPE001" {
+		t.Errorf("expected tape label 'TAPE001', got %q", toc.TapeLabel)
+	}
+	if toc.TapeUUID != "uuid-1234" {
+		t.Errorf("expected tape UUID 'uuid-1234', got %q", toc.TapeUUID)
+	}
+	if toc.Pool != "default" {
+		t.Errorf("expected pool 'default', got %q", toc.Pool)
+	}
+	if len(toc.BackupSets) != 0 {
+		t.Errorf("expected 0 backup sets, got %d", len(toc.BackupSets))
+	}
+	if toc.CreatedAt.IsZero() {
+		t.Error("expected non-zero CreatedAt")
 	}
 }
 
-func TestParseSgLogsStats(t *testing.T) {
-	svc := NewService("/dev/nst0", 65536)
-
-	tests := []struct {
-		name     string
-		output   string
-		wantFunc func(t *testing.T, stats *DriveStatisticsData)
-	}{
-		{
-			name: "parse sequential access page",
-			output: `Sequential access device page
-  Bytes written = 1234567890
-  Bytes read = 9876543210
-  Load count = 42
-  tape motion hours = 123.5
-  power on hours = 9999
-`,
-			wantFunc: func(t *testing.T, stats *DriveStatisticsData) {
-				if stats.TotalBytesWritten != 1234567890 {
-					t.Errorf("expected TotalBytesWritten 1234567890, got %d", stats.TotalBytesWritten)
-				}
-				if stats.TotalBytesRead != 9876543210 {
-					t.Errorf("expected TotalBytesRead 9876543210, got %d", stats.TotalBytesRead)
-				}
-				if stats.TotalLoadCount != 42 {
-					t.Errorf("expected TotalLoadCount 42, got %d", stats.TotalLoadCount)
-				}
-				if stats.TapeMotionHours != 123.5 {
-					t.Errorf("expected TapeMotionHours 123.5, got %f", stats.TapeMotionHours)
-				}
-				if stats.PowerOnHours != 9999 {
-					t.Errorf("expected PowerOnHours 9999, got %d", stats.PowerOnHours)
-				}
-			},
-		},
-		{
-			name: "cleaning required detection",
-			output: `Sequential access device page
-  cleaning required = 1
-`,
-			wantFunc: func(t *testing.T, stats *DriveStatisticsData) {
-				if !stats.CleaningRequired {
-					t.Error("expected CleaningRequired to be true")
-				}
+func TestMarshalUnmarshalTOC(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	toc := &TapeTOC{
+		Magic:     tocMagic,
+		Version:   tocVersion,
+		TapeLabel: "WEEKLY-001",
+		TapeUUID:  "abc-def-123",
+		Pool:      "weekly",
+		CreatedAt: now,
+		BackupSets: []TOCBackupSet{
+			{
+				FileNumber:      1,
+				JobName:         "nightly-full",
+				BackupType:      "full",
+				StartTime:       now.Add(-1 * time.Hour),
+				EndTime:         now,
+				FileCount:       3,
+				TotalBytes:      15000,
+				Encrypted:       false,
+				Compressed:      true,
+				CompressionType: "gzip",
+				Files: []TOCFileEntry{
+					{Path: "documents/report.pdf", Size: 5000, Mode: 0644, ModTime: now.Format(time.RFC3339), Checksum: "abc123"},
+					{Path: "documents/notes.txt", Size: 2000, Mode: 0644, ModTime: now.Format(time.RFC3339), Checksum: "def456"},
+					{Path: "images/photo.jpg", Size: 8000, Mode: 0644, ModTime: now.Format(time.RFC3339), Checksum: "ghi789"},
+				},
 			},
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			stats := &DriveStatisticsData{}
-			svc.parseSgLogsStats(tt.output, stats)
-			tt.wantFunc(t, stats)
-		})
+	// Marshal
+	data, err := MarshalTOC(toc)
+	if err != nil {
+		t.Fatalf("MarshalTOC failed: %v", err)
+	}
+
+	// Unmarshal
+	decoded, err := UnmarshalTOC(data)
+	if err != nil {
+		t.Fatalf("UnmarshalTOC failed: %v", err)
+	}
+
+	if decoded.Magic != tocMagic {
+		t.Errorf("expected magic %q, got %q", tocMagic, decoded.Magic)
+	}
+	if decoded.TapeLabel != "WEEKLY-001" {
+		t.Errorf("expected tape label 'WEEKLY-001', got %q", decoded.TapeLabel)
+	}
+	if decoded.TapeUUID != "abc-def-123" {
+		t.Errorf("expected UUID 'abc-def-123', got %q", decoded.TapeUUID)
+	}
+	if decoded.Pool != "weekly" {
+		t.Errorf("expected pool 'weekly', got %q", decoded.Pool)
+	}
+	if len(decoded.BackupSets) != 1 {
+		t.Fatalf("expected 1 backup set, got %d", len(decoded.BackupSets))
+	}
+
+	bs := decoded.BackupSets[0]
+	if bs.FileNumber != 1 {
+		t.Errorf("expected file number 1, got %d", bs.FileNumber)
+	}
+	if bs.JobName != "nightly-full" {
+		t.Errorf("expected job name 'nightly-full', got %q", bs.JobName)
+	}
+	if bs.FileCount != 3 {
+		t.Errorf("expected 3 files, got %d", bs.FileCount)
+	}
+	if bs.TotalBytes != 15000 {
+		t.Errorf("expected 15000 bytes, got %d", bs.TotalBytes)
+	}
+	if bs.Encrypted {
+		t.Error("expected encrypted to be false")
+	}
+	if !bs.Compressed {
+		t.Error("expected compressed to be true")
+	}
+	if bs.CompressionType != "gzip" {
+		t.Errorf("expected compression type 'gzip', got %q", bs.CompressionType)
+	}
+	if len(bs.Files) != 3 {
+		t.Fatalf("expected 3 file entries, got %d", len(bs.Files))
+	}
+	if bs.Files[0].Path != "documents/report.pdf" {
+		t.Errorf("expected first file path 'documents/report.pdf', got %q", bs.Files[0].Path)
+	}
+	if bs.Files[0].Size != 5000 {
+		t.Errorf("expected first file size 5000, got %d", bs.Files[0].Size)
+	}
+	if bs.Files[0].Checksum != "abc123" {
+		t.Errorf("expected first file checksum 'abc123', got %q", bs.Files[0].Checksum)
 	}
 }
 
-func TestParseErrorCounters(t *testing.T) {
-	svc := NewService("/dev/nst0", 65536)
-
-	tests := []struct {
-		name    string
-		output  string
-		isWrite bool
-		wantErr int64
-	}{
-		{
-			name: "write error counters",
-			output: `Write error counter page
-  total errors = 7
-`,
-			isWrite: true,
-			wantErr: 7,
-		},
-		{
-			name: "read error counters",
-			output: `Read error counter page
-  Total errors = 3
-`,
-			isWrite: false,
-			wantErr: 3,
-		},
-		{
-			name: "uncorrected errors",
-			output: `Write error counter page
-  uncorrected = 2
-`,
-			isWrite: true,
-			wantErr: 2,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			stats := &DriveStatisticsData{}
-			svc.parseErrorCounters(tt.output, stats, tt.isWrite)
-			if tt.isWrite {
-				if stats.WriteErrors != tt.wantErr {
-					t.Errorf("expected WriteErrors %d, got %d", tt.wantErr, stats.WriteErrors)
-				}
-			} else {
-				if stats.ReadErrors != tt.wantErr {
-					t.Errorf("expected ReadErrors %d, got %d", tt.wantErr, stats.ReadErrors)
-				}
-			}
-		})
+func TestUnmarshalTOCInvalidMagic(t *testing.T) {
+	data := []byte(`{"magic":"INVALID","version":1}`)
+	_, err := UnmarshalTOC(data)
+	if err == nil {
+		t.Error("expected error for invalid magic, got nil")
 	}
 }
 
-func TestExtractSgLogsValue(t *testing.T) {
-	tests := []struct {
-		line string
-		want int64
-	}{
-		{"  Bytes written = 1234567890", 1234567890},
-		{"  Load count = 42", 42},
-		{"  total errors = 0", 0},
-		{"no equals sign", 0},
-		{"  empty = ", 0},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.line, func(t *testing.T) {
-			got := extractSgLogsValue(tt.line)
-			if got != tt.want {
-				t.Errorf("extractSgLogsValue(%q) = %d, want %d", tt.line, got, tt.want)
-			}
-		})
+func TestUnmarshalTOCInvalidJSON(t *testing.T) {
+	data := []byte(`not json at all`)
+	_, err := UnmarshalTOC(data)
+	if err == nil {
+		t.Error("expected error for invalid JSON, got nil")
 	}
 }
 
-func TestExtractSgLogsFloat(t *testing.T) {
-	tests := []struct {
-		line string
-		want float64
-	}{
-		{"  tape motion hours = 123.5", 123.5},
-		{"  power on hours = 9999", 9999.0},
-		{"no equals sign", 0},
+func TestUnmarshalTOCWithNullPadding(t *testing.T) {
+	toc := NewTapeTOC("TAPE001", "uuid-1234", "pool1")
+	data, err := MarshalTOC(toc)
+	if err != nil {
+		t.Fatalf("MarshalTOC failed: %v", err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.line, func(t *testing.T) {
-			got := extractSgLogsFloat(tt.line)
-			if got != tt.want {
-				t.Errorf("extractSgLogsFloat(%q) = %f, want %f", tt.line, got, tt.want)
-			}
-		})
+	// Add null padding (simulates reading from tape with block padding)
+	padded := make([]byte, len(data)+1024)
+	copy(padded, data)
+
+	// Trim nulls and unmarshal (as ReadTOC does)
+	trimmed := padded
+	for i := len(trimmed) - 1; i >= 0; i-- {
+		if trimmed[i] != 0 {
+			trimmed = trimmed[:i+1]
+			break
+		}
+	}
+
+	decoded, err := UnmarshalTOC(trimmed)
+	if err != nil {
+		t.Fatalf("UnmarshalTOC with padding failed: %v", err)
+	}
+	if decoded.TapeLabel != "TAPE001" {
+		t.Errorf("expected tape label 'TAPE001', got %q", decoded.TapeLabel)
+	}
+}
+
+func TestTOCMultipleBackupSets(t *testing.T) {
+	now := time.Now()
+	toc := NewTapeTOC("MULTI-001", "uuid-multi", "default")
+	toc.BackupSets = []TOCBackupSet{
+		{
+			FileNumber: 1,
+			JobName:    "job-1",
+			BackupType: "full",
+			StartTime:  now.Add(-2 * time.Hour),
+			EndTime:    now.Add(-1 * time.Hour),
+			FileCount:  10,
+			TotalBytes: 50000,
+			Files: []TOCFileEntry{
+				{Path: "file1.txt", Size: 5000},
+			},
+		},
+		{
+			FileNumber: 2,
+			JobName:    "job-2",
+			BackupType: "incremental",
+			StartTime:  now.Add(-1 * time.Hour),
+			EndTime:    now,
+			FileCount:  5,
+			TotalBytes: 10000,
+			Encrypted:  true,
+			Files: []TOCFileEntry{
+				{Path: "file2.txt", Size: 2000},
+			},
+		},
+	}
+
+	data, err := MarshalTOC(toc)
+	if err != nil {
+		t.Fatalf("MarshalTOC failed: %v", err)
+	}
+
+	decoded, err := UnmarshalTOC(data)
+	if err != nil {
+		t.Fatalf("UnmarshalTOC failed: %v", err)
+	}
+
+	if len(decoded.BackupSets) != 2 {
+		t.Fatalf("expected 2 backup sets, got %d", len(decoded.BackupSets))
+	}
+	if decoded.BackupSets[0].JobName != "job-1" {
+		t.Errorf("expected first job name 'job-1', got %q", decoded.BackupSets[0].JobName)
+	}
+	if decoded.BackupSets[1].JobName != "job-2" {
+		t.Errorf("expected second job name 'job-2', got %q", decoded.BackupSets[1].JobName)
+	}
+	if !decoded.BackupSets[1].Encrypted {
+		t.Error("expected second backup set to be encrypted")
+	}
+}
+
+func TestTOCEmptyFiles(t *testing.T) {
+	toc := NewTapeTOC("EMPTY-001", "uuid-empty", "pool")
+	toc.BackupSets = []TOCBackupSet{
+		{
+			FileNumber: 1,
+			BackupType: "full",
+			FileCount:  0,
+			TotalBytes: 0,
+			Files:      []TOCFileEntry{},
+		},
+	}
+
+	data, err := MarshalTOC(toc)
+	if err != nil {
+		t.Fatalf("MarshalTOC failed: %v", err)
+	}
+
+	decoded, err := UnmarshalTOC(data)
+	if err != nil {
+		t.Fatalf("UnmarshalTOC failed: %v", err)
+	}
+
+	if len(decoded.BackupSets[0].Files) != 0 {
+		t.Errorf("expected 0 files, got %d", len(decoded.BackupSets[0].Files))
+	}
+}
+
+func TestTOCJSONStructure(t *testing.T) {
+	toc := NewTapeTOC("TAPE001", "uuid-1234", "default")
+	toc.BackupSets = []TOCBackupSet{
+		{
+			FileNumber: 1,
+			BackupType: "full",
+			FileCount:  1,
+			TotalBytes: 100,
+			Files: []TOCFileEntry{
+				{Path: "test.txt", Size: 100},
+			},
+		},
+	}
+
+	data, err := MarshalTOC(toc)
+	if err != nil {
+		t.Fatalf("MarshalTOC failed: %v", err)
+	}
+
+	// Verify it's valid JSON
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("TOC is not valid JSON: %v", err)
+	}
+
+	// Verify key fields exist
+	if raw["magic"] != tocMagic {
+		t.Errorf("expected magic field %q, got %v", tocMagic, raw["magic"])
+	}
+	if raw["version"] != float64(tocVersion) {
+		t.Errorf("expected version %d, got %v", tocVersion, raw["version"])
+	}
+}
+
+func TestTapeLabelDataFields(t *testing.T) {
+	label := TapeLabelData{
+		Label:                    "TEST-001",
+		UUID:                     "uuid-test",
+		Pool:                     "default",
+		Timestamp:                1234567890,
+		EncryptionKeyFingerprint: "abc123",
+		CompressionType:          "gzip",
+	}
+
+	if label.Label != "TEST-001" {
+		t.Errorf("expected label 'TEST-001', got %q", label.Label)
+	}
+	if label.UUID != "uuid-test" {
+		t.Errorf("expected UUID 'uuid-test', got %q", label.UUID)
+	}
+}
+
+func TestLabelCacheOperations(t *testing.T) {
+	cache := NewLabelCache()
+
+	// Test Get on empty cache
+	if entry := cache.Get("/dev/nst0", 5*time.Minute); entry != nil {
+		t.Error("expected nil from empty cache")
+	}
+
+	// Test Set and Get
+	label := &TapeLabelData{Label: "TEST-001", UUID: "uuid-1"}
+	cache.Set("/dev/nst0", label, true)
+
+	entry := cache.Get("/dev/nst0", 5*time.Minute)
+	if entry == nil {
+		t.Fatal("expected non-nil cache entry")
+	}
+	if entry.Label.Label != "TEST-001" {
+		t.Errorf("expected label 'TEST-001', got %q", entry.Label.Label)
+	}
+
+	// Test Invalidate
+	cache.Invalidate("/dev/nst0")
+	if entry := cache.Get("/dev/nst0", 5*time.Minute); entry != nil {
+		t.Error("expected nil after invalidation")
+	}
+
+	// Test InvalidateAll
+	cache.Set("/dev/nst0", label, true)
+	cache.Set("/dev/nst1", label, true)
+	cache.InvalidateAll()
+	if entry := cache.Get("/dev/nst0", 5*time.Minute); entry != nil {
+		t.Error("expected nil after InvalidateAll")
+	}
+}
+
+func TestLabelCacheExpiry(t *testing.T) {
+	cache := NewLabelCache()
+	label := &TapeLabelData{Label: "TEST-001"}
+	cache.Set("/dev/nst0", label, true)
+
+	// Should expire with very short maxAge
+	if entry := cache.Get("/dev/nst0", 0); entry != nil {
+		t.Error("expected nil for expired cache entry")
 	}
 }
