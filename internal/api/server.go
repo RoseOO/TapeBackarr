@@ -215,6 +215,10 @@ func (s *Server) setupRoutes() {
 			r.Get("/{id}/inspect-tape", s.handleInspectTape)
 			r.Get("/{id}/scan-for-db-backup", s.handleScanForDBBackup)
 			r.Post("/{id}/batch-label", s.handleBatchLabel)
+			r.Get("/{id}/statistics", s.handleDriveStatistics)
+			r.Get("/{id}/alerts", s.handleDriveAlerts)
+			r.Post("/{id}/clean", s.handleDriveClean)
+			r.Post("/{id}/retension", s.handleDriveRetension)
 		})
 
 		// Backup Sources
@@ -1952,6 +1956,247 @@ func (s *Server) handleRewindTape(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	s.respondJSON(w, http.StatusOK, map[string]string{"status": "rewound"})
+}
+
+func (s *Server) handleDriveStatistics(w http.ResponseWriter, r *http.Request) {
+	driveID, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid drive id")
+		return
+	}
+
+	var devicePath string
+	err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", driveID).Scan(&devicePath)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "drive not found or not enabled")
+		return
+	}
+
+	ctx := r.Context()
+	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+	liveStats, err := driveSvc.GetDriveStatistics(ctx)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to get drive statistics: "+err.Error())
+		return
+	}
+
+	// Upsert statistics into database
+	now := time.Now()
+	_, err = s.db.Exec(`
+		INSERT INTO drive_statistics (drive_id, total_bytes_read, total_bytes_written, read_errors, write_errors,
+			total_load_count, cleaning_required, power_on_hours, tape_motion_hours, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(drive_id) DO UPDATE SET
+			total_bytes_read = excluded.total_bytes_read,
+			total_bytes_written = excluded.total_bytes_written,
+			read_errors = excluded.read_errors,
+			write_errors = excluded.write_errors,
+			total_load_count = excluded.total_load_count,
+			cleaning_required = excluded.cleaning_required,
+			power_on_hours = excluded.power_on_hours,
+			tape_motion_hours = excluded.tape_motion_hours,
+			updated_at = excluded.updated_at
+	`, driveID, liveStats.TotalBytesRead, liveStats.TotalBytesWritten,
+		liveStats.ReadErrors, liveStats.WriteErrors, liveStats.TotalLoadCount,
+		liveStats.CleaningRequired, liveStats.PowerOnHours, liveStats.TapeMotionHours, now)
+	if err != nil {
+		// Non-fatal: still return live stats
+		if s.logger != nil {
+			s.logger.Error("failed to save drive statistics", map[string]interface{}{"error": err.Error()})
+		}
+	}
+
+	// Create alerts for concerning conditions
+	if liveStats.CleaningRequired {
+		s.createDriveAlertIfNew(driveID, "warning", "cleaning", "Drive is requesting a cleaning cycle")
+	}
+	if liveStats.WriteErrors > 0 {
+		s.createDriveAlertIfNew(driveID, "warning", "errors", fmt.Sprintf("Drive has %d write errors", liveStats.WriteErrors))
+	}
+	if liveStats.ReadErrors > 0 {
+		s.createDriveAlertIfNew(driveID, "warning", "errors", fmt.Sprintf("Drive has %d read errors", liveStats.ReadErrors))
+	}
+
+	// Return the live data along with last_cleaned_at from DB
+	var lastCleanedAt *time.Time
+	_ = s.db.QueryRow("SELECT last_cleaned_at FROM drive_statistics WHERE drive_id = ?", driveID).Scan(&lastCleanedAt)
+
+	result := map[string]interface{}{
+		"drive_id":            driveID,
+		"total_bytes_read":    liveStats.TotalBytesRead,
+		"total_bytes_written": liveStats.TotalBytesWritten,
+		"read_errors":         liveStats.ReadErrors,
+		"write_errors":        liveStats.WriteErrors,
+		"total_load_count":    liveStats.TotalLoadCount,
+		"cleaning_required":   liveStats.CleaningRequired,
+		"last_cleaned_at":     lastCleanedAt,
+		"power_on_hours":      liveStats.PowerOnHours,
+		"tape_motion_hours":   liveStats.TapeMotionHours,
+		"updated_at":          now,
+	}
+	s.respondJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleDriveAlerts(w http.ResponseWriter, r *http.Request) {
+	driveID, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid drive id")
+		return
+	}
+
+	// Verify drive exists
+	var exists bool
+	if err := s.db.QueryRow("SELECT 1 FROM tape_drives WHERE id = ?", driveID).Scan(&exists); err != nil {
+		s.respondError(w, http.StatusNotFound, "drive not found")
+		return
+	}
+
+	rows, err := s.db.Query(`
+		SELECT id, drive_id, severity, category, message, resolved, resolved_at, created_at
+		FROM drive_alerts WHERE drive_id = ? ORDER BY created_at DESC LIMIT 50
+	`, driveID)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer rows.Close()
+
+	alerts := make([]models.DriveAlert, 0)
+	for rows.Next() {
+		var a models.DriveAlert
+		if err := rows.Scan(&a.ID, &a.DriveID, &a.Severity, &a.Category, &a.Message, &a.Resolved, &a.ResolvedAt, &a.CreatedAt); err != nil {
+			continue
+		}
+		alerts = append(alerts, a)
+	}
+
+	s.respondJSON(w, http.StatusOK, alerts)
+}
+
+func (s *Server) handleDriveClean(w http.ResponseWriter, r *http.Request) {
+	driveID, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid drive id")
+		return
+	}
+
+	var devicePath string
+	err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", driveID).Scan(&devicePath)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "drive not found or not enabled")
+		return
+	}
+
+	ctx := r.Context()
+	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "tape",
+			Title:    "Cleaning Started",
+			Message:  "Initiating drive cleaning cycle...",
+		})
+	}
+
+	if err := driveSvc.ForceClean(ctx); err != nil {
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "error",
+				Category: "tape",
+				Title:    "Cleaning Failed",
+				Message:  fmt.Sprintf("Failed to clean drive: %s", err.Error()),
+			})
+		}
+		s.respondError(w, http.StatusInternalServerError, "failed to clean drive: "+err.Error())
+		return
+	}
+
+	// Update last_cleaned_at in statistics
+	now := time.Now()
+	_, _ = s.db.Exec(`
+		INSERT INTO drive_statistics (drive_id, last_cleaned_at, updated_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(drive_id) DO UPDATE SET last_cleaned_at = excluded.last_cleaned_at, updated_at = excluded.updated_at
+	`, driveID, now, now)
+
+	// Resolve any cleaning-related alerts
+	_, _ = s.db.Exec(`UPDATE drive_alerts SET resolved = 1, resolved_at = ? WHERE drive_id = ? AND category = 'cleaning' AND resolved = 0`, now, driveID)
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "success",
+			Category: "tape",
+			Title:    "Cleaning Complete",
+			Message:  "Drive cleaning cycle completed",
+		})
+	}
+
+	s.auditLog(r, "clean", "tape_drive", driveID, "Force cleaning cycle executed")
+	s.respondJSON(w, http.StatusOK, map[string]string{"status": "cleaned"})
+}
+
+func (s *Server) handleDriveRetension(w http.ResponseWriter, r *http.Request) {
+	driveID, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid drive id")
+		return
+	}
+
+	var devicePath string
+	err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", driveID).Scan(&devicePath)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "drive not found or not enabled")
+		return
+	}
+
+	ctx := r.Context()
+	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "tape",
+			Title:    "Retension Started",
+			Message:  "Running tape retension pass...",
+		})
+	}
+
+	if err := driveSvc.Retension(ctx); err != nil {
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "error",
+				Category: "tape",
+				Title:    "Retension Failed",
+				Message:  fmt.Sprintf("Failed to retension tape: %s", err.Error()),
+			})
+		}
+		s.respondError(w, http.StatusInternalServerError, "failed to retension tape: "+err.Error())
+		return
+	}
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "success",
+			Category: "tape",
+			Title:    "Retension Complete",
+			Message:  "Tape retension pass completed successfully",
+		})
+	}
+
+	s.auditLog(r, "retension", "tape_drive", driveID, "Tape retension pass executed")
+	s.respondJSON(w, http.StatusOK, map[string]string{"status": "retensioned"})
+}
+
+// createDriveAlertIfNew creates an alert if no unresolved alert with the same category exists for this drive
+func (s *Server) createDriveAlertIfNew(driveID int64, severity, category, message string) {
+	var count int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM drive_alerts WHERE drive_id = ? AND category = ? AND resolved = 0`, driveID, category).Scan(&count)
+	if count > 0 {
+		return
+	}
+	_, _ = s.db.Exec(`INSERT INTO drive_alerts (drive_id, severity, category, message) VALUES (?, ?, ?, ?)`,
+		driveID, severity, category, message)
 }
 
 // Source handlers

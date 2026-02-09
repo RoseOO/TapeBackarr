@@ -376,6 +376,43 @@ type RestoreOperation struct {
 	CreatedAt       time.Time              `json:"created_at" db:"created_at"`
 }
 
+// DriveAlertSeverity represents the severity of a drive alert
+type DriveAlertSeverity string
+
+const (
+	AlertSeverityInfo     DriveAlertSeverity = "info"
+	AlertSeverityWarning  DriveAlertSeverity = "warning"
+	AlertSeverityCritical DriveAlertSeverity = "critical"
+)
+
+// DriveAlert represents an alert or warning from a tape drive
+type DriveAlert struct {
+	ID          int64              `json:"id" db:"id"`
+	DriveID     int64              `json:"drive_id" db:"drive_id"`
+	Severity    DriveAlertSeverity `json:"severity" db:"severity"`
+	Category    string             `json:"category" db:"category"`
+	Message     string             `json:"message" db:"message"`
+	Resolved    bool               `json:"resolved" db:"resolved"`
+	ResolvedAt  *time.Time         `json:"resolved_at" db:"resolved_at"`
+	CreatedAt   time.Time          `json:"created_at" db:"created_at"`
+}
+
+// DriveStatistics represents usage and performance statistics for a tape drive
+type DriveStatistics struct {
+	ID                 int64     `json:"id" db:"id"`
+	DriveID            int64     `json:"drive_id" db:"drive_id"`
+	TotalBytesRead     int64     `json:"total_bytes_read" db:"total_bytes_read"`
+	TotalBytesWritten  int64     `json:"total_bytes_written" db:"total_bytes_written"`
+	ReadErrors         int64     `json:"read_errors" db:"read_errors"`
+	WriteErrors        int64     `json:"write_errors" db:"write_errors"`
+	TotalLoadCount     int64     `json:"total_load_count" db:"total_load_count"`
+	CleaningRequired   bool      `json:"cleaning_required" db:"cleaning_required"`
+	LastCleanedAt      *time.Time `json:"last_cleaned_at" db:"last_cleaned_at"`
+	PowerOnHours       int64     `json:"power_on_hours" db:"power_on_hours"`
+	TapeMotionHours    float64   `json:"tape_motion_hours" db:"tape_motion_hours"`
+	UpdatedAt          time.Time `json:"updated_at" db:"updated_at"`
+}
+
 // APIKey represents an API key for programmatic access
 type APIKey struct {
 	ID         int64      `json:"id" db:"id"`

@@ -699,3 +699,188 @@ func (s *Service) ListTapeContents(ctx context.Context, maxEntries int) ([]TapeC
 
 	return entries, nil
 }
+
+// DriveStatisticsData holds parsed drive statistics from tapeinfo/sg_logs
+type DriveStatisticsData struct {
+	TotalBytesRead    int64   `json:"total_bytes_read"`
+	TotalBytesWritten int64   `json:"total_bytes_written"`
+	ReadErrors        int64   `json:"read_errors"`
+	WriteErrors       int64   `json:"write_errors"`
+	TotalLoadCount    int64   `json:"total_load_count"`
+	CleaningRequired  bool    `json:"cleaning_required"`
+	PowerOnHours      int64   `json:"power_on_hours"`
+	TapeMotionHours   float64 `json:"tape_motion_hours"`
+}
+
+// ForceClean sends a cleaning command to the tape drive.
+// This requires a cleaning tape to be loaded in the drive.
+func (s *Service) ForceClean(ctx context.Context) error {
+	// The mt cleaner command tells the drive to initiate a cleaning cycle
+	cmd := exec.CommandContext(ctx, "mt", "-f", s.devicePath, "rewoffl")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("force clean failed: %s", string(output))
+	}
+	if s.labelCache != nil {
+		s.labelCache.Invalidate(s.devicePath)
+	}
+	return nil
+}
+
+// Retension runs a full tape retension pass (winds tape to EOT then rewinds to BOT).
+// This can help with tape tension issues and improve read/write reliability.
+func (s *Service) Retension(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, "mt", "-f", s.devicePath, "retension")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("retension failed: %s", string(output))
+	}
+	return nil
+}
+
+// GetDriveStatistics collects drive statistics using tapeinfo and sg_logs.
+// Returns parsed statistics or an error.
+func (s *Service) GetDriveStatistics(ctx context.Context) (*DriveStatisticsData, error) {
+	stats := &DriveStatisticsData{}
+
+	// Try tapeinfo first for basic statistics
+	cmd := exec.CommandContext(ctx, "tapeinfo", "-f", s.devicePath)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		s.parseTapeInfoStats(string(output), stats)
+	}
+
+	// Try sg_logs for more detailed statistics (log pages)
+	cmd = exec.CommandContext(ctx, "sg_logs", "-p", "0x0c", s.devicePath) // Sequential access device page
+	output, err = cmd.CombinedOutput()
+	if err == nil {
+		s.parseSgLogsStats(string(output), stats)
+	}
+
+	// Try sg_logs for write/read error counters
+	cmd = exec.CommandContext(ctx, "sg_logs", "-p", "0x02", s.devicePath) // Write error counters
+	output, err = cmd.CombinedOutput()
+	if err == nil {
+		s.parseErrorCounters(string(output), stats, true)
+	}
+
+	cmd = exec.CommandContext(ctx, "sg_logs", "-p", "0x03", s.devicePath) // Read error counters
+	output, err = cmd.CombinedOutput()
+	if err == nil {
+		s.parseErrorCounters(string(output), stats, false)
+	}
+
+	return stats, nil
+}
+
+// parseTapeInfoStats parses tapeinfo output for drive statistics
+func (s *Service) parseTapeInfoStats(output string, stats *DriveStatisticsData) {
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		line := scanner.Text()
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+
+		switch {
+		case key == "Total Loads" || key == "LoadCount":
+			stats.TotalLoadCount, _ = strconv.ParseInt(value, 10, 64)
+		case key == "Total Written" || strings.Contains(key, "TotalWritten"):
+			stats.TotalBytesWritten, _ = strconv.ParseInt(value, 10, 64)
+		case key == "Total Read" || strings.Contains(key, "TotalRead"):
+			stats.TotalBytesRead, _ = strconv.ParseInt(value, 10, 64)
+		case key == "Write Errors" || strings.Contains(key, "WriteErrors"):
+			stats.WriteErrors, _ = strconv.ParseInt(value, 10, 64)
+		case key == "Read Errors" || strings.Contains(key, "ReadErrors"):
+			stats.ReadErrors, _ = strconv.ParseInt(value, 10, 64)
+		case key == "CleaningRequired" || strings.Contains(key, "Cleaning"):
+			stats.CleaningRequired = strings.Contains(strings.ToLower(value), "yes") || value == "1"
+		case key == "PowerOnHours" || strings.Contains(key, "Power On"):
+			stats.PowerOnHours, _ = strconv.ParseInt(value, 10, 64)
+		}
+	}
+}
+
+// parseSgLogsStats parses sg_logs sequential access device page output
+func (s *Service) parseSgLogsStats(output string, stats *DriveStatisticsData) {
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		switch {
+		case strings.Contains(line, "ytes written"):
+			if v := extractSgLogsValue(line); v > 0 {
+				stats.TotalBytesWritten = v
+			}
+		case strings.Contains(line, "ytes read"):
+			if v := extractSgLogsValue(line); v > 0 {
+				stats.TotalBytesRead = v
+			}
+		case strings.Contains(line, "load count") || strings.Contains(line, "Load count"):
+			if v := extractSgLogsValue(line); v > 0 {
+				stats.TotalLoadCount = v
+			}
+		case strings.Contains(line, "cleaning") && strings.Contains(strings.ToLower(line), "required"):
+			stats.CleaningRequired = true
+		case strings.Contains(line, "tape motion hours"):
+			if fv := extractSgLogsFloat(line); fv > 0 {
+				stats.TapeMotionHours = fv
+			}
+		case strings.Contains(line, "power on") && strings.Contains(line, "hour"):
+			if v := extractSgLogsValue(line); v > 0 {
+				stats.PowerOnHours = v
+			}
+		}
+	}
+}
+
+// parseErrorCounters parses sg_logs error counter page output
+func (s *Service) parseErrorCounters(output string, stats *DriveStatisticsData, isWrite bool) {
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.Contains(line, "total error") || strings.Contains(line, "Total errors") || strings.Contains(line, "uncorrected") {
+			if v := extractSgLogsValue(line); v > 0 {
+				if isWrite {
+					stats.WriteErrors += v
+				} else {
+					stats.ReadErrors += v
+				}
+			}
+		}
+	}
+}
+
+// extractSgLogsValue extracts an integer value from an sg_logs output line
+func extractSgLogsValue(line string) int64 {
+	// sg_logs output format: "  Description = value"
+	eqIdx := strings.LastIndex(line, "=")
+	if eqIdx < 0 {
+		return 0
+	}
+	val := strings.TrimSpace(line[eqIdx+1:])
+	// Remove any units suffix
+	fields := strings.Fields(val)
+	if len(fields) > 0 {
+		v, _ := strconv.ParseInt(fields[0], 10, 64)
+		return v
+	}
+	return 0
+}
+
+// extractSgLogsFloat extracts a float value from an sg_logs output line
+func extractSgLogsFloat(line string) float64 {
+	eqIdx := strings.LastIndex(line, "=")
+	if eqIdx < 0 {
+		return 0
+	}
+	val := strings.TrimSpace(line[eqIdx+1:])
+	fields := strings.Fields(val)
+	if len(fields) > 0 {
+		v, _ := strconv.ParseFloat(fields[0], 64)
+		return v
+	}
+	return 0
+}
