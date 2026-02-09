@@ -57,9 +57,9 @@ type JobProgress struct {
 	UpdatedAt                     time.Time `json:"updated_at"`
 	LogLines                      []string  `json:"log_lines"`
 	// Scan progress fields (populated during the "scanning" phase)
-	ScanFilesFound int64 `json:"scan_files_found"`
+	ScanFilesFound  int64 `json:"scan_files_found"`
 	ScanDirsScanned int64 `json:"scan_dirs_scanned"`
-	ScanBytesFound int64 `json:"scan_bytes_found"`
+	ScanBytesFound  int64 `json:"scan_bytes_found"`
 }
 
 // ScanProgressFunc is a callback invoked periodically during ScanSource
@@ -196,15 +196,15 @@ func (cw *countingWriter) bytesWritten() int64 {
 
 // Service handles backup operations
 type Service struct {
-	db            *database.DB
-	tapeService   *tape.Service
-	logger        *logging.Logger
-	blockSize     int
-	bufferSizeMB  int
-	mu            sync.Mutex
-	activeJobs    map[int64]*JobProgress
-	cancelFuncs   map[int64]context.CancelFunc
-	pauseFlags    map[int64]*int32
+	db                 *database.DB
+	tapeService        *tape.Service
+	logger             *logging.Logger
+	blockSize          int
+	bufferSizeMB       int
+	mu                 sync.Mutex
+	activeJobs         map[int64]*JobProgress
+	cancelFuncs        map[int64]context.CancelFunc
+	pauseFlags         map[int64]*int32
 	resumeFiles        map[int64][]string // files already processed for resume
 	EventCallback      EventCallback
 	TapeChangeCallback TapeChangeCallback
@@ -1759,11 +1759,11 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		if err := s.finishTape(finishTapeParams{
 			ctx: ctx, job: job, source: source,
 			backupSetID: backupSetID, initialBackupSetID: backupSetID,
-			tapeID: tapeID,
+			tapeID:    tapeID,
 			tapeLabel: expectedLabel, tapeUUID: expectedUUID,
 			driveSvc: driveSvc, files: files, totalBytes: totalBytes,
 			actualTapeBytes: actualTapeBytes,
-			backupType: backupType, encrypted: encrypted,
+			backupType:      backupType, encrypted: encrypted,
 			encryptionKeyID: encryptionKeyID, compressed: compressed,
 			compressionType: compressionType, startTime: startTime,
 			checksums: fileChecksums,
@@ -1861,12 +1861,12 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 				if err := s.finishTape(finishTapeParams{
 					ctx: ctx, job: job, source: source,
 					backupSetID: currentBackupSetID, initialBackupSetID: backupSetID,
-					tapeID: currentTapeID,
+					tapeID:    currentTapeID,
 					tapeLabel: currentLabel, tapeUUID: currentUUID,
 					pool: "", driveSvc: currentDriveSvc,
 					files: batch, totalBytes: batchBytes,
 					actualTapeBytes: actualBatchBytes,
-					backupType: backupType, encrypted: encrypted,
+					backupType:      backupType, encrypted: encrypted,
 					encryptionKeyID: encryptionKeyID, compressed: compressed,
 					compressionType: compressionType, startTime: startTime,
 					spanningSetID: spanningSetID, sequenceNumber: seqNum,
@@ -2132,9 +2132,9 @@ type finishTapeParams struct {
 	compressed         bool
 	compressionType    models.CompressionType
 	startTime          time.Time
-	spanningSetID      int64 // 0 if not spanning
-	sequenceNumber     int   // 1-based tape index within spanning set
-	totalTapes         int   // 0 if not yet known (updated later)
+	spanningSetID      int64     // 0 if not spanning
+	sequenceNumber     int       // 1-based tape index within spanning set
+	totalTapes         int       // 0 if not yet known (updated later)
 	checksums          *sync.Map // pre-computed file checksums (path -> string), computed concurrently during streaming
 }
 

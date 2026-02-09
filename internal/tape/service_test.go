@@ -446,9 +446,9 @@ func TestParseDataCompressionPage(t *testing.T) {
 	svc := NewService("/dev/nst0", 65536)
 
 	tests := []struct {
-		name     string
-		output   string
-		wantRead int64
+		name      string
+		output    string
+		wantRead  int64
 		wantWrite int64
 	}{
 		{
@@ -532,5 +532,25 @@ func TestParseTapeAlertPage(t *testing.T) {
 				t.Errorf("expected TapeAlertFlags %q, got %q", tt.wantFlags, stats.TapeAlertFlags)
 			}
 		})
+	}
+}
+
+func TestDefaultOperationTimeout(t *testing.T) {
+	// Verify the timeout constant is set to a reasonable value
+	if DefaultOperationTimeout < 10*time.Second {
+		t.Errorf("DefaultOperationTimeout too short: %v, should be at least 10s", DefaultOperationTimeout)
+	}
+	if DefaultOperationTimeout > 120*time.Second {
+		t.Errorf("DefaultOperationTimeout too long: %v, should be at most 120s", DefaultOperationTimeout)
+	}
+}
+
+func TestErrOperationTimeoutExists(t *testing.T) {
+	// Verify the error type is properly defined
+	if ErrOperationTimeout == nil {
+		t.Error("ErrOperationTimeout should not be nil")
+	}
+	if ErrOperationTimeout.Error() != "tape operation timed out" {
+		t.Errorf("unexpected error message: %q", ErrOperationTimeout.Error())
 	}
 }

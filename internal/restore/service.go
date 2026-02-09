@@ -66,11 +66,11 @@ type NotificationSender interface {
 
 // Service handles restore operations
 type Service struct {
-	db           *database.DB
-	tapeService  *tape.Service
-	logger       *logging.Logger
-	blockSize    int
-	notifier     NotificationSender
+	db          *database.DB
+	tapeService *tape.Service
+	logger      *logging.Logger
+	blockSize   int
+	notifier    NotificationSender
 }
 
 // NewService creates a new restore service
