@@ -208,10 +208,17 @@ configure_tape_passthrough() {
         # Add device passthrough to container config
         cat >> "/etc/pve/lxc/$ct_id.conf" << EOF
 
+# Allow raw SCSI access (required for tape and sg devices)
+lxc.apparmor.profile: unconfined
+lxc.cap.drop:
+
 # Tape device passthrough
 lxc.cgroup2.devices.allow: c ${major}:* rwm
 lxc.mount.entry: /dev/nst0 dev/nst0 none bind,optional,create=file
 lxc.mount.entry: /dev/st0 dev/st0 none bind,optional,create=file
+
+# SCSI generic device access
+lxc.cgroup2.devices.allow: c 21:* rwm
 EOF
         
         # Also try to passthrough the SCSI generic device if available
