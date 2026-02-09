@@ -718,6 +718,95 @@ func TestCountingReaderWriteTo(t *testing.T) {
 	}
 }
 
+func TestCountingReaderWriteToMultiBuffer(t *testing.T) {
+	// Exercise the concurrent read-ahead pipeline with data spanning
+	// multiple relay buffer sizes to verify correct multi-chunk transfer.
+	data := make([]byte, 3*1024*1024+12345) // ~3MB + odd tail
+	for i := range data {
+		data[i] = byte(i % 251) // prime modulus for pattern variety
+	}
+	reader := bytes.NewReader(data)
+
+	var lastCount int64
+	cr := &countingReader{
+		reader: reader,
+		callback: func(bytesRead int64) {
+			atomic.StoreInt64(&lastCount, bytesRead)
+		},
+	}
+
+	var dst bytes.Buffer
+	n, err := cr.WriteTo(&dst)
+	if err != nil {
+		t.Fatalf("WriteTo error: %v", err)
+	}
+	if n != int64(len(data)) {
+		t.Errorf("WriteTo returned %d bytes, expected %d", n, len(data))
+	}
+	if cr.bytesRead() != int64(len(data)) {
+		t.Errorf("bytesRead() = %d, expected %d", cr.bytesRead(), len(data))
+	}
+	if !bytes.Equal(dst.Bytes(), data) {
+		t.Error("destination data does not match source")
+	}
+}
+
+func TestCountingReaderWriteToSlowWriter(t *testing.T) {
+	// Verify the pipeline handles a slow writer without data loss.
+	// The read-ahead goroutine should buffer data while the writer
+	// is blocked, preventing source stalls.
+	data := make([]byte, 2*1024*1024) // 2MB
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+	reader := bytes.NewReader(data)
+
+	cr := &countingReader{reader: reader}
+
+	var dst bytes.Buffer
+	sw := &slowWriter{w: &dst, delay: time.Microsecond}
+	n, err := cr.WriteTo(sw)
+	if err != nil {
+		t.Fatalf("WriteTo error: %v", err)
+	}
+	if n != int64(len(data)) {
+		t.Errorf("WriteTo returned %d bytes, expected %d", n, len(data))
+	}
+	if !bytes.Equal(dst.Bytes(), data) {
+		t.Error("data mismatch after slow writer relay")
+	}
+}
+
+// slowWriter wraps an io.Writer and adds a small delay per Write call
+// to simulate backpressure from a slow destination (e.g. a full pipe).
+type slowWriter struct {
+	w     *bytes.Buffer
+	delay time.Duration
+}
+
+func (sw *slowWriter) Write(p []byte) (int, error) {
+	time.Sleep(sw.delay)
+	return sw.w.Write(p)
+}
+
+func TestCountingReaderWriteToEmpty(t *testing.T) {
+	// Verify WriteTo handles an empty reader correctly.
+	reader := bytes.NewReader(nil)
+	cr := &countingReader{reader: reader}
+
+	var dst bytes.Buffer
+	n, err := cr.WriteTo(&dst)
+	if err != nil {
+		t.Fatalf("WriteTo error: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 bytes, got %d", n)
+	}
+	if dst.Len() != 0 {
+		t.Errorf("expected empty destination, got %d bytes", dst.Len())
+	}
+}
+
 func TestJobProgressFields(t *testing.T) {
 	p := JobProgress{
 		JobID:                     1,
