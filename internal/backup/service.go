@@ -214,7 +214,7 @@ type Service struct {
 // NewService creates a new backup service
 func NewService(db *database.DB, tapeService *tape.Service, logger *logging.Logger, blockSize int, bufferSizeMB int) *Service {
 	if bufferSizeMB <= 0 {
-		bufferSizeMB = 512
+		bufferSizeMB = 1024
 	}
 	return &Service{
 		db:           db,
@@ -687,7 +687,7 @@ func (s *Service) StreamToTape(ctx context.Context, sourcePath string, files []F
 	if mbufferErr == nil {
 		// Use mbuffer for better streaming performance
 		tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
-		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", fmt.Sprintf("%dM", s.bufferSizeMB), "-o", devicePath)
+		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", fmt.Sprintf("%dM", s.bufferSizeMB), "-P", "80", "-o", devicePath)
 
 		// Pipe tar output through counting reader to mbuffer
 		tarCmd.Dir = sourcePath
@@ -797,7 +797,7 @@ func (s *Service) StreamToTapeEncrypted(ctx context.Context, sourcePath string, 
 
 	if mbufferErr == nil {
 		// Use mbuffer for buffering before writing to tape
-		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", fmt.Sprintf("%dM", s.bufferSizeMB), "-o", devicePath)
+		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", fmt.Sprintf("%dM", s.bufferSizeMB), "-P", "80", "-o", devicePath)
 
 		opensslPipe, err := opensslCmd.StdoutPipe()
 		if err != nil {
@@ -922,7 +922,7 @@ func (s *Service) StreamToTapeCompressed(ctx context.Context, sourcePath string,
 	_, mbufferErr := exec.LookPath("mbuffer")
 
 	if mbufferErr == nil {
-		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", fmt.Sprintf("%dM", s.bufferSizeMB), "-o", devicePath)
+		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", fmt.Sprintf("%dM", s.bufferSizeMB), "-P", "80", "-o", devicePath)
 		compPipe, err := compCmd.StdoutPipe()
 		if err != nil {
 			return 0, fmt.Errorf("failed to create compression pipe: %w", err)
@@ -1051,7 +1051,7 @@ func (s *Service) StreamToTapeCompressedEncrypted(ctx context.Context, sourcePat
 	_, mbufferErr := exec.LookPath("mbuffer")
 
 	if mbufferErr == nil {
-		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", fmt.Sprintf("%dM", s.bufferSizeMB), "-o", devicePath)
+		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", fmt.Sprintf("%dM", s.bufferSizeMB), "-P", "80", "-o", devicePath)
 		opensslPipe, err := opensslCmd.StdoutPipe()
 		if err != nil {
 			return 0, fmt.Errorf("failed to create openssl pipe: %w", err)
