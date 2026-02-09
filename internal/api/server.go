@@ -592,17 +592,47 @@ func (s *Server) telegramTapesCommand() string {
 }
 
 func (s *Server) telegramDrivesCommand() string {
-	rows, _ := s.db.Query("SELECT name, device_path, status FROM tape_drives WHERE enabled = 1")
+	rows, _ := s.db.Query(`SELECT COALESCE(td.display_name, td.device_path), td.device_path, td.status,
+		COALESCE(td.model, ''), COALESCE(t.label, '')
+		FROM tape_drives td
+		LEFT JOIN tapes t ON td.current_tape_id = t.id
+		WHERE td.enabled = 1`)
 	if rows == nil {
 		return "Failed to query drives"
 	}
 	defer rows.Close()
 
 	msg := "🔌 Tape Drives\n"
+	count := 0
 	for rows.Next() {
-		var name, devicePath, status string
-		rows.Scan(&name, &devicePath, &status)
-		msg += fmt.Sprintf("\n%s (%s): %s", name, devicePath, status)
+		var name, devicePath, status, model, tapeLabel string
+		rows.Scan(&name, &devicePath, &status, &model, &tapeLabel)
+
+		statusIcon := "❓"
+		switch models.DriveStatus(status) {
+		case models.DriveStatusReady:
+			statusIcon = "✅"
+		case models.DriveStatusBusy:
+			statusIcon = "🔄"
+		case models.DriveStatusOffline:
+			statusIcon = "⭕"
+		case models.DriveStatusError:
+			statusIcon = "❌"
+		}
+
+		msg += fmt.Sprintf("\n%s %s", statusIcon, name)
+		if model != "" {
+			msg += fmt.Sprintf(" (%s)", model)
+		}
+		msg += fmt.Sprintf("\n  Path: %s | Status: %s", devicePath, status)
+
+		if tapeLabel != "" {
+			msg += fmt.Sprintf("\n  📼 Tape: %s", tapeLabel)
+		}
+		count++
+	}
+	if count == 0 {
+		msg += "\nNo drives configured"
 	}
 	return msg
 }
@@ -615,26 +645,126 @@ func (s *Server) telegramActiveCommand() string {
 
 	msg := "⚡ Active Operations\n"
 	for _, j := range activeJobs {
-		pct := float64(0)
-		if j.TotalBytes > 0 {
-			pct = float64(j.BytesWritten) / float64(j.TotalBytes) * 100
+		// Job name and status
+		msg += fmt.Sprintf("\n📦 %s", j.JobName)
+		if j.Status == "paused" {
+			msg += " [PAUSED]"
 		}
-		msg += fmt.Sprintf("\n%s\n", j.JobName)
-		msg += fmt.Sprintf("  Phase: %s | Status: %s\n", j.Phase, j.Status)
-		msg += fmt.Sprintf("  Progress: %.1f%%\n", pct)
-		if j.WriteSpeed > 0 {
-			speedMB := j.WriteSpeed / (1024 * 1024)
-			msg += fmt.Sprintf("  Speed: %.1f MB/s\n", speedMB)
-		}
-		if j.EstimatedSecondsRemaining > 0 {
-			eta := time.Duration(j.EstimatedSecondsRemaining) * time.Second
-			msg += fmt.Sprintf("  ETA: %s\n", eta.Round(time.Second))
-		}
+		msg += fmt.Sprintf("\n  Phase: %s", j.Phase)
+
+		// Tape info
 		if j.TapeLabel != "" {
-			msg += fmt.Sprintf("  Tape: %s\n", j.TapeLabel)
+			msg += fmt.Sprintf("\n  📼 Tape: %s", j.TapeLabel)
 		}
+		if j.DevicePath != "" {
+			msg += fmt.Sprintf("\n  🖴 %s", j.DevicePath)
+		}
+
+		// Elapsed time and start time
+		if !j.StartTime.IsZero() {
+			elapsed := time.Since(j.StartTime)
+			msg += fmt.Sprintf("\n  ⏱ Elapsed: %s", telegramFormatDuration(elapsed))
+			msg += fmt.Sprintf("\n  Started: %s", j.StartTime.Format("15:04:05"))
+		}
+
+		// Job progress
+		jobPct := float64(0)
+		if j.TotalBytes > 0 {
+			jobPct = float64(j.BytesWritten) / float64(j.TotalBytes) * 100
+		}
+		msg += fmt.Sprintf("\n  Job Progress: %.1f%%", jobPct)
+
+		// Tape used
+		if j.TapeCapacityBytes > 0 {
+			tapePct := telegramTapeUsedPercent(j.TapeUsedBytes, j.BytesWritten, j.TapeCapacityBytes)
+			msg += fmt.Sprintf("\n  Tape Used: %.1f%%", tapePct)
+		}
+
+		// Written
+		msg += fmt.Sprintf("\n  Written: %s / %s", telegramFormatBytes(j.BytesWritten), telegramFormatBytes(j.TotalBytes))
+
+		// Speed
+		if j.WriteSpeed > 0 {
+			msg += fmt.Sprintf("\n  Speed: %s/s", telegramFormatBytes(int64(j.WriteSpeed)))
+		} else {
+			msg += "\n  Speed: ---"
+		}
+
+		// Job ETA
+		if j.EstimatedSecondsRemaining > 0 {
+			msg += fmt.Sprintf("\n  Job ETA: %s", telegramFormatDuration(time.Duration(j.EstimatedSecondsRemaining)*time.Second))
+		} else {
+			msg += "\n  Job ETA: ---"
+		}
+
+		// Tape ETA
+		if j.TapeEstimatedSecondsRemaining > 0 {
+			msg += fmt.Sprintf("\n  Tape ETA: %s", telegramFormatDuration(time.Duration(j.TapeEstimatedSecondsRemaining)*time.Second))
+		}
+
+		// Files
+		msg += fmt.Sprintf("\n  Files: %d/%d", j.FileCount, j.TotalFiles)
+
+		// Tape space
+		if j.TapeCapacityBytes > 0 {
+			free := telegramTapeFreeBytes(j.TapeUsedBytes, j.BytesWritten, j.TapeCapacityBytes)
+			msg += fmt.Sprintf("\n  Tape Space: %s free", telegramFormatBytes(free))
+		}
+		msg += "\n"
 	}
 	return msg
+}
+
+// telegramFormatBytes formats bytes into a human-readable string
+func telegramFormatBytes(b int64) string {
+	if b == 0 {
+		return "0 B"
+	}
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	units := []string{"KB", "MB", "GB", "TB", "PB"}
+	return fmt.Sprintf("%.2f %s", float64(b)/float64(div), units[exp])
+}
+
+// telegramFormatDuration formats a duration into a human-readable string
+func telegramFormatDuration(d time.Duration) string {
+	d = d.Round(time.Second)
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	sec := int(d.Seconds()) % 60
+	if h > 0 {
+		return fmt.Sprintf("%dh %dm %ds", h, m, sec)
+	}
+	if m > 0 {
+		return fmt.Sprintf("%dm %ds", m, sec)
+	}
+	return fmt.Sprintf("%ds", sec)
+}
+
+// telegramTapeUsedPercent returns the tape used percentage clamped to 100
+func telegramTapeUsedPercent(tapeUsedBytes, bytesWritten, tapeCapacityBytes int64) float64 {
+	totalUsed := tapeUsedBytes + bytesWritten
+	pct := float64(totalUsed) / float64(tapeCapacityBytes) * 100
+	if pct > 100 {
+		pct = 100
+	}
+	return pct
+}
+
+// telegramTapeFreeBytes returns the free tape space clamped to 0
+func telegramTapeFreeBytes(tapeUsedBytes, bytesWritten, tapeCapacityBytes int64) int64 {
+	free := tapeCapacityBytes - tapeUsedBytes - bytesWritten
+	if free < 0 {
+		free = 0
+	}
+	return free
 }
 
 // Middleware

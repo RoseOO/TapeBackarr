@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/RoseOO/TapeBackarr/internal/database"
 	"github.com/RoseOO/TapeBackarr/internal/tape"
@@ -233,5 +234,118 @@ func TestHandleDashboardPoolStorage(t *testing.T) {
 	}
 	if daily.TotalFreeBytes != 1300000000000 {
 		t.Errorf("expected DAILY free 1300000000000, got %d", daily.TotalFreeBytes)
+	}
+}
+
+func TestTelegramFormatBytes(t *testing.T) {
+	tests := []struct {
+		input    int64
+		expected string
+	}{
+		{0, "0 B"},
+		{512, "512 B"},
+		{1024, "1.00 KB"},
+		{1048576, "1.00 MB"},
+		{1073741824, "1.00 GB"},
+		{1099511627776, "1.00 TB"},
+		{500000000, "476.84 MB"},
+		{1500000000000, "1.36 TB"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.expected, func(t *testing.T) {
+			result := telegramFormatBytes(tt.input)
+			if result != tt.expected {
+				t.Errorf("telegramFormatBytes(%d) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestTelegramFormatDuration(t *testing.T) {
+	tests := []struct {
+		input    time.Duration
+		expected string
+	}{
+		{0, "0s"},
+		{30 * time.Second, "30s"},
+		{4*time.Minute + 25*time.Second, "4m 25s"},
+		{1*time.Hour + 30*time.Minute + 5*time.Second, "1h 30m 5s"},
+		{2 * time.Hour, "2h 0m 0s"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.expected, func(t *testing.T) {
+			result := telegramFormatDuration(tt.input)
+			if result != tt.expected {
+				t.Errorf("telegramFormatDuration(%v) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestTelegramDrivesCommand(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := database.New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("failed to migrate database: %v", err)
+	}
+
+	// Insert a test drive with display_name
+	_, err = db.Exec(`INSERT INTO tape_drives (device_path, display_name, status, enabled) VALUES (?, ?, ?, ?)`,
+		"/dev/nst0", "Main Drive", "ready", 1)
+	if err != nil {
+		t.Fatalf("failed to insert drive: %v", err)
+	}
+
+	tapeService := tape.NewService("/dev/null", 65536)
+	s := &Server{
+		db:          db,
+		tapeService: tapeService,
+	}
+
+	result := s.telegramDrivesCommand()
+
+	if !strings.Contains(result, "Tape Drives") {
+		t.Error("expected result to contain 'Tape Drives'")
+	}
+	if !strings.Contains(result, "Main Drive") {
+		t.Errorf("expected result to contain 'Main Drive', got: %s", result)
+	}
+	if !strings.Contains(result, "/dev/nst0") {
+		t.Errorf("expected result to contain '/dev/nst0', got: %s", result)
+	}
+	if !strings.Contains(result, "ready") {
+		t.Errorf("expected result to contain 'ready', got: %s", result)
+	}
+}
+
+func TestTelegramDrivesCommandNoDrives(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := database.New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("failed to migrate database: %v", err)
+	}
+
+	tapeService := tape.NewService("/dev/null", 65536)
+	s := &Server{
+		db:          db,
+		tapeService: tapeService,
+	}
+
+	result := s.telegramDrivesCommand()
+
+	if !strings.Contains(result, "No drives configured") {
+		t.Errorf("expected result to contain 'No drives configured', got: %s", result)
 	}
 }
