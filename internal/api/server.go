@@ -925,6 +925,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		LoadedTapeEncKeyFP    string             `json:"loaded_tape_enc_key_fingerprint"`
 		LoadedTapeCompression string             `json:"loaded_tape_compression"`
 		PoolStorage           []PoolStorageStats `json:"pool_storage"`
+		TotalFilesCataloged   int64              `json:"total_files_cataloged"`
+		TotalSources          int                `json:"total_sources"`
+		TotalEncryptionKeys   int                `json:"total_encryption_keys"`
+		LastBackupTime        *string            `json:"last_backup_time"`
+		TotalBackupSets       int                `json:"total_backup_sets"`
+		OldestBackup          *string            `json:"oldest_backup"`
 	}
 
 	s.db.QueryRow("SELECT COUNT(*) FROM tapes").Scan(&stats.TotalTapes)
@@ -933,6 +939,15 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	s.db.QueryRow("SELECT COUNT(*) FROM backup_sets WHERE status = 'running'").Scan(&stats.RunningJobs)
 	s.db.QueryRow("SELECT COUNT(*) FROM backup_sets WHERE start_time > datetime('now', '-24 hours')").Scan(&stats.RecentBackups)
 	s.db.QueryRow("SELECT COALESCE(SUM(total_bytes), 0) FROM backup_sets WHERE status = 'completed'").Scan(&stats.TotalDataBytes)
+	s.db.QueryRow("SELECT COALESCE(SUM(file_count), 0) FROM backup_sets WHERE status = 'completed'").Scan(&stats.TotalFilesCataloged)
+	s.db.QueryRow("SELECT COUNT(*) FROM backup_sources").Scan(&stats.TotalSources)
+	s.db.QueryRow("SELECT COUNT(*) FROM encryption_keys").Scan(&stats.TotalEncryptionKeys)
+	s.db.QueryRow("SELECT COUNT(*) FROM backup_sets WHERE status = 'completed'").Scan(&stats.TotalBackupSets)
+
+	var lastBackup, oldestBackup *string
+	s.db.QueryRow("SELECT MAX(end_time), MIN(start_time) FROM backup_sets WHERE status = 'completed'").Scan(&lastBackup, &oldestBackup)
+	stats.LastBackupTime = lastBackup
+	stats.OldestBackup = oldestBackup
 
 	// Get per-pool storage stats
 	stats.PoolStorage = make([]PoolStorageStats, 0)

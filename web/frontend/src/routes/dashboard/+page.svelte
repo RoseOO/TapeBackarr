@@ -27,6 +27,12 @@
     loaded_tape_enc_key_fingerprint: string;
     loaded_tape_compression: string;
     pool_storage: PoolStorageStats[];
+    total_files_cataloged: number;
+    total_sources: number;
+    total_encryption_keys: number;
+    last_backup_time: string | null;
+    total_backup_sets: number;
+    oldest_backup: string | null;
   }
 
   interface ActiveJob {
@@ -152,6 +158,38 @@
     if (percent >= 75) return 'var(--accent-warning, #f39c12)';
     return 'var(--accent-success, #16c784)';
   }
+
+  function formatRelativeTime(dateStr: string | null): string {
+    if (!dateStr) return 'Never';
+    const date = new Date(dateStr);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffSec = Math.floor(diffMs / 1000);
+    if (diffSec < 60) return 'Just now';
+    const diffMin = Math.floor(diffSec / 60);
+    if (diffMin < 60) return `${diffMin}m ago`;
+    const diffHr = Math.floor(diffMin / 60);
+    if (diffHr < 24) return `${diffHr}h ago`;
+    const diffDay = Math.floor(diffHr / 24);
+    if (diffDay < 30) return `${diffDay}d ago`;
+    return date.toLocaleDateString();
+  }
+
+  function getTotalPoolCapacity(): number {
+    if (!stats?.pool_storage) return 0;
+    return stats.pool_storage.reduce((sum, p) => sum + p.total_capacity_bytes, 0);
+  }
+
+  function getTotalPoolUsed(): number {
+    if (!stats?.pool_storage) return 0;
+    return stats.pool_storage.reduce((sum, p) => sum + p.total_used_bytes, 0);
+  }
+
+  function getOverallUsagePercent(): number {
+    const total = getTotalPoolCapacity();
+    if (total <= 0) return 0;
+    return Math.min(100, (getTotalPoolUsed() / total) * 100);
+  }
 </script>
 
 <div class="page-header">
@@ -165,6 +203,7 @@
     <p class="error">{error}</p>
   </div>
 {:else if stats}
+  <!-- Primary Stats -->
   <div class="stats-grid">
     <div class="stat-card">
       <div class="stat-icon">💾</div>
@@ -207,14 +246,31 @@
     </div>
 
     <div class="stat-card">
-      <div class="stat-icon">🖴</div>
+      <div class="stat-icon">🗃️</div>
       <div class="stat-info">
         <div class="stat-value">{formatBytes(stats.total_data_bytes)}</div>
         <div class="stat-label">Total Backed Up</div>
       </div>
     </div>
+
+    <div class="stat-card">
+      <div class="stat-icon">📄</div>
+      <div class="stat-info">
+        <div class="stat-value">{stats.total_files_cataloged?.toLocaleString() ?? 0}</div>
+        <div class="stat-label">Files Cataloged</div>
+      </div>
+    </div>
+
+    <div class="stat-card">
+      <div class="stat-icon">📁</div>
+      <div class="stat-info">
+        <div class="stat-value">{stats.total_sources ?? 0}</div>
+        <div class="stat-label">Sources</div>
+      </div>
+    </div>
   </div>
 
+  <!-- Main Dashboard Grid -->
   <div class="dashboard-row">
     <div class="card drive-status-card">
       <h2>Drive Status</h2>
@@ -246,15 +302,60 @@
       {/if}
     </div>
 
-    <div class="card quick-actions">
+    <div class="card quick-actions-card">
       <h2>Quick Actions</h2>
       <div class="action-buttons">
-        <a href="/jobs" class="btn btn-primary">Create Backup Job</a>
-        <a href="/tapes" class="btn btn-secondary">Manage Tapes</a>
-        <a href="/restore" class="btn btn-secondary">Restore Files</a>
+        <a href="/jobs" class="btn btn-primary">📦 Create Backup Job</a>
+        <a href="/tapes" class="btn btn-secondary">💾 Manage Tapes</a>
+        <a href="/restore" class="btn btn-secondary">🔄 Restore Files</a>
+        <a href="/sources" class="btn btn-secondary">📁 Manage Sources</a>
+      </div>
+
+      <div class="backup-summary">
+        <h3>Backup Summary</h3>
+        <div class="summary-grid">
+          <div class="summary-item">
+            <span class="summary-label">Total Backup Sets</span>
+            <span class="summary-value">{stats.total_backup_sets ?? 0}</span>
+          </div>
+          <div class="summary-item">
+            <span class="summary-label">Last Backup</span>
+            <span class="summary-value">{formatRelativeTime(stats.last_backup_time)}</span>
+          </div>
+          <div class="summary-item">
+            <span class="summary-label">Oldest Backup</span>
+            <span class="summary-value">{formatRelativeTime(stats.oldest_backup)}</span>
+          </div>
+          <div class="summary-item">
+            <span class="summary-label">Encryption Keys</span>
+            <span class="summary-value">{stats.total_encryption_keys ?? 0}</span>
+          </div>
+        </div>
       </div>
     </div>
   </div>
+
+  <!-- Overall Storage Summary -->
+  {#if stats.pool_storage && stats.pool_storage.length > 0}
+    {@const overallPercent = getOverallUsagePercent()}
+    <div class="card storage-overview-card">
+      <div class="storage-overview-header">
+        <h2>Storage Overview</h2>
+        <span class="storage-overview-total">
+          {formatBytes(getTotalPoolUsed())} / {formatBytes(getTotalPoolCapacity())} used
+        </span>
+      </div>
+      <div class="storage-overview-bar-container">
+        <div class="storage-overview-bar">
+          <div
+            class="storage-overview-fill"
+            style="width: {overallPercent}%; background: {getUsageColor(overallPercent)}"
+          ></div>
+        </div>
+        <span class="storage-overview-percent">{overallPercent.toFixed(1)}%</span>
+      </div>
+    </div>
+  {/if}
 
   {#if stats.pool_storage && stats.pool_storage.length > 0}
     <div class="pool-storage-section">
@@ -342,7 +443,7 @@
 <style>
   .stats-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
     gap: 1rem;
     margin-bottom: 1.5rem;
   }
@@ -376,10 +477,11 @@
     display: grid;
     grid-template-columns: 1fr 2fr;
     gap: 1.5rem;
+    margin-bottom: 1.5rem;
   }
 
   .drive-status-card h2,
-  .quick-actions h2 {
+  .quick-actions-card h2 {
     margin: 0 0 1rem;
     font-size: 1rem;
     color: var(--text-primary);
@@ -457,6 +559,92 @@
     display: flex;
     gap: 0.75rem;
     flex-wrap: wrap;
+  }
+
+  .backup-summary {
+    margin-top: 1.25rem;
+    padding-top: 1.25rem;
+    border-top: 1px solid var(--border-color);
+  }
+
+  .backup-summary h3 {
+    margin: 0 0 0.75rem;
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+  }
+
+  .summary-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.75rem;
+  }
+
+  .summary-item {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .summary-label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+  }
+
+  .summary-value {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .storage-overview-card {
+    margin-bottom: 1.5rem;
+  }
+
+  .storage-overview-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.75rem;
+  }
+
+  .storage-overview-header h2 {
+    margin: 0;
+    font-size: 1rem;
+    color: var(--text-primary);
+  }
+
+  .storage-overview-total {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    font-weight: 500;
+  }
+
+  .storage-overview-bar-container {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .storage-overview-bar {
+    flex: 1;
+    height: 14px;
+    background: var(--bg-input, #333);
+    border-radius: 7px;
+    overflow: hidden;
+  }
+
+  .storage-overview-fill {
+    height: 100%;
+    border-radius: 7px;
+    transition: width 0.5s ease;
+  }
+
+  .storage-overview-percent {
+    font-size: 0.9rem;
+    font-family: monospace;
+    font-weight: 600;
+    color: var(--text-primary);
+    width: 4.5em;
+    text-align: right;
   }
 
   .error {
@@ -650,5 +838,19 @@
     font-size: 0.85rem;
     color: var(--text-muted, #888);
     font-style: italic;
+  }
+
+  @media (max-width: 768px) {
+    .dashboard-row {
+      grid-template-columns: 1fr;
+    }
+
+    .stats-grid {
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    }
+
+    .summary-grid {
+      grid-template-columns: 1fr;
+    }
   }
 </style>

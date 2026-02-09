@@ -240,6 +240,89 @@ func TestHandleDashboardPoolStorage(t *testing.T) {
 	}
 }
 
+func TestHandleDashboardExtendedStats(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := database.New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("failed to migrate database: %v", err)
+	}
+
+	// Insert a source
+	_, err = db.Exec("INSERT INTO backup_sources (name, source_type, path) VALUES (?, ?, ?)", "TestSource", "smb", "/mnt/share")
+	if err != nil {
+		t.Fatalf("failed to insert source: %v", err)
+	}
+
+	// Insert a completed backup set with file_count
+	_, err = db.Exec("INSERT INTO tapes (uuid, barcode, label, pool_id, status, capacity_bytes, used_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		"uuid-ext", "TAPEEXT", "TAPEEXT", 1, "active", int64(1500000000000), int64(500000000000))
+	if err != nil {
+		t.Fatalf("failed to insert tape: %v", err)
+	}
+	_, err = db.Exec(`INSERT INTO backup_jobs (name, source_id, pool_id, backup_type, retention_days, enabled) VALUES (?, ?, ?, ?, ?, ?)`,
+		"TestJob", 1, 1, "full", 30, true)
+	if err != nil {
+		t.Fatalf("failed to insert job: %v", err)
+	}
+	_, err = db.Exec(`INSERT INTO backup_sets (job_id, tape_id, backup_type, status, file_count, total_bytes, start_time, end_time)
+		VALUES (?, ?, ?, ?, ?, ?, datetime('now', '-1 hour'), datetime('now'))`, 1, 1, "full", "completed", 42, int64(1000000))
+	if err != nil {
+		t.Fatalf("failed to insert backup set: %v", err)
+	}
+
+	tapeService := tape.NewService("/dev/null", 65536)
+	s := &Server{
+		router:      chi.NewRouter(),
+		db:          db,
+		tapeService: tapeService,
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/dashboard", nil)
+	rr := httptest.NewRecorder()
+	s.handleDashboard(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rr.Code)
+	}
+
+	var result struct {
+		TotalFilesCataloged int64   `json:"total_files_cataloged"`
+		TotalSources        int     `json:"total_sources"`
+		TotalEncryptionKeys int     `json:"total_encryption_keys"`
+		TotalBackupSets     int     `json:"total_backup_sets"`
+		LastBackupTime      *string `json:"last_backup_time"`
+		OldestBackup        *string `json:"oldest_backup"`
+	}
+
+	if err := json.NewDecoder(rr.Body).Decode(&result); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if result.TotalFilesCataloged != 42 {
+		t.Errorf("expected 42 total files cataloged, got %d", result.TotalFilesCataloged)
+	}
+	if result.TotalSources != 1 {
+		t.Errorf("expected 1 source, got %d", result.TotalSources)
+	}
+	if result.TotalEncryptionKeys != 0 {
+		t.Errorf("expected 0 encryption keys, got %d", result.TotalEncryptionKeys)
+	}
+	if result.TotalBackupSets != 1 {
+		t.Errorf("expected 1 backup set, got %d", result.TotalBackupSets)
+	}
+	if result.LastBackupTime == nil {
+		t.Error("expected last_backup_time to be set")
+	}
+	if result.OldestBackup == nil {
+		t.Error("expected oldest_backup to be set")
+	}
+}
+
 func TestTelegramFormatBytes(t *testing.T) {
 	tests := []struct {
 		input    int64
