@@ -103,7 +103,7 @@ func main() {
 	}
 
 	// Create backup service
-	backupService := backup.NewService(db, tapeService, logger, cfg.Tape.BlockSize)
+	backupService := backup.NewService(db, tapeService, logger, cfg.Tape.BlockSize, cfg.Tape.BufferSizeMB)
 
 	// Create restore service
 	restoreService := restore.NewService(db, tapeService, logger, cfg.Tape.BlockSize)

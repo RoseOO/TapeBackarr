@@ -25,8 +25,8 @@ func TestDefaultConfig(t *testing.T) {
 		t.Errorf("expected device /dev/nst0, got %s", cfg.Tape.DefaultDevice)
 	}
 
-	if cfg.Tape.BlockSize != 65536 {
-		t.Errorf("expected block size 65536, got %d", cfg.Tape.BlockSize)
+	if cfg.Tape.BlockSize != 262144 {
+		t.Errorf("expected block size 262144, got %d", cfg.Tape.BlockSize)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync/atomic"
 	"testing"
 
 	"github.com/RoseOO/TapeBackarr/internal/models"
@@ -389,7 +390,7 @@ func TestFileInfoHashField(t *testing.T) {
 }
 
 func TestGetActiveJobs(t *testing.T) {
-	svc := NewService(nil, nil, nil, 65536)
+	svc := NewService(nil, nil, nil, 65536, 512)
 
 	// Initially no active jobs
 	jobs := svc.GetActiveJobs()
@@ -420,7 +421,7 @@ func TestGetActiveJobs(t *testing.T) {
 }
 
 func TestCancelJob(t *testing.T) {
-	svc := NewService(nil, nil, nil, 65536)
+	svc := NewService(nil, nil, nil, 65536, 512)
 
 	// Cancel non-existent job returns false
 	if svc.CancelJob(999) {
@@ -461,7 +462,7 @@ func TestCancelJob(t *testing.T) {
 }
 
 func TestPauseResumeJob(t *testing.T) {
-	svc := NewService(nil, nil, nil, 65536)
+	svc := NewService(nil, nil, nil, 65536, 512)
 
 	// Pause non-existent job returns false
 	if svc.PauseJob(999) {
@@ -506,7 +507,7 @@ func TestPauseResumeJob(t *testing.T) {
 }
 
 func TestEventCallback(t *testing.T) {
-	svc := NewService(nil, nil, nil, 65536)
+	svc := NewService(nil, nil, nil, 65536, 512)
 
 	var receivedEvents []string
 	svc.EventCallback = func(eventType, category, title, message string) {
@@ -544,7 +545,7 @@ func TestEventCallback(t *testing.T) {
 }
 
 func TestBackupFailureEmitsErrorEvent(t *testing.T) {
-	svc := NewService(nil, nil, nil, 65536)
+	svc := NewService(nil, nil, nil, 65536, 512)
 
 	var receivedEvents []string
 	svc.EventCallback = func(eventType, category, title, message string) {
@@ -595,7 +596,7 @@ func TestCountingReader(t *testing.T) {
 
 	buf := make([]byte, 10)
 
-	// First read
+	// First read - callback fires immediately (lastCallback is zero)
 	n, err := cr.Read(buf)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -607,19 +608,59 @@ func TestCountingReader(t *testing.T) {
 		t.Errorf("expected callback with 10, got %d", lastCount)
 	}
 
-	// Second read
+	// Second read - callback is throttled (< 1s since first), but byte count is still accurate
 	n, err = cr.Read(buf)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if lastCount != int64(10+n) {
-		t.Errorf("expected cumulative count %d, got %d", 10+n, lastCount)
-	}
 
-	// Total bytes tracked
+	// Total bytes tracked via atomic counter should always be accurate
 	total := cr.bytesRead()
 	if total != int64(10+n) {
 		t.Errorf("expected total %d, got %d", 10+n, total)
+	}
+}
+
+func TestCountingReaderThrottledCallback(t *testing.T) {
+	// Verify that the callback is throttled but byte counting remains accurate
+	data := make([]byte, 1024)
+	reader := bytes.NewReader(data)
+
+	var callbackCount int32
+	cr := &countingReader{
+		reader: reader,
+		callback: func(bytesRead int64) {
+			atomic.AddInt32(&callbackCount, 1)
+		},
+	}
+
+	buf := make([]byte, 64)
+
+	// Read many times in rapid succession
+	totalRead := 0
+	for {
+		n, err := cr.Read(buf)
+		totalRead += n
+		if err != nil {
+			break
+		}
+	}
+
+	// All bytes should be counted accurately
+	if cr.bytesRead() != int64(totalRead) {
+		t.Errorf("expected %d bytes counted, got %d", totalRead, cr.bytesRead())
+	}
+
+	// Callback should have fired at least once (first read) but not for every read
+	// due to 1-second throttling
+	callbacks := atomic.LoadInt32(&callbackCount)
+	if callbacks < 1 {
+		t.Errorf("expected at least 1 callback, got %d", callbacks)
+	}
+	// With 1024/64 = 16 reads in quick succession, callback should be throttled
+	// to far fewer than 16 calls
+	if callbacks > 5 {
+		t.Errorf("expected throttled callbacks (<=5), got %d out of 16 reads", callbacks)
 	}
 }
 
@@ -716,7 +757,7 @@ func TestResumeStateEmptyFilesProcessed(t *testing.T) {
 
 func TestPauseJobPersistsState(t *testing.T) {
 	// Test that PauseJob still works with nil db (no crash)
-	svc := NewService(nil, nil, nil, 65536)
+	svc := NewService(nil, nil, nil, 65536, 512)
 
 	var pauseFlag int32
 	svc.mu.Lock()
@@ -747,7 +788,7 @@ func TestPauseJobPersistsState(t *testing.T) {
 }
 
 func TestResumeFilesFiltering(t *testing.T) {
-	svc := NewService(nil, nil, nil, 65536)
+	svc := NewService(nil, nil, nil, 65536, 512)
 
 	// Simulate resume files being set
 	svc.mu.Lock()
@@ -782,7 +823,7 @@ func TestResumeFilesFiltering(t *testing.T) {
 
 func TestSaveJobExecutionStateNilDB(t *testing.T) {
 	// Ensure saveJobExecutionState doesn't panic with nil DB
-	svc := NewService(nil, nil, nil, 65536)
+	svc := NewService(nil, nil, nil, 65536, 512)
 	p := &JobProgress{
 		JobID:       1,
 		BytesWritten: 1000,
@@ -795,7 +836,7 @@ func TestSaveJobExecutionStateNilDB(t *testing.T) {
 
 func TestSaveFailedJobStateNilDB(t *testing.T) {
 	// Ensure saveFailedJobState doesn't panic with nil DB
-	svc := NewService(nil, nil, nil, 65536)
+	svc := NewService(nil, nil, nil, 65536, 512)
 	p := &JobProgress{
 		JobID:       1,
 		BytesWritten: 1000,
