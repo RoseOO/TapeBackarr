@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import * as api from '$lib/api/client';
+  import { dataVersion } from '$lib/stores/livedata';
 
   interface Drive {
     id: number;
@@ -58,10 +59,15 @@
     model: ''
   };
 
-  let showBatchLabelModal = false;
-  let batchLabelDriveId = 0;
-  let batchLabelForm = { prefix: '', start_number: 1, count: 10, digits: 3, pool_id: undefined as number | undefined };
-  let batchLabelRunning = false;
+  // Auto-refresh drives when SSE events arrive
+  const drivesVersion = dataVersion('drives');
+  let lastVersion = 0;
+  const unsubVersion = drivesVersion.subscribe(v => {
+    if (v > lastVersion && lastVersion > 0) {
+      loadDrives();
+    }
+    lastVersion = v;
+  });
 
   onMount(async () => {
     await loadDrives();
@@ -75,6 +81,10 @@
     } catch (e) {
       // Non-critical
     }
+  });
+
+  onDestroy(() => {
+    unsubVersion();
   });
 
   async function loadDrives() {
@@ -259,32 +269,7 @@
     }
   }
 
-  function openBatchLabelModal(driveId: number) {
-    batchLabelDriveId = driveId;
-    batchLabelForm = { prefix: '', start_number: 1, count: 10, digits: 3, pool_id: undefined };
-    showBatchLabelModal = true;
-  }
 
-  async function handleBatchLabel() {
-    batchLabelRunning = true;
-    try {
-      error = '';
-      await api.batchLabelTapes(batchLabelDriveId, batchLabelForm);
-      showBatchLabelModal = false;
-      showSuccessMsg('Batch label started successfully');
-      await loadDrives();
-    } catch (e) {
-      error = e instanceof Error ? e.message : 'Failed to start batch label';
-    } finally {
-      batchLabelRunning = false;
-    }
-  }
-
-  function batchLabelPreview(prefix: string, start: number, count: number, digits: number): string {
-    const first = prefix + String(start).padStart(digits, '0');
-    const last = prefix + String(start + count - 1).padStart(digits, '0');
-    return `${first} through ${last}`;
-  }
 </script>
 
 <div class="page-header">
@@ -338,8 +323,6 @@
               <button class="btn btn-secondary btn-sm" on:click={() => selectDrive(drive.id)}>Select</button>
               <button class="btn btn-secondary btn-sm" on:click={() => rewindTape(drive.id)}>Rewind</button>
               <button class="btn btn-secondary btn-sm" on:click={() => ejectTape(drive.id)}>Eject</button>
-              <a href="/inspect" class="btn btn-secondary btn-sm">🔍 Inspect</a>
-              <button class="btn btn-secondary btn-sm" on:click={() => openBatchLabelModal(drive.id)}>📦 Batch Label</button>
               <button class="btn btn-warning btn-sm" on:click={() => openFormatDriveModal(drive)} disabled={drive.status === 'offline'}>Format</button>
               <button class="btn btn-danger btn-sm" on:click={() => deleteDrive(drive.id)}>Remove</button>
             </td>
@@ -513,60 +496,6 @@
         <div class="form-actions">
           <button type="button" class="btn btn-secondary" on:click={() => showAddUnknownTapeModal = false}>Cancel</button>
           <button type="submit" class="btn btn-primary">Add to Library</button>
-        </div>
-      </form>
-    </div>
-  </div>
-{/if}
-
-<!-- Batch Label Modal -->
-{#if showBatchLabelModal}
-  <div class="modal-backdrop" on:click={() => showBatchLabelModal = false}>
-    <div class="modal" on:click|stopPropagation={() => {}}>
-      <h2>📦 Batch Label Tapes</h2>
-      <p class="modal-desc">Automatically label multiple tapes in sequence. Insert a blank tape, and the system will detect, label, eject, and repeat.</p>
-      <form on:submit|preventDefault={handleBatchLabel}>
-        <div class="form-group">
-          <label for="bl-prefix">Label Prefix</label>
-          <input type="text" id="bl-prefix" bind:value={batchLabelForm.prefix} placeholder="e.g., NAS-OFF-" required />
-        </div>
-        <div class="form-group">
-          <label for="bl-start">Start Number</label>
-          <input type="number" id="bl-start" bind:value={batchLabelForm.start_number} min="0" required />
-        </div>
-        <div class="form-group">
-          <label for="bl-count">Count</label>
-          <input type="number" id="bl-count" bind:value={batchLabelForm.count} min="1" max="100" required />
-        </div>
-        <div class="form-group">
-          <label for="bl-digits">Digits</label>
-          <select id="bl-digits" bind:value={batchLabelForm.digits}>
-            <option value={2}>2 (01-99)</option>
-            <option value={3}>3 (001-999)</option>
-            <option value={4}>4 (0001-9999)</option>
-            <option value={5}>5 (00001-99999)</option>
-            <option value={6}>6 (000001-999999)</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label for="bl-pool">Pool (optional)</label>
-          <select id="bl-pool" bind:value={batchLabelForm.pool_id}>
-            <option value={undefined}>No pool</option>
-            {#each pools as pool}
-              <option value={pool.id}>{pool.name}</option>
-            {/each}
-          </select>
-        </div>
-        {#if batchLabelForm.prefix && batchLabelForm.count > 0}
-          <div class="tape-info-box">
-            <strong>Preview:</strong> {batchLabelPreview(batchLabelForm.prefix, batchLabelForm.start_number, batchLabelForm.count, batchLabelForm.digits)}
-          </div>
-        {/if}
-        <div class="form-actions">
-          <button type="button" class="btn btn-secondary" on:click={() => showBatchLabelModal = false}>Cancel</button>
-          <button type="submit" class="btn btn-primary" disabled={batchLabelRunning}>
-            {batchLabelRunning ? 'Running...' : 'Start Batch Label'}
-          </button>
         </div>
       </form>
     </div>

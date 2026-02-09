@@ -268,4 +268,49 @@
     font-size: 1.5rem;
     color: var(--text-primary);
   }
+
+  :global(.table-responsive) {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  @media (max-width: 768px) {
+    .app.with-sidebar main {
+      margin-left: 0;
+    }
+
+    main {
+      padding: 1rem;
+      padding-top: 3.5rem;
+    }
+
+    :global(.page-header) {
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 0.75rem;
+    }
+
+    :global(.page-header h1) {
+      font-size: 1.25rem;
+    }
+
+    :global(.card) {
+      padding: 1rem;
+      overflow-x: auto;
+    }
+
+    :global(table) {
+      font-size: 0.8rem;
+    }
+
+    :global(th), :global(td) {
+      padding: 0.5rem;
+    }
+
+    :global(.modal) {
+      width: 95% !important;
+      max-width: 95% !important;
+      margin: 0.5rem;
+    }
+  }
 </style>

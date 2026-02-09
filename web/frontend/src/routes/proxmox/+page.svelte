@@ -32,8 +32,14 @@
     vmids: string;
     schedule_cron: string;
     pool_id: number;
+    pool_name?: string;
     enabled: boolean;
     compression: string;
+    backup_mode: string;
+    retention_days: number;
+    notify_on_success: boolean;
+    notify_on_failure: boolean;
+    notes: string;
     last_run_at: string;
   }
 
@@ -42,22 +48,32 @@
   let jobs: ProxmoxJob[] = [];
   let loading = true;
   let error = '';
+  let successMsg = '';
   let proxmoxEnabled = false;
   let activeTab = 'guests';
   let showCreateJobModal = false;
   let showBackupModal = false;
+  let showEditJobModal = false;
+  let editingJob: ProxmoxJob | null = null;
   let backupTarget: ProxmoxGuest | null = null;
-  let backupForm = { tape_id: 0, mode: 'snapshot', compress: 'zstd' };
+  let backupForm = { pool_id: 0, mode: 'snapshot', compress: 'zstd' };
   let tapes: any[] = [];
   let pools: any[] = [];
 
-  let jobForm = {
+  const defaultJobForm = {
     name: '',
     vmids: '',
-    schedule_cron: '',
+    schedule_cron: '0 2 * * *',
     pool_id: 0,
-    compression: 'gzip',
+    compression: 'zstd',
+    backup_mode: 'snapshot',
+    retention_days: 30,
+    notify_on_success: false,
+    notify_on_failure: true,
+    notes: '',
   };
+
+  let jobForm = { ...defaultJobForm };
 
   onMount(async () => {
     await loadData();
@@ -114,13 +130,14 @@
 
   function openBackupModal(guest: ProxmoxGuest) {
     backupTarget = guest;
-    backupForm = { tape_id: 0, mode: 'snapshot', compress: 'zstd' };
+    backupForm = { pool_id: 0, mode: 'snapshot', compress: 'zstd' };
     showBackupModal = true;
   }
 
   async function handleBackupGuest() {
-    if (!backupTarget || !backupForm.tape_id) {
-      error = 'Please select a tape for backup';
+    if (!backupTarget) return;
+    if (!backupForm.pool_id) {
+      error = 'Please select a media pool for the backup';
       return;
     }
     try {
@@ -129,52 +146,45 @@
         vmid: backupTarget.vmid,
         guest_type: backupTarget.type,
         guest_name: backupTarget.name,
-        tape_id: backupForm.tape_id,
+        pool_id: backupForm.pool_id,
         backup_mode: backupForm.mode,
         compress: backupForm.compress,
       });
       showBackupModal = false;
       backupTarget = null;
+      showSuccess('Backup started');
       await loadData();
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to start backup';
     }
   }
 
-  async function handleBackupAll() {
-    const activeTapes = tapes.filter((t: any) => t.status === 'active' || t.status === 'blank');
-    if (activeTapes.length === 0) {
-      error = 'No active tapes available. Please add a tape first.';
-      return;
-    }
-    if (!confirm(`Start backup for ALL VMs and containers to tape '${activeTapes[0].label}'?`)) return;
-    try {
-      await api.post('/proxmox/backups/all', {
-        tape_id: activeTapes[0].id,
-        mode: 'snapshot',
-        compress: 'zstd',
-      });
-      await loadData();
-    } catch (e) {
-      error = e instanceof Error ? e.message : 'Failed to start backup all';
-    }
+  function showSuccess(msg: string) {
+    successMsg = msg;
+    setTimeout(() => successMsg = '', 3000);
   }
 
   async function handleCreateJob() {
     try {
       await api.post('/proxmox/jobs', jobForm);
       showCreateJobModal = false;
-      jobForm = { name: '', vmids: '', schedule_cron: '', pool_id: 0, compression: 'gzip' };
+      resetJobForm();
+      showSuccess('Backup job created');
       await loadData();
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to create job';
     }
   }
 
+  function resetJobForm() {
+    jobForm = { ...defaultJobForm };
+  }
+
   async function handleDeleteJob(id: number) {
     if (!confirm('Delete this Proxmox backup job?')) return;
     try {
       await api.delete(`/proxmox/jobs/${id}`);
+      showSuccess('Job deleted');
       await loadData();
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to delete job';
@@ -184,10 +194,51 @@
   async function handleRunJob(id: number) {
     try {
       await api.post(`/proxmox/jobs/${id}/run`);
-      alert('Proxmox job started!');
+      showSuccess('Job started');
       await loadData();
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to run job';
+    }
+  }
+
+  function openEditJobModal(job: ProxmoxJob) {
+    editingJob = job;
+    jobForm = {
+      name: job.name,
+      vmids: job.vmids || '',
+      schedule_cron: job.schedule_cron || '0 2 * * *',
+      pool_id: job.pool_id || 0,
+      compression: job.compression || 'zstd',
+      backup_mode: job.backup_mode || 'snapshot',
+      retention_days: job.retention_days || 30,
+      notify_on_success: job.notify_on_success || false,
+      notify_on_failure: job.notify_on_failure !== false,
+      notes: job.notes || '',
+    };
+    showEditJobModal = true;
+  }
+
+  async function handleUpdateJob() {
+    if (!editingJob) return;
+    try {
+      await api.put(`/proxmox/jobs/${editingJob.id}`, { ...jobForm, enabled: editingJob.enabled });
+      showEditJobModal = false;
+      editingJob = null;
+      resetJobForm();
+      showSuccess('Job updated');
+      await loadData();
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to update job';
+    }
+  }
+
+  async function toggleJobEnabled(job: ProxmoxJob) {
+    try {
+      await api.put(`/proxmox/jobs/${job.id}`, { enabled: !job.enabled });
+      showSuccess(job.enabled ? 'Job disabled' : 'Job enabled');
+      await loadData();
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to toggle job';
     }
   }
 
@@ -209,15 +260,21 @@
   <h1>🖥️ Proxmox Integration</h1>
   {#if proxmoxEnabled}
     <div style="display: flex; gap: 0.5rem;">
-      <button class="btn btn-success" on:click={handleBackupAll}>Backup All</button>
-      <button class="btn btn-primary" on:click={() => showCreateJobModal = true}>+ Create Job</button>
+      <button class="btn btn-primary" on:click={() => { resetJobForm(); showCreateJobModal = true; }}>+ Create Backup Job</button>
     </div>
   {/if}
 </div>
 
 {#if error}
-  <div class="card" style="background: var(--badge-danger-bg); color: var(--badge-danger-text);">
-    <p>{error}</p>
+  <div class="card" style="background: var(--badge-danger-bg); color: var(--badge-danger-text); display: flex; justify-content: space-between; align-items: center;">
+    <p style="margin:0">{error}</p>
+    <button class="btn btn-secondary" on:click={() => error = ''}>×</button>
+  </div>
+{/if}
+
+{#if successMsg}
+  <div class="card" style="background: var(--badge-success-bg); color: var(--badge-success-text);">
+    <p style="margin:0">{successMsg}</p>
   </div>
 {/if}
 
@@ -342,7 +399,9 @@
             <th>Name</th>
             <th>VMIDs</th>
             <th>Schedule</th>
-            <th>Compression</th>
+            <th>Mode</th>
+            <th>Pool</th>
+            <th>Retention</th>
             <th>Status</th>
             <th>Last Run</th>
             <th>Actions</th>
@@ -354,7 +413,9 @@
               <td><strong>{job.name}</strong></td>
               <td><code>{job.vmids || 'All'}</code></td>
               <td><code>{job.schedule_cron || 'Manual'}</code></td>
-              <td>{job.compression || 'none'}</td>
+              <td>{job.backup_mode || '-'}</td>
+              <td>{job.pool_name || (job.pool_id ? `Pool #${job.pool_id}` : 'None')}</td>
+              <td>{job.retention_days ? `${job.retention_days}d` : '-'}</td>
               <td>
                 <span class="badge {job.enabled ? 'badge-success' : 'badge-danger'}">
                   {job.enabled ? 'Enabled' : 'Disabled'}
@@ -362,15 +423,19 @@
               </td>
               <td>{formatDate(job.last_run_at)}</td>
               <td>
-                <div style="display:flex;gap:0.5rem;">
-                  <button class="btn btn-success" on:click={() => handleRunJob(job.id)}>Run</button>
-                  <button class="btn btn-danger" on:click={() => handleDeleteJob(job.id)}>Delete</button>
+                <div style="display:flex;gap:0.25rem;flex-wrap:wrap;">
+                  <button class="btn btn-success btn-sm" on:click={() => handleRunJob(job.id)}>▶ Run</button>
+                  <button class="btn btn-secondary btn-sm" on:click={() => openEditJobModal(job)}>✏️ Edit</button>
+                  <button class="btn btn-secondary btn-sm" on:click={() => toggleJobEnabled(job)}>
+                    {job.enabled ? '⏸ Disable' : '▶ Enable'}
+                  </button>
+                  <button class="btn btn-danger btn-sm" on:click={() => handleDeleteJob(job.id)}>🗑️</button>
                 </div>
               </td>
             </tr>
           {/each}
           {#if jobs.length === 0}
-            <tr><td colspan="7" style="text-align:center; color: var(--text-muted);">No scheduled Proxmox jobs. Create one above.</td></tr>
+            <tr><td colspan="9" style="text-align:center; color: var(--text-muted);">No scheduled Proxmox jobs. Create one above.</td></tr>
           {/if}
         </tbody>
       </table>
@@ -380,7 +445,7 @@
 
 {#if showCreateJobModal}
   <div class="modal-overlay" on:click={() => showCreateJobModal = false}>
-    <div class="modal" on:click|stopPropagation={() => {}}>
+    <div class="modal modal-lg" on:click|stopPropagation={() => {}}>
       <h2>Create Proxmox Backup Job</h2>
       <form on:submit|preventDefault={handleCreateJob}>
         <div class="form-group">
@@ -390,31 +455,141 @@
         <div class="form-group">
           <label for="pxjob-vmids">VM IDs (comma-separated, leave empty for all)</label>
           <input type="text" id="pxjob-vmids" bind:value={jobForm.vmids} placeholder="e.g., 100,101,200" />
+          <small style="color: var(--text-muted)">Leave empty to include all VMs and containers</small>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="pxjob-schedule">Schedule (cron)</label>
+            <input type="text" id="pxjob-schedule" bind:value={jobForm.schedule_cron} placeholder="0 2 * * *" />
+            <small style="color: var(--text-muted)">Daily at 2 AM: <code>0 2 * * *</code></small>
+          </div>
+          <div class="form-group">
+            <label for="pxjob-mode">Backup Mode</label>
+            <select id="pxjob-mode" bind:value={jobForm.backup_mode}>
+              <option value="snapshot">Snapshot (live, no downtime)</option>
+              <option value="suspend">Suspend (brief pause)</option>
+              <option value="stop">Stop (full shutdown)</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="pxjob-pool">Media Pool</label>
+            <select id="pxjob-pool" bind:value={jobForm.pool_id} required>
+              <option value={0}>Select a pool...</option>
+              {#each pools as pool}
+                <option value={pool.id}>{pool.name}</option>
+              {/each}
+            </select>
+            <small style="color: var(--text-muted)">Tapes are automatically selected from the pool</small>
+          </div>
+          <div class="form-group">
+            <label for="pxjob-compression">Compression</label>
+            <select id="pxjob-compression" bind:value={jobForm.compression}>
+              <option value="none">None</option>
+              <option value="gzip">Gzip</option>
+              <option value="zstd">Zstd (recommended)</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="pxjob-retention">Retention (days)</label>
+            <input type="number" id="pxjob-retention" bind:value={jobForm.retention_days} min="1" max="3650" />
+          </div>
+          <div class="form-group" style="display:flex;flex-direction:column;gap:0.5rem;justify-content:center;">
+            <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;">
+              <input type="checkbox" bind:checked={jobForm.notify_on_failure} style="width:auto;" />
+              Notify on failure
+            </label>
+            <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;">
+              <input type="checkbox" bind:checked={jobForm.notify_on_success} style="width:auto;" />
+              Notify on success
+            </label>
+          </div>
         </div>
         <div class="form-group">
-          <label for="pxjob-schedule">Schedule (cron)</label>
-          <input type="text" id="pxjob-schedule" bind:value={jobForm.schedule_cron} placeholder="e.g., 0 2 * * *" />
-        </div>
-        <div class="form-group">
-          <label for="pxjob-pool">Media Pool</label>
-          <select id="pxjob-pool" bind:value={jobForm.pool_id}>
-            <option value={0}>No pool (manual tape selection)</option>
-            {#each pools as pool}
-              <option value={pool.id}>{pool.name}</option>
-            {/each}
-          </select>
-        </div>
-        <div class="form-group">
-          <label for="pxjob-compression">Compression</label>
-          <select id="pxjob-compression" bind:value={jobForm.compression}>
-            <option value="none">None</option>
-            <option value="gzip">Gzip</option>
-            <option value="zstd">Zstd</option>
-          </select>
+          <label for="pxjob-notes">Notes</label>
+          <textarea id="pxjob-notes" bind:value={jobForm.notes} placeholder="Optional notes about this job" rows="2"></textarea>
         </div>
         <div class="modal-actions">
           <button type="button" class="btn btn-secondary" on:click={() => showCreateJobModal = false}>Cancel</button>
-          <button type="submit" class="btn btn-primary">Create</button>
+          <button type="submit" class="btn btn-primary" disabled={!jobForm.pool_id}>Create Job</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{/if}
+
+{#if showEditJobModal && editingJob}
+  <div class="modal-overlay" on:click={() => showEditJobModal = false}>
+    <div class="modal modal-lg" on:click|stopPropagation={() => {}}>
+      <h2>Edit Backup Job: {editingJob.name}</h2>
+      <form on:submit|preventDefault={handleUpdateJob}>
+        <div class="form-group">
+          <label for="edit-name">Job Name</label>
+          <input type="text" id="edit-name" bind:value={jobForm.name} required />
+        </div>
+        <div class="form-group">
+          <label for="edit-vmids">VM IDs (comma-separated, leave empty for all)</label>
+          <input type="text" id="edit-vmids" bind:value={jobForm.vmids} placeholder="e.g., 100,101,200" />
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="edit-schedule">Schedule (cron)</label>
+            <input type="text" id="edit-schedule" bind:value={jobForm.schedule_cron} />
+          </div>
+          <div class="form-group">
+            <label for="edit-mode">Backup Mode</label>
+            <select id="edit-mode" bind:value={jobForm.backup_mode}>
+              <option value="snapshot">Snapshot</option>
+              <option value="suspend">Suspend</option>
+              <option value="stop">Stop</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="edit-pool">Media Pool</label>
+            <select id="edit-pool" bind:value={jobForm.pool_id} required>
+              <option value={0}>Select a pool...</option>
+              {#each pools as pool}
+                <option value={pool.id}>{pool.name}</option>
+              {/each}
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="edit-compression">Compression</label>
+            <select id="edit-compression" bind:value={jobForm.compression}>
+              <option value="none">None</option>
+              <option value="gzip">Gzip</option>
+              <option value="zstd">Zstd</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="edit-retention">Retention (days)</label>
+            <input type="number" id="edit-retention" bind:value={jobForm.retention_days} min="1" max="3650" />
+          </div>
+          <div class="form-group" style="display:flex;flex-direction:column;gap:0.5rem;justify-content:center;">
+            <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;">
+              <input type="checkbox" bind:checked={jobForm.notify_on_failure} style="width:auto;" />
+              Notify on failure
+            </label>
+            <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;">
+              <input type="checkbox" bind:checked={jobForm.notify_on_success} style="width:auto;" />
+              Notify on success
+            </label>
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="edit-notes">Notes</label>
+          <textarea id="edit-notes" bind:value={jobForm.notes} rows="2"></textarea>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" on:click={() => showEditJobModal = false}>Cancel</button>
+          <button type="submit" class="btn btn-primary" disabled={!jobForm.pool_id}>Save Changes</button>
         </div>
       </form>
     </div>
@@ -427,13 +602,14 @@
       <h2>Backup {backupTarget.type === 'lxc' ? 'Container' : 'VM'}: {backupTarget.name} (VMID {backupTarget.vmid})</h2>
       <form on:submit|preventDefault={handleBackupGuest}>
         <div class="form-group">
-          <label for="bk-tape">Target Tape</label>
-          <select id="bk-tape" bind:value={backupForm.tape_id} required>
-            <option value={0}>Select a tape...</option>
-            {#each tapes.filter(t => t.status === 'active' || t.status === 'blank') as tape}
-              <option value={tape.id}>{tape.label} ({tape.status})</option>
+          <label for="bk-pool">Media Pool</label>
+          <select id="bk-pool" bind:value={backupForm.pool_id} required>
+            <option value={0}>Select a pool...</option>
+            {#each pools as pool}
+              <option value={pool.id}>{pool.name}</option>
             {/each}
           </select>
+          <small style="color: var(--text-muted)">A tape will be automatically selected from this pool</small>
         </div>
         <div class="form-group">
           <label for="bk-mode">Backup Mode</label>
@@ -454,7 +630,7 @@
         </div>
         <div class="modal-actions">
           <button type="button" class="btn btn-secondary" on:click={() => showBackupModal = false}>Cancel</button>
-          <button type="submit" class="btn btn-success" disabled={!backupForm.tape_id}>Start Backup</button>
+          <button type="submit" class="btn btn-success" disabled={!backupForm.pool_id}>Start Backup</button>
         </div>
       </form>
     </div>
@@ -514,6 +690,10 @@
     max-width: 450px;
   }
 
+  .modal.modal-lg {
+    max-width: 600px;
+  }
+
   .modal h2 {
     margin: 0 0 1.5rem;
   }
@@ -523,5 +703,34 @@
     gap: 0.75rem;
     justify-content: flex-end;
     margin-top: 1.5rem;
+  }
+
+  .form-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+  }
+
+  .btn-sm {
+    padding: 0.25rem 0.5rem;
+    font-size: 0.75rem;
+  }
+
+  code {
+    background: var(--code-bg);
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+    font-size: 0.8rem;
+  }
+
+  small {
+    display: block;
+    margin-top: 0.25rem;
+  }
+
+  @media (max-width: 768px) {
+    .form-row {
+      grid-template-columns: 1fr;
+    }
   }
 </style>

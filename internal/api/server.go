@@ -246,6 +246,7 @@ func (s *Server) setupRoutes() {
 			r.Get("/", s.handleListBackupSets)
 			r.Get("/{id}", s.handleGetBackupSet)
 			r.Get("/{id}/files", s.handleListBackupFiles)
+			r.Delete("/{id}", s.handleDeleteBackupSet)
 		})
 
 		// Catalog
@@ -355,6 +356,21 @@ func (s *Server) setupRoutes() {
 			r.Put("/jobs/{id}", s.handleProxmoxUpdateJob)
 			r.Delete("/jobs/{id}", s.handleProxmoxDeleteJob)
 			r.Post("/jobs/{id}/run", s.handleProxmoxRunJob)
+		})
+
+		// Tape Libraries (autochangers)
+		r.Route("/api/v1/libraries", func(r chi.Router) {
+			r.Get("/", s.handleListLibraries)
+			r.Post("/", s.handleCreateLibrary)
+			r.Get("/scan", s.handleScanLibraries)
+			r.Get("/{id}", s.handleGetLibrary)
+			r.Put("/{id}", s.handleUpdateLibrary)
+			r.Delete("/{id}", s.handleDeleteLibrary)
+			r.Post("/{id}/inventory", s.handleLibraryInventory)
+			r.Get("/{id}/slots", s.handleListLibrarySlots)
+			r.Post("/{id}/load", s.handleLibraryLoad)
+			r.Post("/{id}/unload", s.handleLibraryUnload)
+			r.Post("/{id}/transfer", s.handleLibraryTransfer)
 		})
 	})
 
@@ -2747,6 +2763,43 @@ func (s *Server) handleListBackupFiles(w http.ResponseWriter, r *http.Request) {
 	s.respondJSON(w, http.StatusOK, entries)
 }
 
+func (s *Server) handleDeleteBackupSet(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid backup set id")
+		return
+	}
+
+	// Check the backup set exists and get its status
+	var status string
+	err = s.db.QueryRow("SELECT status FROM backup_sets WHERE id = ?", id).Scan(&status)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "backup set not found")
+		return
+	}
+
+	// Only allow deletion of failed or completed backup sets
+	if status != "failed" && status != "completed" {
+		s.respondError(w, http.StatusBadRequest, "can only delete failed or completed backup sets")
+		return
+	}
+
+	// Delete catalog entries first (foreign key)
+	if _, err := s.db.Exec("DELETE FROM catalog_entries WHERE backup_set_id = ?", id); err != nil {
+		s.logger.Warn("failed to delete catalog entries for backup set", map[string]interface{}{"backup_set_id": id, "error": err.Error()})
+	}
+
+	// Delete the backup set
+	_, err = s.db.Exec("DELETE FROM backup_sets WHERE id = ?", id)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to delete backup set")
+		return
+	}
+
+	s.auditLog(r, "delete", "backup_set", id, fmt.Sprintf("Deleted backup set #%d (status: %s)", id, status))
+	s.respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
 // Catalog handlers
 
 func (s *Server) handleSearchCatalog(w http.ResponseWriter, r *http.Request) {
@@ -4546,11 +4599,14 @@ func (s *Server) handleProxmoxRestorePlan(w http.ResponseWriter, r *http.Request
 // handleProxmoxListJobs returns all Proxmox backup jobs
 func (s *Server) handleProxmoxListJobs(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`
-		SELECT id, name, description, node, vmid_filter, guest_type_filter, tag_filter,
-		       pool_id, backup_mode, compress, schedule_cron, retention_days,
-		       enabled, last_run_at, next_run_at, created_at
-		FROM proxmox_backup_jobs
-		ORDER BY created_at DESC
+		SELECT j.id, j.name, j.description, j.node, j.vmid_filter, j.guest_type_filter, j.tag_filter,
+		       j.pool_id, j.backup_mode, j.compress, j.schedule_cron, j.retention_days,
+		       j.enabled, j.last_run_at, j.next_run_at, j.created_at,
+		       COALESCE(j.notify_on_success, 0), COALESCE(j.notify_on_failure, 1), COALESCE(j.notes, ''),
+		       tp.name as pool_name
+		FROM proxmox_backup_jobs j
+		LEFT JOIN tape_pools tp ON j.pool_id = tp.id
+		ORDER BY j.created_at DESC
 	`)
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
@@ -4565,25 +4621,31 @@ func (s *Server) handleProxmoxListJobs(w http.ResponseWriter, r *http.Request) {
 		var description, node, vmidFilter, guestTypeFilter, tagFilter *string
 		var poolID *int64
 		var retentionDays int
-		var enabled bool
+		var enabled, notifyOnSuccess, notifyOnFailure bool
+		var notes string
 		var lastRunAt, nextRunAt *time.Time
 		var createdAt time.Time
+		var poolName *string
 
 		if err := rows.Scan(&id, &name, &description, &node, &vmidFilter, &guestTypeFilter, &tagFilter,
 			&poolID, &backupMode, &compress, &scheduleCron, &retentionDays,
-			&enabled, &lastRunAt, &nextRunAt, &createdAt); err != nil {
+			&enabled, &lastRunAt, &nextRunAt, &createdAt,
+			&notifyOnSuccess, &notifyOnFailure, &notes, &poolName); err != nil {
 			continue
 		}
 
 		job := map[string]interface{}{
-			"id":             id,
-			"name":           name,
-			"backup_mode":    backupMode,
-			"compress":       compress,
-			"schedule_cron":  scheduleCron,
-			"retention_days": retentionDays,
-			"enabled":        enabled,
-			"created_at":     createdAt,
+			"id":                id,
+			"name":              name,
+			"backup_mode":       backupMode,
+			"compression":       compress,
+			"schedule_cron":     scheduleCron,
+			"retention_days":    retentionDays,
+			"enabled":           enabled,
+			"notify_on_success": notifyOnSuccess,
+			"notify_on_failure": notifyOnFailure,
+			"notes":             notes,
+			"created_at":        createdAt,
 		}
 		if description != nil {
 			job["description"] = *description
@@ -4592,7 +4654,7 @@ func (s *Server) handleProxmoxListJobs(w http.ResponseWriter, r *http.Request) {
 			job["node"] = *node
 		}
 		if vmidFilter != nil {
-			job["vmid_filter"] = *vmidFilter
+			job["vmids"] = *vmidFilter
 		}
 		if guestTypeFilter != nil {
 			job["guest_type_filter"] = *guestTypeFilter
@@ -4602,6 +4664,9 @@ func (s *Server) handleProxmoxListJobs(w http.ResponseWriter, r *http.Request) {
 		}
 		if poolID != nil {
 			job["pool_id"] = *poolID
+		}
+		if poolName != nil {
+			job["pool_name"] = *poolName
 		}
 		if lastRunAt != nil {
 			job["last_run_at"] = *lastRunAt
@@ -4622,15 +4687,20 @@ func (s *Server) handleProxmoxCreateJob(w http.ResponseWriter, r *http.Request) 
 		Name            string `json:"name"`
 		Description     string `json:"description,omitempty"`
 		Node            string `json:"node,omitempty"`
+		VMIDs           string `json:"vmids,omitempty"`
 		VMIDFilter      string `json:"vmid_filter,omitempty"`
 		GuestTypeFilter string `json:"guest_type_filter,omitempty"`
 		TagFilter       string `json:"tag_filter,omitempty"`
 		PoolID          *int64 `json:"pool_id,omitempty"`
 		BackupMode      string `json:"backup_mode"`
 		Compress        string `json:"compress"`
+		Compression     string `json:"compression"`
 		ScheduleCron    string `json:"schedule_cron"`
 		RetentionDays   int    `json:"retention_days"`
 		Enabled         bool   `json:"enabled"`
+		NotifyOnSuccess bool   `json:"notify_on_success"`
+		NotifyOnFailure bool   `json:"notify_on_failure"`
+		Notes           string `json:"notes"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -4645,20 +4715,31 @@ func (s *Server) handleProxmoxCreateJob(w http.ResponseWriter, r *http.Request) 
 	if req.BackupMode == "" {
 		req.BackupMode = "snapshot"
 	}
+	// Accept either compress or compression field
+	if req.Compress == "" && req.Compression != "" {
+		req.Compress = req.Compression
+	}
 	if req.Compress == "" {
 		req.Compress = "zstd"
 	}
 	if req.RetentionDays == 0 {
 		req.RetentionDays = 30
 	}
+	// Accept either vmids or vmid_filter field
+	vmidFilter := req.VMIDFilter
+	if vmidFilter == "" && req.VMIDs != "" {
+		vmidFilter = req.VMIDs
+	}
 
 	result, err := s.db.Exec(`
 		INSERT INTO proxmox_backup_jobs (
 			name, description, node, vmid_filter, guest_type_filter, tag_filter,
-			pool_id, backup_mode, compress, schedule_cron, retention_days, enabled
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, req.Name, req.Description, req.Node, req.VMIDFilter, req.GuestTypeFilter, req.TagFilter,
-		req.PoolID, req.BackupMode, req.Compress, req.ScheduleCron, req.RetentionDays, req.Enabled)
+			pool_id, backup_mode, compress, schedule_cron, retention_days, enabled,
+			notify_on_success, notify_on_failure, notes
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, req.Name, req.Description, req.Node, vmidFilter, req.GuestTypeFilter, req.TagFilter,
+		req.PoolID, req.BackupMode, req.Compress, req.ScheduleCron, req.RetentionDays, req.Enabled,
+		req.NotifyOnSuccess, req.NotifyOnFailure, req.Notes)
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -4753,15 +4834,20 @@ func (s *Server) handleProxmoxUpdateJob(w http.ResponseWriter, r *http.Request) 
 		Name            string `json:"name,omitempty"`
 		Description     string `json:"description,omitempty"`
 		Node            string `json:"node,omitempty"`
+		VMIDs           string `json:"vmids,omitempty"`
 		VMIDFilter      string `json:"vmid_filter,omitempty"`
 		GuestTypeFilter string `json:"guest_type_filter,omitempty"`
 		TagFilter       string `json:"tag_filter,omitempty"`
 		PoolID          *int64 `json:"pool_id,omitempty"`
 		BackupMode      string `json:"backup_mode,omitempty"`
 		Compress        string `json:"compress,omitempty"`
+		Compression     string `json:"compression,omitempty"`
 		ScheduleCron    string `json:"schedule_cron,omitempty"`
 		RetentionDays   *int   `json:"retention_days,omitempty"`
 		Enabled         *bool  `json:"enabled,omitempty"`
+		NotifyOnSuccess *bool  `json:"notify_on_success,omitempty"`
+		NotifyOnFailure *bool  `json:"notify_on_failure,omitempty"`
+		Notes           *string `json:"notes,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -4785,9 +4871,14 @@ func (s *Server) handleProxmoxUpdateJob(w http.ResponseWriter, r *http.Request) 
 		updates = append(updates, "node = ?")
 		args = append(args, req.Node)
 	}
-	if req.VMIDFilter != "" {
+	// Accept either vmids or vmid_filter
+	vmidFilter := req.VMIDFilter
+	if vmidFilter == "" && req.VMIDs != "" {
+		vmidFilter = req.VMIDs
+	}
+	if vmidFilter != "" {
 		updates = append(updates, "vmid_filter = ?")
-		args = append(args, req.VMIDFilter)
+		args = append(args, vmidFilter)
 	}
 	if req.GuestTypeFilter != "" {
 		updates = append(updates, "guest_type_filter = ?")
@@ -4805,9 +4896,14 @@ func (s *Server) handleProxmoxUpdateJob(w http.ResponseWriter, r *http.Request) 
 		updates = append(updates, "backup_mode = ?")
 		args = append(args, req.BackupMode)
 	}
-	if req.Compress != "" {
+	// Accept either compress or compression
+	compress := req.Compress
+	if compress == "" && req.Compression != "" {
+		compress = req.Compression
+	}
+	if compress != "" {
 		updates = append(updates, "compress = ?")
-		args = append(args, req.Compress)
+		args = append(args, compress)
 	}
 	if req.ScheduleCron != "" {
 		updates = append(updates, "schedule_cron = ?")
@@ -4820,6 +4916,18 @@ func (s *Server) handleProxmoxUpdateJob(w http.ResponseWriter, r *http.Request) 
 	if req.Enabled != nil {
 		updates = append(updates, "enabled = ?")
 		args = append(args, *req.Enabled)
+	}
+	if req.NotifyOnSuccess != nil {
+		updates = append(updates, "notify_on_success = ?")
+		args = append(args, *req.NotifyOnSuccess)
+	}
+	if req.NotifyOnFailure != nil {
+		updates = append(updates, "notify_on_failure = ?")
+		args = append(args, *req.NotifyOnFailure)
+	}
+	if req.Notes != nil {
+		updates = append(updates, "notes = ?")
+		args = append(args, *req.Notes)
 	}
 
 	if len(updates) == 0 {
@@ -5878,4 +5986,600 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}()
+}
+
+// Tape Library (Autochanger) handlers
+
+func (s *Server) handleListLibraries(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.db.Query(`
+		SELECT id, name, device_path, vendor, model, serial_number,
+		       num_slots, num_drives, num_import_export, barcode_reader,
+		       enabled, last_inventory_at, created_at
+		FROM tape_libraries
+		ORDER BY created_at DESC
+	`)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer rows.Close()
+
+	libraries := make([]map[string]interface{}, 0)
+	for rows.Next() {
+		var id, numSlots, numDrives, numIE int64
+		var name, devicePath, vendor, model, serial string
+		var barcodeReader, enabled bool
+		var lastInventoryAt *time.Time
+		var createdAt time.Time
+
+		if err := rows.Scan(&id, &name, &devicePath, &vendor, &model, &serial,
+			&numSlots, &numDrives, &numIE, &barcodeReader,
+			&enabled, &lastInventoryAt, &createdAt); err != nil {
+			continue
+		}
+
+		lib := map[string]interface{}{
+			"id":                id,
+			"name":              name,
+			"device_path":       devicePath,
+			"vendor":            vendor,
+			"model":             model,
+			"serial_number":     serial,
+			"num_slots":         numSlots,
+			"num_drives":        numDrives,
+			"num_import_export": numIE,
+			"barcode_reader":    barcodeReader,
+			"enabled":           enabled,
+			"created_at":        createdAt,
+		}
+		if lastInventoryAt != nil {
+			lib["last_inventory_at"] = *lastInventoryAt
+		}
+		libraries = append(libraries, lib)
+	}
+
+	s.respondJSON(w, http.StatusOK, libraries)
+}
+
+func (s *Server) handleCreateLibrary(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name         string `json:"name"`
+		DevicePath   string `json:"device_path"`
+		Vendor       string `json:"vendor"`
+		Model        string `json:"model"`
+		SerialNumber string `json:"serial_number"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Name == "" || req.DevicePath == "" {
+		s.respondError(w, http.StatusBadRequest, "name and device_path are required")
+		return
+	}
+
+	result, err := s.db.Exec(`
+		INSERT INTO tape_libraries (name, device_path, vendor, model, serial_number)
+		VALUES (?, ?, ?, ?, ?)
+	`, req.Name, req.DevicePath, req.Vendor, req.Model, req.SerialNumber)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	id, _ := result.LastInsertId()
+	s.auditLog(r, "create", "tape_library", id, fmt.Sprintf("Created tape library: %s (%s)", req.Name, req.DevicePath))
+	s.respondJSON(w, http.StatusCreated, map[string]interface{}{
+		"id":      id,
+		"message": "Tape library created",
+	})
+}
+
+func (s *Server) handleScanLibraries(w http.ResponseWriter, r *http.Request) {
+	// Scan for SCSI medium changer devices using lsscsi
+	cmd := exec.Command("lsscsi", "--generic")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		s.logger.Warn("lsscsi scan failed", map[string]interface{}{"error": err.Error()})
+		s.respondJSON(w, http.StatusOK, []map[string]string{})
+		return
+	}
+
+	var changers []map[string]string
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		// Look for "mediumx" (medium changer) type devices
+		if strings.Contains(line, "mediumx") || strings.Contains(line, "changer") {
+			fields := strings.Fields(line)
+			if len(fields) >= 4 {
+				changer := map[string]string{
+					"device_path": fields[len(fields)-1],
+					"type":        "medium_changer",
+				}
+				// Try to extract vendor/model from lsscsi output
+				if len(fields) >= 5 {
+					changer["vendor"] = fields[2]
+					changer["model"] = fields[3]
+				}
+				changers = append(changers, changer)
+			}
+		}
+	}
+
+	if changers == nil {
+		changers = []map[string]string{}
+	}
+	s.respondJSON(w, http.StatusOK, changers)
+}
+
+func (s *Server) handleGetLibrary(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid library id")
+		return
+	}
+
+	var name, devicePath, vendor, model, serial string
+	var numSlots, numDrives, numIE int64
+	var barcodeReader, enabled bool
+	var lastInventoryAt *time.Time
+	var createdAt time.Time
+
+	err = s.db.QueryRow(`
+		SELECT name, device_path, vendor, model, serial_number,
+		       num_slots, num_drives, num_import_export, barcode_reader,
+		       enabled, last_inventory_at, created_at
+		FROM tape_libraries WHERE id = ?
+	`, id).Scan(&name, &devicePath, &vendor, &model, &serial,
+		&numSlots, &numDrives, &numIE, &barcodeReader,
+		&enabled, &lastInventoryAt, &createdAt)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "library not found")
+		return
+	}
+
+	lib := map[string]interface{}{
+		"id":                id,
+		"name":              name,
+		"device_path":       devicePath,
+		"vendor":            vendor,
+		"model":             model,
+		"serial_number":     serial,
+		"num_slots":         numSlots,
+		"num_drives":        numDrives,
+		"num_import_export": numIE,
+		"barcode_reader":    barcodeReader,
+		"enabled":           enabled,
+		"created_at":        createdAt,
+	}
+	if lastInventoryAt != nil {
+		lib["last_inventory_at"] = *lastInventoryAt
+	}
+
+	s.respondJSON(w, http.StatusOK, lib)
+}
+
+func (s *Server) handleUpdateLibrary(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid library id")
+		return
+	}
+
+	var req struct {
+		Name    *string `json:"name,omitempty"`
+		Enabled *bool   `json:"enabled,omitempty"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	updates := []string{}
+	args := []interface{}{}
+
+	if req.Name != nil {
+		updates = append(updates, "name = ?")
+		args = append(args, *req.Name)
+	}
+	if req.Enabled != nil {
+		updates = append(updates, "enabled = ?")
+		args = append(args, *req.Enabled)
+	}
+
+	if len(updates) == 0 {
+		s.respondError(w, http.StatusBadRequest, "no fields to update")
+		return
+	}
+
+	args = append(args, id)
+	query := "UPDATE tape_libraries SET " + strings.Join(updates, ", ") + " WHERE id = ?"
+	_, err = s.db.Exec(query, args...)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]string{"message": "Library updated"})
+}
+
+func (s *Server) handleDeleteLibrary(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid library id")
+		return
+	}
+
+	// Clean up slots first
+	s.db.Exec("DELETE FROM tape_library_slots WHERE library_id = ?", id)
+	// Unlink drives
+	s.db.Exec("UPDATE tape_drives SET library_id = NULL, library_drive_number = NULL WHERE library_id = ?", id)
+
+	_, err = s.db.Exec("DELETE FROM tape_libraries WHERE id = ?", id)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.auditLog(r, "delete", "tape_library", id, fmt.Sprintf("Deleted tape library #%d", id))
+	s.respondJSON(w, http.StatusOK, map[string]string{"message": "Library deleted"})
+}
+
+func (s *Server) handleLibraryInventory(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid library id")
+		return
+	}
+
+	// Get the library device path
+	var devicePath string
+	err = s.db.QueryRow("SELECT device_path FROM tape_libraries WHERE id = ?", id).Scan(&devicePath)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "library not found")
+		return
+	}
+
+	// Run mtx status command to get inventory
+	cmd := exec.Command("mtx", "-f", devicePath, "status")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, fmt.Sprintf("mtx status failed: %s - %s", err.Error(), string(output)))
+		return
+	}
+
+	// Parse mtx output and update database
+	slots := parseMtxStatus(string(output))
+
+	// Update library metadata
+	numStorage := 0
+	numDrives := 0
+	numIE := 0
+	for _, slot := range slots {
+		switch slot["slot_type"] {
+		case "storage":
+			numStorage++
+		case "drive":
+			numDrives++
+		case "import_export":
+			numIE++
+		}
+	}
+
+	s.db.Exec(`
+		UPDATE tape_libraries SET num_slots = ?, num_drives = ?, num_import_export = ?,
+		       last_inventory_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, numStorage+numIE, numDrives, numIE, id)
+
+	// Clear existing slots and re-populate
+	s.db.Exec("DELETE FROM tape_library_slots WHERE library_id = ?", id)
+
+	for _, slot := range slots {
+		slotNum := slot["slot_number"]
+		slotType := slot["slot_type"]
+		barcode := slot["barcode"]
+		isEmpty := slot["is_empty"] == "true"
+
+		s.db.Exec(`
+			INSERT INTO tape_library_slots (library_id, slot_number, slot_type, barcode, is_empty)
+			VALUES (?, ?, ?, ?, ?)
+		`, id, slotNum, slotType, barcode, isEmpty)
+	}
+
+	s.auditLog(r, "inventory", "tape_library", id, fmt.Sprintf("Inventory completed: %d storage slots, %d drives, %d I/E slots", numStorage, numDrives, numIE))
+
+	// Publish SSE event
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "tape",
+			Title:    "Library Inventory Complete",
+			Message:  fmt.Sprintf("Found %d storage slots, %d drives, %d I/E slots", numStorage, numDrives, numIE),
+		})
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"slots":         slots,
+		"num_storage":   numStorage,
+		"num_drives":    numDrives,
+		"num_ie":        numIE,
+		"message":       "Inventory completed",
+	})
+}
+
+// parseMtxStatus parses the output of `mtx -f /dev/sgX status`
+func parseMtxStatus(output string) []map[string]string {
+	var slots []map[string]string
+	lines := strings.Split(output, "\n")
+
+	extractBarcode := func(line, prefix string) string {
+		if idx := strings.Index(line, prefix); idx >= 0 {
+			bc := strings.TrimSpace(line[idx+len(prefix):])
+			// Remove any trailing whitespace or non-printable chars
+			bc = strings.Fields(bc)[0]
+			return bc
+		}
+		return ""
+	}
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+
+		if strings.HasPrefix(line, "Data Transfer Element") {
+			// Drive slot: "Data Transfer Element 0:Full (Storage Element 3 Loaded):VolumeTag = TAPE001"
+			slot := map[string]string{
+				"slot_type": "drive",
+				"is_empty":  "true",
+				"barcode":   "",
+			}
+			// Extract drive number
+			parts := strings.SplitN(line, ":", 2)
+			numStr := strings.TrimPrefix(parts[0], "Data Transfer Element ")
+			slot["slot_number"] = strings.TrimSpace(numStr)
+
+			if strings.Contains(line, "Full") {
+				slot["is_empty"] = "false"
+			}
+			slot["barcode"] = extractBarcode(line, "VolumeTag = ")
+			if slot["barcode"] == "" {
+				slot["barcode"] = extractBarcode(line, "VolumeTag=")
+			}
+			slots = append(slots, slot)
+
+		} else if strings.Contains(line, "Storage Element") && strings.Contains(line, "IMPORT/EXPORT") {
+			// Import/Export slot
+			slot := map[string]string{
+				"slot_type": "import_export",
+				"is_empty":  "true",
+				"barcode":   "",
+			}
+			parts := strings.SplitN(line, ":", 2)
+			numStr := strings.TrimPrefix(parts[0], "      Storage Element ")
+			numStr = strings.Split(numStr, " ")[0]
+			slot["slot_number"] = strings.TrimSpace(numStr)
+
+			if strings.Contains(line, "Full") {
+				slot["is_empty"] = "false"
+			}
+			slot["barcode"] = extractBarcode(line, "VolumeTag=")
+			if slot["barcode"] == "" {
+				slot["barcode"] = extractBarcode(line, "VolumeTag = ")
+			}
+			slots = append(slots, slot)
+
+		} else if strings.Contains(line, "Storage Element") {
+			// Normal storage slot: "      Storage Element 1:Full :VolumeTag=TAPE001"
+			slot := map[string]string{
+				"slot_type": "storage",
+				"is_empty":  "true",
+				"barcode":   "",
+			}
+			parts := strings.SplitN(line, ":", 2)
+			numStr := strings.TrimPrefix(parts[0], "      Storage Element ")
+			slot["slot_number"] = strings.TrimSpace(numStr)
+
+			if strings.Contains(line, "Full") {
+				slot["is_empty"] = "false"
+			}
+			slot["barcode"] = extractBarcode(line, "VolumeTag=")
+			if slot["barcode"] == "" {
+				slot["barcode"] = extractBarcode(line, "VolumeTag = ")
+			}
+			slots = append(slots, slot)
+		}
+	}
+
+	return slots
+}
+
+func (s *Server) handleListLibrarySlots(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid library id")
+		return
+	}
+
+	rows, err := s.db.Query(`
+		SELECT s.id, s.slot_number, s.slot_type, s.tape_id, s.barcode, s.is_empty, s.drive_id,
+		       t.label as tape_label
+		FROM tape_library_slots s
+		LEFT JOIN tapes t ON s.tape_id = t.id
+		WHERE s.library_id = ?
+		ORDER BY s.slot_type, s.slot_number
+	`, id)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer rows.Close()
+
+	slots := make([]map[string]interface{}, 0)
+	for rows.Next() {
+		var slotID, slotNumber int64
+		var slotType, barcode string
+		var tapeID, driveID *int64
+		var isEmpty bool
+		var tapeLabel *string
+
+		if err := rows.Scan(&slotID, &slotNumber, &slotType, &tapeID, &barcode, &isEmpty, &driveID, &tapeLabel); err != nil {
+			continue
+		}
+
+		slot := map[string]interface{}{
+			"id":          slotID,
+			"slot_number": slotNumber,
+			"slot_type":   slotType,
+			"barcode":     barcode,
+			"is_empty":    isEmpty,
+		}
+		if tapeID != nil {
+			slot["tape_id"] = *tapeID
+		}
+		if driveID != nil {
+			slot["drive_id"] = *driveID
+		}
+		if tapeLabel != nil {
+			slot["tape_label"] = *tapeLabel
+		}
+		slots = append(slots, slot)
+	}
+
+	s.respondJSON(w, http.StatusOK, slots)
+}
+
+func (s *Server) handleLibraryLoad(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid library id")
+		return
+	}
+
+	var req struct {
+		SlotNumber  int `json:"slot_number"`
+		DriveNumber int `json:"drive_number"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Get library device path
+	var devicePath string
+	err = s.db.QueryRow("SELECT device_path FROM tape_libraries WHERE id = ?", id).Scan(&devicePath)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "library not found")
+		return
+	}
+
+	// Run mtx load command
+	cmd := exec.Command("mtx", "-f", devicePath, "load", strconv.Itoa(req.SlotNumber), strconv.Itoa(req.DriveNumber))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, fmt.Sprintf("mtx load failed: %s - %s", err.Error(), string(output)))
+		return
+	}
+
+	s.auditLog(r, "load", "tape_library", id, fmt.Sprintf("Loaded tape from slot %d to drive %d", req.SlotNumber, req.DriveNumber))
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "tape",
+			Title:    "Tape Loaded",
+			Message:  fmt.Sprintf("Loaded tape from slot %d to drive %d", req.SlotNumber, req.DriveNumber),
+		})
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]string{
+		"message": fmt.Sprintf("Tape loaded from slot %d to drive %d", req.SlotNumber, req.DriveNumber),
+	})
+}
+
+func (s *Server) handleLibraryUnload(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid library id")
+		return
+	}
+
+	var req struct {
+		SlotNumber  int `json:"slot_number"`
+		DriveNumber int `json:"drive_number"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	var devicePath string
+	err = s.db.QueryRow("SELECT device_path FROM tape_libraries WHERE id = ?", id).Scan(&devicePath)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "library not found")
+		return
+	}
+
+	cmd := exec.Command("mtx", "-f", devicePath, "unload", strconv.Itoa(req.SlotNumber), strconv.Itoa(req.DriveNumber))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, fmt.Sprintf("mtx unload failed: %s - %s", err.Error(), string(output)))
+		return
+	}
+
+	s.auditLog(r, "unload", "tape_library", id, fmt.Sprintf("Unloaded tape from drive %d to slot %d", req.DriveNumber, req.SlotNumber))
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "tape",
+			Title:    "Tape Unloaded",
+			Message:  fmt.Sprintf("Unloaded tape from drive %d to slot %d", req.DriveNumber, req.SlotNumber),
+		})
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]string{
+		"message": fmt.Sprintf("Tape unloaded from drive %d to slot %d", req.DriveNumber, req.SlotNumber),
+	})
+}
+
+func (s *Server) handleLibraryTransfer(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid library id")
+		return
+	}
+
+	var req struct {
+		SourceSlot int `json:"source_slot"`
+		DestSlot   int `json:"dest_slot"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	var devicePath string
+	err = s.db.QueryRow("SELECT device_path FROM tape_libraries WHERE id = ?", id).Scan(&devicePath)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "library not found")
+		return
+	}
+
+	cmd := exec.Command("mtx", "-f", devicePath, "transfer", strconv.Itoa(req.SourceSlot), strconv.Itoa(req.DestSlot))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, fmt.Sprintf("mtx transfer failed: %s - %s", err.Error(), string(output)))
+		return
+	}
+
+	s.auditLog(r, "transfer", "tape_library", id, fmt.Sprintf("Transferred tape from slot %d to slot %d", req.SourceSlot, req.DestSlot))
+	s.respondJSON(w, http.StatusOK, map[string]string{
+		"message": fmt.Sprintf("Tape transferred from slot %d to slot %d", req.SourceSlot, req.DestSlot),
+	})
 }

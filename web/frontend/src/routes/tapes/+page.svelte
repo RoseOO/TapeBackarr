@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import * as api from '$lib/api/client';
+  import { dataVersion } from '$lib/stores/livedata';
 
   interface Tape {
     id: number;
@@ -174,6 +175,16 @@
     }
   }
 
+  // Auto-refresh tapes when SSE events arrive
+  const tapesVersion = dataVersion('tapes');
+  let lastTapesVersion = 0;
+  const unsubTapesVersion = tapesVersion.subscribe(v => {
+    if (v > lastTapesVersion && lastTapesVersion > 0) {
+      loadData();
+    }
+    lastTapesVersion = v;
+  });
+
   onMount(async () => {
     await loadData();
     checkBatchLabelStatus();
@@ -181,6 +192,7 @@
 
   onDestroy(() => {
     stopBatchLabelPolling();
+    unsubTapesVersion();
   });
 
   function startBatchLabelPolling() {
