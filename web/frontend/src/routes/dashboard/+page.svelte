@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import * as api from '$lib/api/client';
+  import { dataVersion } from '$lib/stores/livedata';
 
   interface DashboardStats {
     total_tapes: number;
@@ -46,6 +47,24 @@
   let error = '';
   let pollInterval: ReturnType<typeof setInterval>;
 
+  // Subscribe to SSE-driven data invalidation for dashboard
+  const dashboardVersion = dataVersion('dashboard');
+  let lastVersion = 0;
+  const unsubVersion = dashboardVersion.subscribe(v => {
+    if (v > lastVersion && lastVersion > 0) {
+      // Data invalidated by SSE event - refresh dashboard
+      refreshDashboard();
+    }
+    lastVersion = v;
+  });
+
+  async function refreshDashboard() {
+    try {
+      stats = await api.getDashboard();
+    } catch { /* ignore refresh errors */ }
+    await loadActiveJobs();
+  }
+
   onMount(async () => {
     try {
       stats = await api.getDashboard();
@@ -62,6 +81,7 @@
 
   onDestroy(() => {
     if (pollInterval) clearInterval(pollInterval);
+    unsubVersion();
   });
 
   async function loadActiveJobs() {

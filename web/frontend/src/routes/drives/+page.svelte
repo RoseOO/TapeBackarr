@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import * as api from '$lib/api/client';
+  import { dataVersion } from '$lib/stores/livedata';
 
   interface Drive {
     id: number;
@@ -58,6 +59,16 @@
     model: ''
   };
 
+  // Auto-refresh drives when SSE events arrive
+  const drivesVersion = dataVersion('drives');
+  let lastVersion = 0;
+  const unsubVersion = drivesVersion.subscribe(v => {
+    if (v > lastVersion && lastVersion > 0) {
+      loadDrives();
+    }
+    lastVersion = v;
+  });
+
   onMount(async () => {
     await loadDrives();
     try {
@@ -70,6 +81,10 @@
     } catch (e) {
       // Non-critical
     }
+  });
+
+  onDestroy(() => {
+    unsubVersion();
   });
 
   async function loadDrives() {

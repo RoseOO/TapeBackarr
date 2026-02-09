@@ -1,4 +1,5 @@
 import { writable } from 'svelte/store';
+import { processSSEEvent } from './livedata';
 
 export interface Notification {
   id: string;
@@ -80,6 +81,8 @@ function createNotificationStore() {
       eventSource.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data) as Notification;
+          // Trigger live data invalidation for real-time UI updates
+          processSSEEvent(data);
           // Skip dismissed notifications
           if (dismissedIds.has(data.id)) return;
           update(n => {
