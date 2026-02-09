@@ -250,6 +250,9 @@ type CatalogEntry struct {
 	Checksum    string    `json:"checksum" db:"checksum"`
 	BlockOffset int64     `json:"block_offset" db:"block_offset"`
 	CreatedAt   time.Time `json:"created_at" db:"created_at"`
+	// Tape info populated from backup_set -> tape join for restore display
+	TapeID    int64  `json:"tape_id,omitempty"`
+	TapeLabel string `json:"tape_label,omitempty"`
 }
 
 // ExecutionStatus represents the status of a job execution

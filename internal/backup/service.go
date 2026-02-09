@@ -1460,13 +1460,110 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 	}
 	s.mu.Unlock()
 
-	// Get tape device path
+	// Read expected tape info from DB
+	var expectedLabel, expectedUUID string
+	if err := s.db.QueryRow("SELECT label, uuid FROM tapes WHERE id = ?", tapeID).Scan(&expectedLabel, &expectedUUID); err != nil {
+		s.updateProgress(job.ID, "failed", "Failed to look up tape info: "+err.Error())
+		s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "failed to look up tape info")
+		return nil, fmt.Errorf("failed to look up tape info: %w", err)
+	}
+
+	// Find the drive with the correct tape by scanning all enabled drives and
+	// reading physical labels. This avoids relying solely on the current_tape_id
+	// DB column which may be stale.
+	s.updateProgress(job.ID, "positioning", "Looking for tape "+expectedLabel+" in drives...")
+
 	var devicePath string
-	err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE current_tape_id = ?", tapeID).Scan(&devicePath)
-	if err != nil {
-		s.updateProgress(job.ID, "failed", "No drive found with specified tape")
-		s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "no drive found with tape")
-		return nil, fmt.Errorf("no drive found with specified tape: %w", err)
+	const tapeRetryInterval = 10 * time.Second
+	const maxConsecutiveErrors = 30 // give up after ~5 minutes of persistent drive errors
+	lastNotifiedIssue := ""
+	consecutiveErrors := 0
+
+	for {
+		// First, try the fast path: look up by current_tape_id
+		dbErr := s.db.QueryRow("SELECT device_path FROM tape_drives WHERE current_tape_id = ? AND COALESCE(enabled, 1) = 1", tapeID).Scan(&devicePath)
+		if dbErr == nil {
+			// Verify the tape is actually the correct one by reading the physical label
+			probeSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+			physLabel, readErr := probeSvc.ReadTapeLabel(ctx)
+			if readErr == nil && physLabel != nil && physLabel.Label == expectedLabel && physLabel.UUID == expectedUUID {
+				s.logger.Info("Found correct tape via current_tape_id lookup", map[string]interface{}{
+					"tape": expectedLabel, "device": devicePath,
+				})
+				consecutiveErrors = 0
+				break
+			}
+			// Label didn't match — fall through to scan all drives
+			s.logger.Warn("current_tape_id drive has wrong/unreadable label, scanning all drives", map[string]interface{}{
+				"device": devicePath, "expected_tape": expectedLabel,
+			})
+		}
+
+		// Scan all enabled drives and read physical labels to find the correct tape
+		driveRows, driveErr := s.db.Query("SELECT device_path FROM tape_drives WHERE COALESCE(enabled, 1) = 1")
+		if driveErr == nil {
+			found := false
+			for driveRows.Next() {
+				var dp string
+				if err := driveRows.Scan(&dp); err != nil {
+					continue
+				}
+				probeSvc := tape.NewServiceForDevice(dp, s.tapeService.GetBlockSize())
+				loaded, loadErr := probeSvc.IsTapeLoaded(ctx)
+				if loadErr != nil || !loaded {
+					continue
+				}
+				physLabel, readErr := probeSvc.ReadTapeLabel(ctx)
+				if readErr != nil || physLabel == nil {
+					continue
+				}
+				if physLabel.Label == expectedLabel && physLabel.UUID == expectedUUID {
+					devicePath = dp
+					found = true
+					// Update current_tape_id in DB so future lookups are fast
+					s.db.Exec("UPDATE tape_drives SET current_tape_id = ? WHERE device_path = ?", tapeID, dp)
+					s.logger.Info("Found correct tape via drive scan", map[string]interface{}{
+						"tape": expectedLabel, "device": dp,
+					})
+					break
+				}
+			}
+			driveRows.Close()
+			if found {
+				consecutiveErrors = 0
+				break
+			}
+		}
+
+		// Tape not found in any drive — notify operator and wait
+		consecutiveErrors++
+		if consecutiveErrors >= maxConsecutiveErrors {
+			s.updateProgress(job.ID, "failed", fmt.Sprintf("Tape %s not found in any drive after %d retries", expectedLabel, consecutiveErrors))
+			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "tape not found in any drive")
+			return nil, fmt.Errorf("tape %s not found in any drive after %d retries", expectedLabel, consecutiveErrors)
+		}
+
+		waitMsg := fmt.Sprintf("Tape %q not found in any drive. Please insert the correct tape to continue backup job %q.",
+			expectedLabel, job.Name)
+		s.updateProgress(job.ID, "waiting", waitMsg)
+		issueKey := "no_tape"
+		if lastNotifiedIssue != issueKey {
+			s.emitEvent("warning", "backup", "Tape Required",
+				fmt.Sprintf("Job %s: tape %s not found in any drive. Please insert it.", job.Name, expectedLabel))
+			if s.WrongTapeCallback != nil {
+				s.WrongTapeCallback(ctx, expectedLabel, "not loaded in any drive")
+			}
+			lastNotifiedIssue = issueKey
+		}
+
+		select {
+		case <-ctx.Done():
+			s.updateProgress(job.ID, "failed", "Backup cancelled while waiting for tape")
+			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "cancelled waiting for tape")
+			return nil, ctx.Err()
+		case <-time.After(tapeRetryInterval):
+			continue
+		}
 	}
 
 	// Update device path in progress
@@ -1517,131 +1614,28 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		s.mu.Unlock()
 	}
 
-	// Verify tape label before writing
-	s.updateProgress(job.ID, "positioning", "Verifying tape label...")
+	// Perform a final label verification right before writing — the tape was already
+	// confirmed during drive scanning above, but we re-read the label here to guard
+	// against any tape swap that may have occurred between discovery and write.
+	s.updateProgress(job.ID, "positioning", "Verifying tape label before write...")
 	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
-
-	// Read expected tape info from DB
-	var expectedLabel, expectedUUID string
-	if err := s.db.QueryRow("SELECT label, uuid FROM tapes WHERE id = ?", tapeID).Scan(&expectedLabel, &expectedUUID); err != nil {
-		s.updateProgress(job.ID, "failed", "Failed to look up tape info: "+err.Error())
-		s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "failed to look up tape info")
-		return nil, fmt.Errorf("failed to look up tape info: %w", err)
-	}
-
-	// Read and verify the physical tape label, retrying until the correct tape is inserted.
-	// Instead of failing immediately when the tape is missing or wrong, we notify the
-	// operator and wait for them to insert the correct tape.
-	const tapeRetryInterval = 10 * time.Second
-	const maxConsecutiveErrors = 30 // give up after ~5 minutes of persistent drive errors
-	lastNotifiedIssue := ""
-	consecutiveErrors := 0
-	for {
-		// Check if a tape is loaded in the drive
-		tapeLoaded, loadErr := driveSvc.IsTapeLoaded(ctx)
-		if loadErr != nil {
-			consecutiveErrors++
-			s.logger.Warn("Error checking tape status, will retry", map[string]interface{}{
-				"error": loadErr.Error(), "tape": expectedLabel, "consecutive_errors": consecutiveErrors,
-			})
-			if consecutiveErrors >= maxConsecutiveErrors {
-				s.updateProgress(job.ID, "failed", "Persistent drive error: "+loadErr.Error())
-				s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "persistent drive error")
-				return nil, fmt.Errorf("persistent drive error after %d retries: %w", consecutiveErrors, loadErr)
-			}
-		} else {
-			consecutiveErrors = 0
-		}
-
-		if loadErr != nil || !tapeLoaded {
-			// No tape in drive — notify operator and wait
-			waitMsg := fmt.Sprintf("No tape found in drive %s. Please insert tape %q to continue backup job %q.",
-				devicePath, expectedLabel, job.Name)
-			s.updateProgress(job.ID, "waiting", waitMsg)
-			issueKey := "no_tape"
-			if lastNotifiedIssue != issueKey {
-				s.emitEvent("warning", "backup", "Tape Required",
-					fmt.Sprintf("Job %s: no tape in drive. Please insert tape %s.", job.Name, expectedLabel))
-				if s.WrongTapeCallback != nil {
-					s.WrongTapeCallback(ctx, expectedLabel, "no tape loaded")
-				}
-				lastNotifiedIssue = issueKey
-			}
-			select {
-			case <-ctx.Done():
-				s.updateProgress(job.ID, "failed", "Backup cancelled while waiting for tape")
-				s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "cancelled waiting for tape")
-				return nil, ctx.Err()
-			case <-time.After(tapeRetryInterval):
-				continue
-			}
-		}
-
-		// Tape is loaded — try to read the label
+	{
 		physicalLabel, readErr := driveSvc.ReadTapeLabel(ctx)
 		if readErr != nil {
-			s.logger.Warn("Failed to read tape label, will retry", map[string]interface{}{
-				"error": readErr.Error(), "tape": expectedLabel,
-			})
-			waitMsg := fmt.Sprintf("Cannot read tape label in drive %s (error: %s). Please check tape %q is correctly inserted.",
-				devicePath, readErr.Error(), expectedLabel)
-			s.updateProgress(job.ID, "waiting", waitMsg)
-			issueKey := "read_error"
-			if lastNotifiedIssue != issueKey {
-				s.emitEvent("warning", "backup", "Tape Read Error",
-					fmt.Sprintf("Job %s: cannot read tape label. Please check tape %s.", job.Name, expectedLabel))
-				if s.WrongTapeCallback != nil {
-					s.WrongTapeCallback(ctx, expectedLabel, "unreadable")
-				}
-				lastNotifiedIssue = issueKey
+			errMsg := fmt.Sprintf("Failed to read tape label on %s before write: %s", devicePath, readErr.Error())
+			s.updateProgress(job.ID, "failed", errMsg)
+			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, errMsg)
+			return nil, fmt.Errorf("tape label read failed before write: %w", readErr)
+		}
+		if physicalLabel == nil || physicalLabel.Label != expectedLabel || physicalLabel.UUID != expectedUUID {
+			actualLabel := "unlabeled"
+			if physicalLabel != nil {
+				actualLabel = physicalLabel.Label
 			}
-			select {
-			case <-ctx.Done():
-				s.updateProgress(job.ID, "failed", "Backup cancelled while waiting for tape")
-				s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "cancelled waiting for tape")
-				return nil, ctx.Err()
-			case <-time.After(tapeRetryInterval):
-				continue
-			}
-		}
-
-		// Check if the label matches
-		if physicalLabel != nil && physicalLabel.Label == expectedLabel && physicalLabel.UUID == expectedUUID {
-			// Correct tape found — break out of retry loop
-			break
-		}
-
-		// Wrong tape or unlabeled tape — notify and retry
-		actualLabel := "unlabeled"
-		if physicalLabel != nil {
-			actualLabel = physicalLabel.Label
-		}
-		var waitMsg string
-		if physicalLabel != nil && physicalLabel.Label == expectedLabel {
-			waitMsg = fmt.Sprintf("Tape UUID mismatch: expected %q but drive has %q (label %q). Please insert the correct tape %q.",
-				expectedUUID, physicalLabel.UUID, actualLabel, expectedLabel)
-		} else {
-			waitMsg = fmt.Sprintf("Wrong tape in drive: expected %q but found %q. Please insert the correct tape.",
-				expectedLabel, actualLabel)
-		}
-		s.updateProgress(job.ID, "waiting", waitMsg)
-		issueKey := "wrong_tape:" + actualLabel
-		if lastNotifiedIssue != issueKey {
-			s.emitEvent("warning", "backup", "Wrong Tape Inserted",
-				fmt.Sprintf("Job %s: %s", job.Name, waitMsg))
-			if s.WrongTapeCallback != nil {
-				s.WrongTapeCallback(ctx, expectedLabel, actualLabel)
-			}
-			lastNotifiedIssue = issueKey
-		}
-
-		select {
-		case <-ctx.Done():
-			s.updateProgress(job.ID, "failed", "Backup cancelled while waiting for correct tape")
-			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "cancelled waiting for correct tape")
-			return nil, ctx.Err()
-		case <-time.After(tapeRetryInterval):
-			continue
+			errMsg := fmt.Sprintf("Tape label mismatch before write: expected %q but found %q — aborting to prevent data inconsistency", expectedLabel, actualLabel)
+			s.updateProgress(job.ID, "failed", errMsg)
+			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, errMsg)
+			return nil, fmt.Errorf("%s", errMsg)
 		}
 	}
 
@@ -1963,15 +1957,56 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 				return nil, fmt.Errorf("failed to look up new tape: %w", err)
 			}
 
-			// Find the drive with the new tape loaded
-			if err := s.db.QueryRow("SELECT device_path FROM tape_drives WHERE current_tape_id = ?", currentTapeID).Scan(&devicePath); err != nil {
+			// Find the drive with the new tape by scanning all enabled drives and
+			// reading physical labels, same as the initial tape discovery.
+			foundSpanDrive := false
+
+			// Fast path: try current_tape_id lookup first
+			if err := s.db.QueryRow("SELECT device_path FROM tape_drives WHERE current_tape_id = ? AND COALESCE(enabled, 1) = 1", currentTapeID).Scan(&devicePath); err == nil {
+				probeSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+				physLabel, readErr := probeSvc.ReadTapeLabel(ctx)
+				if readErr == nil && physLabel != nil && physLabel.Label == currentLabel && physLabel.UUID == currentUUID {
+					foundSpanDrive = true
+				}
+			}
+
+			// If fast path failed, scan all enabled drives
+			if !foundSpanDrive {
+				driveRows, driveErr := s.db.Query("SELECT device_path FROM tape_drives WHERE COALESCE(enabled, 1) = 1")
+				if driveErr == nil {
+					for driveRows.Next() {
+						var dp string
+						if err := driveRows.Scan(&dp); err != nil {
+							continue
+						}
+						probeSvc := tape.NewServiceForDevice(dp, s.tapeService.GetBlockSize())
+						loaded, loadErr := probeSvc.IsTapeLoaded(ctx)
+						if loadErr != nil || !loaded {
+							continue
+						}
+						physLabel, readErr := probeSvc.ReadTapeLabel(ctx)
+						if readErr != nil || physLabel == nil {
+							continue
+						}
+						if physLabel.Label == currentLabel && physLabel.UUID == currentUUID {
+							devicePath = dp
+							foundSpanDrive = true
+							s.db.Exec("UPDATE tape_drives SET current_tape_id = ? WHERE device_path = ?", currentTapeID, dp)
+							break
+						}
+					}
+					driveRows.Close()
+				}
+			}
+
+			if !foundSpanDrive {
 				s.updateProgress(job.ID, "failed", "No drive found with new tape "+currentLabel)
 				s.db.Exec("UPDATE tape_spanning_sets SET status = 'failed' WHERE id = ?", spanningSetID)
-				return nil, fmt.Errorf("no drive found with new tape %s: %w", currentLabel, err)
+				return nil, fmt.Errorf("no drive found with new tape %s after scanning all drives", currentLabel)
 			}
 			currentDriveSvc = tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
 
-			// Verify and position the new tape
+			// Final label verification before write — strict check, no fallback
 			physLabel, readErr := currentDriveSvc.ReadTapeLabel(ctx)
 			if readErr != nil || physLabel == nil || physLabel.Label != currentLabel || physLabel.UUID != currentUUID {
 				errMsg := fmt.Sprintf("new tape label verification failed for %s", currentLabel)
@@ -2207,6 +2242,27 @@ func (s *Service) finishTape(p finishTapeParams) error {
 		WHERE id = ?
 	`, endTime, models.BackupSetStatusCompleted, len(p.files), p.totalBytes,
 		p.encrypted, p.encryptionKeyID, p.compressed, p.compressionType, p.backupSetID)
+
+	// Compute and save per-file block_offset in catalog entries. Files are
+	// written sequentially as a tar stream, so the offset of each file is the
+	// cumulative size of all preceding files (plus tar header overhead per file).
+	// This allows the restore page to show where each file lives on tape.
+	// Tar header overhead: 512-byte header + up to 512 bytes padding = ~1KB per file.
+	const tarHeaderOverhead = 1024
+	var cumulativeOffset int64
+	for _, f := range p.files {
+		relPath, relErr := filepath.Rel(p.source.Path, f.Path)
+		if relErr != nil {
+			relPath = f.Path
+		}
+		if _, err := s.db.Exec(`UPDATE catalog_entries SET block_offset = ? WHERE backup_set_id = ? AND file_path = ?`,
+			cumulativeOffset, p.backupSetID, relPath); err != nil {
+			s.logger.Warn("Failed to update block_offset for catalog entry", map[string]interface{}{
+				"file": relPath, "error": err.Error(),
+			})
+		}
+		cumulativeOffset += f.Size + tarHeaderOverhead
+	}
 
 	// Update tape usage — use actual bytes written to tape (post-compression)
 	// when available, so compressed backups don't overestimate tape consumption.
@@ -2519,10 +2575,13 @@ func (s *Service) SearchCatalog(ctx context.Context, pattern string, limit int) 
 	sqlPattern := strings.ReplaceAll(pattern, "*", "%")
 
 	rows, err := s.db.Query(`
-		SELECT id, backup_set_id, file_path, file_size, file_mode, mod_time, checksum, block_offset
-		FROM catalog_entries
-		WHERE file_path LIKE ?
-		ORDER BY file_path
+		SELECT ce.id, ce.backup_set_id, ce.file_path, ce.file_size, ce.file_mode, ce.mod_time,
+		       ce.checksum, ce.block_offset, COALESCE(bs.tape_id, 0), COALESCE(t.label, '')
+		FROM catalog_entries ce
+		LEFT JOIN backup_sets bs ON ce.backup_set_id = bs.id
+		LEFT JOIN tapes t ON bs.tape_id = t.id
+		WHERE ce.file_path LIKE ?
+		ORDER BY ce.file_path
 		LIMIT ?
 	`, sqlPattern, limit)
 	if err != nil {
@@ -2533,7 +2592,7 @@ func (s *Service) SearchCatalog(ctx context.Context, pattern string, limit int) 
 	var entries []models.CatalogEntry
 	for rows.Next() {
 		var e models.CatalogEntry
-		if err := rows.Scan(&e.ID, &e.BackupSetID, &e.FilePath, &e.FileSize, &e.FileMode, &e.ModTime, &e.Checksum, &e.BlockOffset); err != nil {
+		if err := rows.Scan(&e.ID, &e.BackupSetID, &e.FilePath, &e.FileSize, &e.FileMode, &e.ModTime, &e.Checksum, &e.BlockOffset, &e.TapeID, &e.TapeLabel); err != nil {
 			continue
 		}
 		entries = append(entries, e)
