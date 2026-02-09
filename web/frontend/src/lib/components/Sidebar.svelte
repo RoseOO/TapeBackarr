@@ -8,6 +8,7 @@
     { href: '/tapes', label: 'Tapes', icon: '💾' },
     { href: '/pools', label: 'Media Pools', icon: '🗂️' },
     { href: '/drives', label: 'Drives', icon: '🔌' },
+    { href: '/inspect', label: 'Tape Inspector', icon: '🔍' },
     { href: '/libraries', label: 'Tape Libraries', icon: '🏗️' },
     { href: '/jobs', label: 'Backup Jobs', icon: '📦' },
     { href: '/sources', label: 'Sources', icon: '📁' },
