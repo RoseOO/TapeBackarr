@@ -139,11 +139,23 @@ func buildCompressionCmd(ctx context.Context, compression models.CompressionType
 	}
 }
 
+// relayBufferSize is the buffer size used by countingReader.WriteTo when
+// Go's exec package relays data via io.Copy (e.g. Cmd.Stdin). 256KB
+// matches the typical LTO block size and is 8× larger than io.Copy's
+// default 32KB, reducing syscall overhead in the streaming pipeline.
+const relayBufferSize = 256 * 1024
+
 // countingReader wraps an io.Reader and counts bytes read through it.
 // It uses atomic operations instead of a mutex for the byte counter to avoid
 // lock contention in the hot data path, and throttles the progress callback
 // to fire at most once per second to reduce overhead from mutex acquisition,
 // time.Now() calls, and float math in the callback.
+//
+// countingReader also implements io.WriterTo so that when Go's exec package
+// uses io.Copy to relay data (e.g. when set as Cmd.Stdin), a larger buffer
+// is used instead of io.Copy's default 32KB. This is critical for tape
+// streaming performance: the larger buffer reduces syscall overhead in the
+// tar → mbuffer → tape pipeline and keeps the mbuffer fed at full speed.
 type countingReader struct {
 	reader       io.Reader
 	count        int64 // accessed atomically
@@ -152,26 +164,65 @@ type countingReader struct {
 	paused       *int32 // atomic: 0=running, 1=paused
 }
 
-func (cr *countingReader) Read(p []byte) (int, error) {
-	// Check pause state
+// waitWhilePaused blocks until the pause flag is cleared.
+func (cr *countingReader) waitWhilePaused() {
 	for cr.paused != nil && atomic.LoadInt32(cr.paused) == 1 {
 		time.Sleep(100 * time.Millisecond)
 	}
-	n, err := cr.reader.Read(p)
-	if n > 0 {
-		total := atomic.AddInt64(&cr.count, int64(n))
-		if cr.callback != nil {
-			now := time.Now().UnixNano()
-			last := atomic.LoadInt64(&cr.lastCallback)
-			// Throttle callback to at most once per second to reduce overhead
-			if now-last >= int64(time.Second) {
-				if atomic.CompareAndSwapInt64(&cr.lastCallback, last, now) {
-					cr.callback(total)
-				}
+}
+
+// trackBytes updates the byte counter and fires the throttled progress callback.
+func (cr *countingReader) trackBytes(n int) {
+	total := atomic.AddInt64(&cr.count, int64(n))
+	if cr.callback != nil {
+		now := time.Now().UnixNano()
+		last := atomic.LoadInt64(&cr.lastCallback)
+		// Throttle callback to at most once per second to reduce overhead
+		if now-last >= int64(time.Second) {
+			if atomic.CompareAndSwapInt64(&cr.lastCallback, last, now) {
+				cr.callback(total)
 			}
 		}
 	}
+}
+
+func (cr *countingReader) Read(p []byte) (int, error) {
+	cr.waitWhilePaused()
+	n, err := cr.reader.Read(p)
+	if n > 0 {
+		cr.trackBytes(n)
+	}
 	return n, err
+}
+
+// WriteTo implements io.WriterTo so that io.Copy (used internally by Go's
+// exec package to relay data when Cmd.Stdin is not an *os.File) transfers
+// data in 256KB chunks instead of the default 32KB. This keeps the mbuffer
+// fed faster and prevents tape shoe-shining during streaming.
+func (cr *countingReader) WriteTo(w io.Writer) (int64, error) {
+	buf := make([]byte, relayBufferSize)
+	var total int64
+	for {
+		cr.waitWhilePaused()
+		nr, readErr := cr.reader.Read(buf)
+		if nr > 0 {
+			cr.trackBytes(nr)
+			nw, writeErr := w.Write(buf[:nr])
+			total += int64(nw)
+			if writeErr != nil {
+				return total, writeErr
+			}
+			if nw != nr {
+				return total, io.ErrShortWrite
+			}
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				return total, nil
+			}
+			return total, readErr
+		}
+	}
 }
 
 func (cr *countingReader) bytesRead() int64 {
@@ -847,14 +898,16 @@ func (s *Service) StreamToTapeEncrypted(ctx context.Context, sourcePath string, 
 		}
 		return tapeCr.bytesRead(), nil
 	} else {
-		// Direct to tape device
+		// Direct to tape device with buffered writes to avoid small I/O
+		// causing tape shoe-shining (start/stop cycles).
 		tapeFile, err := os.OpenFile(devicePath, os.O_WRONLY, 0)
 		if err != nil {
 			return 0, fmt.Errorf("failed to open tape device: %w", err)
 		}
 		defer tapeFile.Close()
 
-		tapeCw := &countingWriter{writer: tapeFile}
+		bufferedTape := bufio.NewWriterSize(tapeFile, s.blockSize)
+		tapeCw := &countingWriter{writer: bufferedTape}
 		opensslCmd.Stdout = tapeCw
 
 		if err := tarCmd.Start(); err != nil {
@@ -876,6 +929,9 @@ func (s *Service) StreamToTapeEncrypted(ctx context.Context, sourcePath string, 
 		}
 		if opensslErr != nil {
 			return 0, fmt.Errorf("openssl encryption failed: %w", opensslErr)
+		}
+		if err := bufferedTape.Flush(); err != nil {
+			return 0, fmt.Errorf("failed to flush tape buffer: %w", err)
 		}
 		return tapeCw.bytesWritten(), nil
 	}
@@ -971,13 +1027,16 @@ func (s *Service) StreamToTapeCompressed(ctx context.Context, sourcePath string,
 		}
 		return tapeCr.bytesRead(), nil
 	} else {
+		// Direct to tape device with buffered writes to avoid small I/O
+		// causing tape shoe-shining (start/stop cycles).
 		tapeFile, err := os.OpenFile(devicePath, os.O_WRONLY, 0)
 		if err != nil {
 			return 0, fmt.Errorf("failed to open tape device: %w", err)
 		}
 		defer tapeFile.Close()
 
-		tapeCw := &countingWriter{writer: tapeFile}
+		bufferedTape := bufio.NewWriterSize(tapeFile, s.blockSize)
+		tapeCw := &countingWriter{writer: bufferedTape}
 		compCmd.Stdout = tapeCw
 
 		if err := tarCmd.Start(); err != nil {
@@ -999,6 +1058,9 @@ func (s *Service) StreamToTapeCompressed(ctx context.Context, sourcePath string,
 		}
 		if compErr != nil {
 			return 0, fmt.Errorf("compression failed: %w", compErr)
+		}
+		if err := bufferedTape.Flush(); err != nil {
+			return 0, fmt.Errorf("failed to flush tape buffer: %w", err)
 		}
 		return tapeCw.bytesWritten(), nil
 	}
@@ -1113,13 +1175,16 @@ func (s *Service) StreamToTapeCompressedEncrypted(ctx context.Context, sourcePat
 		}
 		return tapeCr.bytesRead(), nil
 	} else {
+		// Direct to tape device with buffered writes to avoid small I/O
+		// causing tape shoe-shining (start/stop cycles).
 		tapeFile, err := os.OpenFile(devicePath, os.O_WRONLY, 0)
 		if err != nil {
 			return 0, fmt.Errorf("failed to open tape device: %w", err)
 		}
 		defer tapeFile.Close()
 
-		tapeCw := &countingWriter{writer: tapeFile}
+		bufferedTape := bufio.NewWriterSize(tapeFile, s.blockSize)
+		tapeCw := &countingWriter{writer: bufferedTape}
 		opensslCmd.Stdout = tapeCw
 
 		if err := tarCmd.Start(); err != nil {
@@ -1150,6 +1215,9 @@ func (s *Service) StreamToTapeCompressedEncrypted(ctx context.Context, sourcePat
 		}
 		if opensslErr != nil {
 			return 0, fmt.Errorf("openssl encryption failed: %w", opensslErr)
+		}
+		if err := bufferedTape.Flush(); err != nil {
+			return 0, fmt.Errorf("failed to flush tape buffer: %w", err)
 		}
 		return tapeCw.bytesWritten(), nil
 	}
@@ -1193,10 +1261,11 @@ func (s *Service) CalculateChecksum(path string) (string, error) {
 // cataloging" state for large file counts. The TOC file list is written to
 // tape separately at the end by finishTape.
 func (s *Service) computeChecksumsAsync(ctx context.Context, files []FileInfo, checksums *sync.Map, backupSetID int64, sourcePath string) {
-	numWorkers := runtime.NumCPU()
-	if numWorkers < 4 {
-		numWorkers = 4
-	}
+	// Use at most 2 workers to avoid I/O contention with the concurrent tape
+	// streaming pipeline (tar reads the same files from disk). More workers
+	// would create random I/O patterns that destroy sequential read throughput,
+	// especially on HDDs — the exact symptom that causes slow tape writes.
+	numWorkers := 2
 
 	type catalogEntry struct {
 		relPath  string
@@ -2755,4 +2824,3 @@ func (d *DummyScanner) Scan() bool   { return false }
 func (d *DummyScanner) Text() string { return "" }
 
 var _ interface{ Scan() bool } = &DummyScanner{}
-var _ = bufio.Scanner{}
