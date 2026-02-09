@@ -3431,11 +3431,19 @@ func (s *Server) handleDeleteBackupSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Delete all foreign key references before deleting the backup set
-	fkTables := []string{"catalog_entries", "job_executions", "snapshots", "restore_operations", "tape_spanning_members"}
-	for _, table := range fkTables {
-		if _, err := s.db.Exec("DELETE FROM "+table+" WHERE backup_set_id = ?", id); err != nil {
-			s.logger.Warn("failed to delete "+table+" for backup set", map[string]interface{}{"backup_set_id": id, "error": err.Error()})
+	// Delete all foreign key references before deleting the backup set.
+	// Table names are hardcoded; no user input is used in the query.
+	fkTables := map[string]bool{
+		"catalog_entries":       true,
+		"job_executions":        true,
+		"snapshots":             true,
+		"restore_operations":    true,
+		"tape_spanning_members": true,
+	}
+	for table := range fkTables {
+		query := fmt.Sprintf("DELETE FROM %s WHERE backup_set_id = ?", table)
+		if _, err := s.db.Exec(query, id); err != nil {
+			s.logger.Warn("failed to delete foreign key references for backup set", map[string]interface{}{"table": table, "backup_set_id": id, "error": err.Error()})
 		}
 	}
 
