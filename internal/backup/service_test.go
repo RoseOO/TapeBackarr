@@ -764,7 +764,7 @@ func TestCountingReaderWriteToSlowWriter(t *testing.T) {
 	cr := &countingReader{reader: reader}
 
 	var dst bytes.Buffer
-	sw := &slowWriter{w: &dst, delay: time.Microsecond}
+	sw := &slowWriter{w: &dst, delay: time.Millisecond}
 	n, err := cr.WriteTo(sw)
 	if err != nil {
 		t.Fatalf("WriteTo error: %v", err)

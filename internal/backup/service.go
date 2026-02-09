@@ -227,8 +227,8 @@ func (cr *countingReader) WriteTo(w io.Writer) (int64, error) {
 	pool := make(chan []byte, pipelineDepth+1)
 
 	// Pre-allocate a pool of reusable buffers to avoid GC pressure.
-	// pipelineDepth+1 buffers allows the reader to fill one while the
-	// writer drains another, with pipelineDepth-1 queued in between.
+	// pipelineDepth+1 total buffers: up to pipelineDepth queued in the
+	// channel, plus one actively being filled or drained.
 	for i := 0; i < pipelineDepth+1; i++ {
 		pool <- make([]byte, relayBufferSize)
 	}
@@ -281,6 +281,12 @@ func (cr *countingReader) WriteTo(w io.Writer) (int64, error) {
 			pool <- c.data // return unused buffer
 		}
 		if c.err != nil {
+			// io.ReadFull returns io.ErrUnexpectedEOF when the underlying
+			// reader hits io.EOF before the buffer is completely filled.
+			// This is the normal end-of-stream for the last partial chunk
+			// (e.g. 3.5MB of data with 1MB buffers yields a final 0.5MB
+			// chunk). Real I/O errors (broken pipe, etc.) produce distinct
+			// error values that are propagated below.
 			if c.err == io.EOF || c.err == io.ErrUnexpectedEOF {
 				return total, nil
 			}
