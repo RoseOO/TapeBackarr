@@ -295,6 +295,12 @@ export async function deleteBackupSet(id: number) {
   });
 }
 
+export async function cancelBackupSet(id: number) {
+  return fetchApi(`/backup-sets/${id}/cancel`, {
+    method: 'POST',
+  });
+}
+
 export async function getBackupFiles(id: number, prefix?: string) {
   const params = prefix ? `?prefix=${encodeURIComponent(prefix)}` : '';
   return fetchApi(`/backup-sets/${id}/files${params}`);

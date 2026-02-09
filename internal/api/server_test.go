@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/RoseOO/TapeBackarr/internal/database"
+	"github.com/RoseOO/TapeBackarr/internal/logging"
 	"github.com/RoseOO/TapeBackarr/internal/tape"
 
 	"github.com/go-chi/chi/v5"
@@ -347,5 +349,168 @@ func TestTelegramDrivesCommandNoDrives(t *testing.T) {
 
 	if !strings.Contains(result, "No drives configured") {
 		t.Errorf("expected result to contain 'No drives configured', got: %s", result)
+	}
+}
+
+// setupTestServerWithBackupSet creates a test server with a backup set in the given status.
+// Returns the server, the backup set ID, and a cleanup function.
+func setupTestServerWithBackupSet(t *testing.T, status string) (*Server, int64) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := database.New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("failed to migrate database: %v", err)
+	}
+
+	logger, err := logging.NewLogger("warn", "text", "")
+	if err != nil {
+		t.Fatalf("failed to create logger: %v", err)
+	}
+
+	// Insert a tape (pool_id=1 from migrations: DAILY)
+	_, err = db.Exec("INSERT INTO tapes (uuid, barcode, label, pool_id, status, capacity_bytes, used_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		"uuid-t1", "TEST01", "TEST01", 1, "active", int64(1500000000000), int64(0))
+	if err != nil {
+		t.Fatalf("failed to insert tape: %v", err)
+	}
+
+	// Insert a backup source
+	_, err = db.Exec("INSERT INTO backup_sources (name, source_type, path) VALUES (?, ?, ?)", "test-source", "local", "/tmp/test")
+	if err != nil {
+		t.Fatalf("failed to insert backup source: %v", err)
+	}
+
+	// Insert a backup job
+	_, err = db.Exec("INSERT INTO backup_jobs (name, source_id, pool_id, backup_type, schedule_cron, retention_days) VALUES (?, ?, ?, ?, ?, ?)",
+		"test-job", 1, 1, "full", "0 0 * * *", 30)
+	if err != nil {
+		t.Fatalf("failed to insert backup job: %v", err)
+	}
+
+	// Insert a backup set with the given status
+	now := time.Now()
+	result, err := db.Exec("INSERT INTO backup_sets (job_id, tape_id, backup_type, start_time, status, file_count, total_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		1, 1, "full", now, status, 0, 0)
+	if err != nil {
+		t.Fatalf("failed to insert backup set: %v", err)
+	}
+	setID, _ := result.LastInsertId()
+
+	tapeService := tape.NewService("/dev/null", 65536)
+	r := chi.NewRouter()
+	s := &Server{
+		router:      r,
+		db:          db,
+		tapeService: tapeService,
+		logger:      logger,
+	}
+
+	// Wire up just the backup set routes
+	r.Delete("/api/v1/backup-sets/{id}", s.handleDeleteBackupSet)
+	r.Post("/api/v1/backup-sets/{id}/cancel", s.handleCancelBackupSet)
+
+	return s, setID
+}
+
+func TestDeleteBackupSetWithForeignKeys(t *testing.T) {
+	s, setID := setupTestServerWithBackupSet(t, "failed")
+
+	// Insert a job_execution referencing this backup set (this is the FK that was missed)
+	_, err := s.db.Exec("INSERT INTO job_executions (job_id, backup_set_id, status) VALUES (?, ?, ?)", 1, setID, "failed")
+	if err != nil {
+		t.Fatalf("failed to insert job_execution: %v", err)
+	}
+
+	req := httptest.NewRequest("DELETE", fmt.Sprintf("/api/v1/backup-sets/%d", setID), nil)
+	rr := httptest.NewRecorder()
+	s.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]string
+	json.NewDecoder(rr.Body).Decode(&resp)
+	if resp["status"] != "deleted" {
+		t.Errorf("expected status 'deleted', got %q", resp["status"])
+	}
+
+	// Verify backup set is gone
+	var count int
+	s.db.QueryRow("SELECT COUNT(*) FROM backup_sets WHERE id = ?", setID).Scan(&count)
+	if count != 0 {
+		t.Errorf("expected backup set to be deleted, but it still exists")
+	}
+}
+
+func TestDeleteCancelledBackupSet(t *testing.T) {
+	s, setID := setupTestServerWithBackupSet(t, "cancelled")
+
+	req := httptest.NewRequest("DELETE", fmt.Sprintf("/api/v1/backup-sets/%d", setID), nil)
+	rr := httptest.NewRecorder()
+	s.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]string
+	json.NewDecoder(rr.Body).Decode(&resp)
+	if resp["status"] != "deleted" {
+		t.Errorf("expected status 'deleted', got %q", resp["status"])
+	}
+}
+
+func TestCancelRunningBackupSet(t *testing.T) {
+	s, setID := setupTestServerWithBackupSet(t, "running")
+
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/backup-sets/%d/cancel", setID), nil)
+	rr := httptest.NewRecorder()
+	s.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]string
+	json.NewDecoder(rr.Body).Decode(&resp)
+	if resp["status"] != "cancelled" {
+		t.Errorf("expected status 'cancelled', got %q", resp["status"])
+	}
+
+	// Verify the backup set status was updated
+	var status string
+	s.db.QueryRow("SELECT status FROM backup_sets WHERE id = ?", setID).Scan(&status)
+	if status != "cancelled" {
+		t.Errorf("expected backup set status 'cancelled', got %q", status)
+	}
+}
+
+func TestCancelCompletedBackupSetFails(t *testing.T) {
+	s, setID := setupTestServerWithBackupSet(t, "completed")
+
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/backup-sets/%d/cancel", setID), nil)
+	rr := httptest.NewRecorder()
+	s.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestDeleteRunningBackupSetFails(t *testing.T) {
+	s, setID := setupTestServerWithBackupSet(t, "running")
+
+	req := httptest.NewRequest("DELETE", fmt.Sprintf("/api/v1/backup-sets/%d", setID), nil)
+	rr := httptest.NewRecorder()
+	s.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
