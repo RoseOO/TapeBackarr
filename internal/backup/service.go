@@ -712,7 +712,9 @@ func (s *Service) StreamToTape(ctx context.Context, sourcePath string, files []F
 		// For uncompressed streams the tar bytes equal tape bytes
 		return cr.bytesRead(), nil
 	} else {
-		// Direct tar to tape
+		// Direct tar to tape — no countingReader in this path.
+		// Returns 0 so finishTape falls back to totalBytes (correct for
+		// uncompressed streams where raw file size ≈ tape usage).
 		tarArgs = append(tarArgs, "-f", devicePath)
 		cmd = exec.CommandContext(ctx, "tar", tarArgs...)
 		cmd.Dir = sourcePath

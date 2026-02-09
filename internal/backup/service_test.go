@@ -1055,8 +1055,12 @@ func TestComputeChecksumsAsync(t *testing.T) {
 	// Create test files
 	file1 := filepath.Join(tmpDir, "file1.txt")
 	file2 := filepath.Join(tmpDir, "file2.txt")
-	os.WriteFile(file1, []byte("Hello, World!"), 0644)
-	os.WriteFile(file2, []byte("test content"), 0644)
+	if err := os.WriteFile(file1, []byte("Hello, World!"), 0644); err != nil {
+		t.Fatalf("failed to create file1: %v", err)
+	}
+	if err := os.WriteFile(file2, []byte("test content"), 0644); err != nil {
+		t.Fatalf("failed to create file2: %v", err)
+	}
 
 	files := []FileInfo{
 		{Path: file1, Size: 13},
@@ -1098,7 +1102,9 @@ func TestComputeChecksumsAsyncContextCancellation(t *testing.T) {
 	files := make([]FileInfo, 100)
 	for i := range files {
 		path := filepath.Join(tmpDir, fmt.Sprintf("file%d.txt", i))
-		os.WriteFile(path, []byte(fmt.Sprintf("content %d", i)), 0644)
+		if err := os.WriteFile(path, []byte(fmt.Sprintf("content %d", i)), 0644); err != nil {
+			t.Fatalf("failed to create file %d: %v", i, err)
+		}
 		files[i] = FileInfo{Path: path, Size: 10}
 	}
 
