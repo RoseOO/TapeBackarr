@@ -38,7 +38,6 @@
       label: 'Security',
       items: [
         { href: '/encryption', label: 'Encryption', icon: '🔒' },
-        { href: '/api-keys', label: 'API Keys', icon: '🔑' },
       ],
     },
     {
@@ -102,6 +101,12 @@
         <a href="/users" on:click={closeMobile}>
           <span class="icon">👥</span>
           <span class="label">Users</span>
+        </a>
+      </li>
+      <li class:active={currentPath.startsWith('/api-keys')}>
+        <a href="/api-keys" on:click={closeMobile}>
+          <span class="icon">🔑</span>
+          <span class="label">API Keys</span>
         </a>
       </li>
     {/if}
