@@ -657,8 +657,9 @@ func TestCountingReaderThrottledCallback(t *testing.T) {
 	if callbacks < 1 {
 		t.Errorf("expected at least 1 callback, got %d", callbacks)
 	}
-	// With 1024/64 = 16 reads in quick succession, callback should be throttled
-	// to far fewer than 16 calls
+	// With 1024/64 = 16 reads in quick succession (sub-millisecond), the 1-second
+	// throttle should limit callbacks to at most a few (first read + possible
+	// timer granularity races). Allow up to 5 as generous headroom.
 	if callbacks > 5 {
 		t.Errorf("expected throttled callbacks (<=5), got %d out of 16 reads", callbacks)
 	}
