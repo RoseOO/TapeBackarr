@@ -1190,20 +1190,29 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		return nil, fmt.Errorf("failed to position tape past label: %w", err)
 	}
 
-	// Stream to tape
-	s.updateProgress(job.ID, "streaming", fmt.Sprintf("Streaming %d files (%d bytes) to tape device %s", len(files), totalBytes, devicePath))
-	s.logger.Info("Streaming to tape", map[string]interface{}{
-		"device":      devicePath,
-		"file_count":  len(files),
-		"total_bytes": totalBytes,
-		"encrypted":   job.EncryptionEnabled,
-	})
-
+	// Determine encryption and compression settings
 	var encrypted bool
 	var encryptionKeyID *int64
 	var compressed bool
 	var compressionType models.CompressionType
 	useCompression := job.Compression != "" && job.Compression != models.CompressionNone
+	var encKey string
+
+	if job.EncryptionEnabled && job.EncryptionKeyID != nil {
+		key, err := s.GetEncryptionKey(ctx, *job.EncryptionKeyID)
+		if err != nil {
+			s.updateProgress(job.ID, "failed", "Encryption key not found: "+err.Error())
+			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "encryption key not found: "+err.Error())
+			return nil, fmt.Errorf("failed to get encryption key: %w", err)
+		}
+		encKey = key
+		encrypted = true
+		encryptionKeyID = job.EncryptionKeyID
+	}
+	if useCompression {
+		compressed = true
+		compressionType = job.Compression
+	}
 
 	// streamFailed is a helper to save state on stream failure for retry capability
 	streamFailed := func(errMsg string) {
@@ -1214,148 +1223,269 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		s.mu.Unlock()
 	}
 
-	if job.EncryptionEnabled && job.EncryptionKeyID != nil {
-		// Get encryption key
-		encKey, err := s.GetEncryptionKey(ctx, *job.EncryptionKeyID)
-		if err != nil {
-			s.updateProgress(job.ID, "failed", "Encryption key not found: "+err.Error())
-			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "encryption key not found: "+err.Error())
-			return nil, fmt.Errorf("failed to get encryption key: %w", err)
+	// streamBatch streams a batch of files to the tape device with the configured
+	// encryption and compression settings.
+	streamBatch := func(batch []FileInfo) error {
+		var batchBytes int64
+		for _, f := range batch {
+			batchBytes += f.Size
 		}
 
-		s.logger.Info("Encrypting backup with key", map[string]interface{}{
-			"key_id": *job.EncryptionKeyID,
+		if encrypted && useCompression {
+			s.updateProgress(job.ID, "streaming", fmt.Sprintf("Compressing (%s), encrypting and streaming %d files to tape %s...", job.Compression, len(batch), expectedLabel))
+			return s.StreamToTapeCompressedEncrypted(ctx, source.Path, batch, devicePath, job.Compression, encKey, progressCb, &pauseFlag)
+		} else if encrypted {
+			s.updateProgress(job.ID, "streaming", fmt.Sprintf("Encrypting and streaming %d files to tape %s...", len(batch), expectedLabel))
+			return s.StreamToTapeEncrypted(ctx, source.Path, batch, devicePath, encKey, progressCb, &pauseFlag)
+		} else if useCompression {
+			s.updateProgress(job.ID, "streaming", fmt.Sprintf("Compressing (%s) and streaming %d files to tape %s...", job.Compression, len(batch), expectedLabel))
+			return s.StreamToTapeCompressed(ctx, source.Path, batch, devicePath, job.Compression, progressCb, &pauseFlag)
+		}
+		s.updateProgress(job.ID, "streaming", fmt.Sprintf("Streaming %d files to tape %s...", len(batch), expectedLabel))
+		return s.StreamToTape(ctx, source.Path, batch, devicePath, progressCb, &pauseFlag)
+	}
+
+	// Check if all files fit on the current tape
+	remainingCapacity := tapeCapacity - tapeUsed
+	_, overflow := s.splitFilesForTape(files, remainingCapacity)
+
+	if overflow == nil {
+		// --- Single tape path: all files fit on this tape ---
+		s.updateProgress(job.ID, "streaming", fmt.Sprintf("Streaming %d files (%d bytes) to tape device %s", len(files), totalBytes, devicePath))
+		s.logger.Info("Streaming to tape (single tape)", map[string]interface{}{
+			"device":      devicePath,
+			"file_count":  len(files),
+			"total_bytes": totalBytes,
+			"encrypted":   encrypted,
 		})
 
-		if useCompression {
-			s.updateProgress(job.ID, "streaming", fmt.Sprintf("Compressing (%s), encrypting and streaming to tape...", job.Compression))
-			if err := s.StreamToTapeCompressedEncrypted(ctx, source.Path, files, devicePath, job.Compression, encKey, progressCb, &pauseFlag); err != nil {
-				s.updateProgress(job.ID, "failed", "Stream failed: "+err.Error())
-				s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
-				s.emitEvent("error", "backup", "Backup Failed", fmt.Sprintf("Job %s failed: %s", job.Name, err.Error()))
-				streamFailed(err.Error())
-				return nil, fmt.Errorf("failed to stream compressed encrypted backup to tape: %w", err)
-			}
-			compressed = true
-			compressionType = job.Compression
-		} else {
-			s.updateProgress(job.ID, "streaming", "Encrypting and streaming to tape...")
-			if err := s.StreamToTapeEncrypted(ctx, source.Path, files, devicePath, encKey, progressCb, &pauseFlag); err != nil {
-				s.updateProgress(job.ID, "failed", "Stream failed: "+err.Error())
-				s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
-				s.emitEvent("error", "backup", "Backup Failed", fmt.Sprintf("Job %s failed: %s", job.Name, err.Error()))
-				streamFailed(err.Error())
-				return nil, fmt.Errorf("failed to stream encrypted backup to tape: %w", err)
-			}
-		}
-		encrypted = true
-		encryptionKeyID = job.EncryptionKeyID
-	} else if useCompression {
-		s.updateProgress(job.ID, "streaming", fmt.Sprintf("Compressing (%s) and streaming to tape...", job.Compression))
-		if err := s.StreamToTapeCompressed(ctx, source.Path, files, devicePath, job.Compression, progressCb, &pauseFlag); err != nil {
-			s.updateProgress(job.ID, "failed", "Stream failed: "+err.Error())
-			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
-			s.emitEvent("error", "backup", "Backup Failed", fmt.Sprintf("Job %s failed: %s", job.Name, err.Error()))
-			streamFailed(err.Error())
-			return nil, fmt.Errorf("failed to stream compressed backup to tape: %w", err)
-		}
-		compressed = true
-		compressionType = job.Compression
-	} else {
-		if err := s.StreamToTape(ctx, source.Path, files, devicePath, progressCb, &pauseFlag); err != nil {
+		if err := streamBatch(files); err != nil {
 			s.updateProgress(job.ID, "failed", "Stream failed: "+err.Error())
 			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
 			s.emitEvent("error", "backup", "Backup Failed", fmt.Sprintf("Job %s failed: %s", job.Name, err.Error()))
 			streamFailed(err.Error())
 			return nil, fmt.Errorf("failed to stream to tape: %w", err)
 		}
-	}
 
-	s.updateProgress(job.ID, "cataloging", "Writing file mark...")
-	// Write file mark
-	if err := s.tapeService.WriteFileMark(ctx); err != nil {
-		s.logger.Warn("Failed to write file mark", map[string]interface{}{"error": err.Error()})
-	}
-
-	// Update catalog entries with checksums for data integrity
-	s.updateProgress(job.ID, "cataloging", fmt.Sprintf("Cataloging %d files and calculating checksums...", len(files)))
-	s.logger.Info("Calculating file checksums for data integrity", map[string]interface{}{
-		"file_count": len(files),
-	})
-	for i, f := range files {
-		relPath, _ := filepath.Rel(source.Path, f.Path)
-
-		// Update file counter in progress
-		s.mu.Lock()
-		if p, ok := s.activeJobs[job.ID]; ok {
-			p.FileCount = int64(i + 1)
+		if err := s.finishTape(finishTapeParams{
+			ctx: ctx, job: job, source: source,
+			backupSetID: backupSetID, tapeID: tapeID,
+			tapeLabel: expectedLabel, tapeUUID: expectedUUID,
+			driveSvc: driveSvc, files: files, totalBytes: totalBytes,
+			backupType: backupType, encrypted: encrypted,
+			encryptionKeyID: encryptionKeyID, compressed: compressed,
+			compressionType: compressionType, startTime: startTime,
+		}); err != nil {
+			s.logger.Warn("finishTape failed", map[string]interface{}{"error": err.Error()})
 		}
-		s.mu.Unlock()
-
-		// Calculate SHA256 checksum for data integrity verification
-		checksum, checksumErr := s.CalculateChecksum(f.Path)
-		if checksumErr != nil {
-			s.logger.Warn("Failed to calculate checksum", map[string]interface{}{
-				"file":  relPath,
-				"error": checksumErr.Error(),
-			})
-			checksum = "" // Store empty checksum if calculation fails
-		}
-
-		_, err := s.db.Exec(`
-			INSERT INTO catalog_entries (backup_set_id, file_path, file_size, file_mode, mod_time, checksum)
-			VALUES (?, ?, ?, ?, ?, ?)
-		`, backupSetID, relPath, f.Size, f.Mode, f.ModTime, checksum)
-		if err != nil {
-			s.logger.Warn("Failed to insert catalog entry", map[string]interface{}{
-				"file":  relPath,
-				"error": err.Error(),
-			})
-		}
-	}
-
-	// Write Table of Contents (TOC) to tape so the tape is self-describing.
-	// The TOC is written as file #2 (after label at #0 and backup data at #1).
-	s.updateProgress(job.ID, "cataloging", "Writing Table of Contents to tape...")
-	tocData := tape.NewTapeTOC(expectedLabel, expectedUUID, "")
-	tocBackupSet := tape.TOCBackupSet{
-		FileNumber:      1,
-		JobName:         job.Name,
-		BackupType:      string(backupType),
-		StartTime:       startTime,
-		EndTime:         time.Now(),
-		FileCount:       int64(len(files)),
-		TotalBytes:      totalBytes,
-		Encrypted:       encrypted,
-		Compressed:      compressed,
-		CompressionType: string(compressionType),
-		Files:           make([]tape.TOCFileEntry, 0, len(files)),
-	}
-	for _, f := range files {
-		relPath, _ := filepath.Rel(source.Path, f.Path)
-		// Look up checksum from the catalog entry we just inserted
-		var checksum string
-		if err := s.db.QueryRow("SELECT COALESCE(checksum, '') FROM catalog_entries WHERE backup_set_id = ? AND file_path = ?", backupSetID, relPath).Scan(&checksum); err != nil {
-			s.logger.Warn("Failed to look up checksum for TOC entry", map[string]interface{}{
-				"file":  relPath,
-				"error": err.Error(),
-			})
-		}
-		tocBackupSet.Files = append(tocBackupSet.Files, tape.TOCFileEntry{
-			Path:     relPath,
-			Size:     f.Size,
-			Mode:     f.Mode,
-			ModTime:  f.ModTime.Format(time.RFC3339),
-			Checksum: checksum,
-		})
-	}
-	tocData.BackupSets = append(tocData.BackupSets, tocBackupSet)
-	if err := driveSvc.WriteTOC(ctx, tocData); err != nil {
-		s.logger.Warn("Failed to write TOC to tape", map[string]interface{}{"error": err.Error()})
 	} else {
-		s.logger.Info("TOC written to tape", map[string]interface{}{
-			"file_count": len(files),
-			"tape_label": expectedLabel,
+		// --- Multi-tape spanning path ---
+		s.logger.Info("Backup requires multiple tapes", map[string]interface{}{
+			"total_bytes":        totalBytes,
+			"remaining_capacity": remainingCapacity,
+			"file_count":         len(files),
+		})
+		s.emitEvent("info", "backup", "Multi-Tape Backup", fmt.Sprintf("Job %s requires multiple tapes — spanning enabled", job.Name))
+
+		// Create spanning set record
+		spanResult, err := s.db.Exec(`
+			INSERT INTO tape_spanning_sets (job_id, total_bytes, total_files, status)
+			VALUES (?, ?, ?, 'in_progress')
+		`, job.ID, totalBytes, len(files))
+		if err != nil {
+			s.updateProgress(job.ID, "failed", "Failed to create spanning set: "+err.Error())
+			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
+			return nil, fmt.Errorf("failed to create spanning set: %w", err)
+		}
+		spanningSetID, _ := spanResult.LastInsertId()
+		usedTapeIDs := []int64{tapeID}
+
+		remaining := files
+		seqNum := 0
+		currentTapeID := tapeID
+		currentLabel := expectedLabel
+		currentUUID := expectedUUID
+		currentDriveSvc := driveSvc
+		currentBackupSetID := backupSetID
+		filesStartIndex := 0
+
+		for len(remaining) > 0 {
+			seqNum++
+
+			// Refresh remaining capacity for the current tape
+			var curCapacity, curUsed int64
+			if err := s.db.QueryRow("SELECT capacity_bytes, used_bytes FROM tapes WHERE id = ?", currentTapeID).Scan(&curCapacity, &curUsed); err != nil {
+				curCapacity = tapeCapacity
+				curUsed = tapeUsed
+			}
+			curRemaining := curCapacity - curUsed
+
+			batch, rest := s.splitFilesForTape(remaining, curRemaining)
+			if len(batch) == 0 {
+				// Tape has no usable capacity — need a new one immediately
+				rest = remaining
+				batch = nil
+			}
+
+			if batch != nil {
+				var batchBytes int64
+				for _, f := range batch {
+					batchBytes += f.Size
+				}
+
+				// For tapes after the first, we need a new backup set
+				if seqNum > 1 {
+					setResult, err := s.db.Exec(`
+						INSERT INTO backup_sets (job_id, tape_id, backup_type, start_time, status)
+						VALUES (?, ?, ?, ?, ?)
+					`, job.ID, currentTapeID, backupType, time.Now(), models.BackupSetStatusRunning)
+					if err != nil {
+						s.updateProgress(job.ID, "failed", "Failed to create backup set for tape "+currentLabel+": "+err.Error())
+						s.db.Exec("UPDATE tape_spanning_sets SET status = 'failed' WHERE id = ?", spanningSetID)
+						return nil, fmt.Errorf("failed to create backup set: %w", err)
+					}
+					currentBackupSetID, _ = setResult.LastInsertId()
+				}
+
+				s.logger.Info("Streaming batch to tape", map[string]interface{}{
+					"tape_label":      currentLabel,
+					"sequence":        seqNum,
+					"batch_files":     len(batch),
+					"batch_bytes":     batchBytes,
+					"remaining_files": len(rest),
+				})
+
+				if err := streamBatch(batch); err != nil {
+					s.updateProgress(job.ID, "failed", "Stream failed on tape "+currentLabel+": "+err.Error())
+					s.updateBackupSetStatus(currentBackupSetID, models.BackupSetStatusFailed, err.Error())
+					s.emitEvent("error", "backup", "Backup Failed", fmt.Sprintf("Job %s failed on tape %s: %s", job.Name, currentLabel, err.Error()))
+					s.db.Exec("UPDATE tape_spanning_sets SET status = 'failed' WHERE id = ?", spanningSetID)
+					streamFailed(err.Error())
+					return nil, fmt.Errorf("failed to stream to tape %s: %w", currentLabel, err)
+				}
+
+				// Finish this tape with its per-tape TOC
+				if err := s.finishTape(finishTapeParams{
+					ctx: ctx, job: job, source: source,
+					backupSetID: currentBackupSetID, tapeID: currentTapeID,
+					tapeLabel: currentLabel, tapeUUID: currentUUID,
+					pool: "", driveSvc: currentDriveSvc,
+					files: batch, totalBytes: batchBytes,
+					backupType: backupType, encrypted: encrypted,
+					encryptionKeyID: encryptionKeyID, compressed: compressed,
+					compressionType: compressionType, startTime: startTime,
+					spanningSetID: spanningSetID, sequenceNumber: seqNum,
+				}); err != nil {
+					s.logger.Warn("finishTape failed", map[string]interface{}{
+						"tape_label": currentLabel,
+						"error":      err.Error(),
+					})
+				}
+
+				// Record spanning member
+				s.db.Exec(`
+					INSERT INTO tape_spanning_members (spanning_set_id, tape_id, backup_set_id, sequence_number, bytes_written, files_start_index, files_end_index)
+					VALUES (?, ?, ?, ?, ?, ?, ?)
+				`, spanningSetID, currentTapeID, currentBackupSetID, seqNum,
+					batchBytes, filesStartIndex, filesStartIndex+len(batch)-1)
+				filesStartIndex += len(batch)
+			}
+
+			remaining = rest
+			if len(remaining) == 0 {
+				break
+			}
+
+			// Need another tape — request a change
+			s.updateProgress(job.ID, "waiting", fmt.Sprintf("Tape %s complete. Waiting for next tape... (%d files remaining)", currentLabel, len(remaining)))
+			s.emitEvent("warning", "backup", "Tape Change Required",
+				fmt.Sprintf("Job %s: tape %s is full. Please load a new tape from the pool. %d files remaining.", job.Name, currentLabel, len(remaining)))
+
+			// Try to allocate the next tape from the pool
+			nextTapeID, allocErr := s.allocateNextTape(ctx, job.PoolID, usedTapeIDs)
+			if allocErr != nil {
+				s.logger.Warn("Could not auto-allocate next tape", map[string]interface{}{"error": allocErr.Error()})
+			}
+
+			reqID, err := s.createTapeChangeRequest(ctx, currentTapeID, spanningSetID, "tape_full")
+			if err != nil {
+				s.updateProgress(job.ID, "failed", "Failed to create tape change request: "+err.Error())
+				s.db.Exec("UPDATE tape_spanning_sets SET status = 'failed' WHERE id = ?", spanningSetID)
+				return nil, fmt.Errorf("failed to create tape change request: %w", err)
+			}
+
+			// If we auto-allocated a tape, pre-fill the request with it for the operator to confirm
+			if allocErr == nil && nextTapeID > 0 {
+				s.db.Exec("UPDATE tape_change_requests SET new_tape_id = ? WHERE id = ?", nextTapeID, reqID)
+			}
+
+			// Wait for operator to complete the tape change
+			newTapeID, err := s.waitForTapeChange(ctx, reqID)
+			if err != nil {
+				s.updateProgress(job.ID, "failed", "Tape change failed: "+err.Error())
+				s.db.Exec("UPDATE tape_spanning_sets SET status = 'failed' WHERE id = ?", spanningSetID)
+				return nil, fmt.Errorf("tape change failed: %w", err)
+			}
+
+			// Set up the new tape
+			currentTapeID = newTapeID
+			usedTapeIDs = append(usedTapeIDs, currentTapeID)
+
+			if err := s.db.QueryRow("SELECT label, uuid FROM tapes WHERE id = ?", currentTapeID).Scan(&currentLabel, &currentUUID); err != nil {
+				s.updateProgress(job.ID, "failed", "Failed to look up new tape info: "+err.Error())
+				s.db.Exec("UPDATE tape_spanning_sets SET status = 'failed' WHERE id = ?", spanningSetID)
+				return nil, fmt.Errorf("failed to look up new tape: %w", err)
+			}
+
+			// Find the drive with the new tape loaded
+			if err := s.db.QueryRow("SELECT device_path FROM tape_drives WHERE current_tape_id = ?", currentTapeID).Scan(&devicePath); err != nil {
+				s.updateProgress(job.ID, "failed", "No drive found with new tape "+currentLabel)
+				s.db.Exec("UPDATE tape_spanning_sets SET status = 'failed' WHERE id = ?", spanningSetID)
+				return nil, fmt.Errorf("no drive found with new tape %s: %w", currentLabel, err)
+			}
+			currentDriveSvc = tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+
+			// Verify and position the new tape
+			physLabel, readErr := currentDriveSvc.ReadTapeLabel(ctx)
+			if readErr != nil || physLabel == nil || physLabel.Label != currentLabel || physLabel.UUID != currentUUID {
+				errMsg := fmt.Sprintf("new tape label verification failed for %s", currentLabel)
+				s.updateProgress(job.ID, "failed", errMsg)
+				s.db.Exec("UPDATE tape_spanning_sets SET status = 'failed' WHERE id = ?", spanningSetID)
+				return nil, fmt.Errorf("%s", errMsg)
+			}
+			if err := currentDriveSvc.SeekToFileNumber(ctx, 1); err != nil {
+				errMsg := fmt.Sprintf("failed to position new tape %s: %s", currentLabel, err.Error())
+				s.updateProgress(job.ID, "failed", errMsg)
+				s.db.Exec("UPDATE tape_spanning_sets SET status = 'failed' WHERE id = ?", spanningSetID)
+				return nil, fmt.Errorf("%s", errMsg)
+			}
+
+			// Update progress for the new tape
+			var newCapacity, newUsed int64
+			s.db.QueryRow("SELECT capacity_bytes, used_bytes FROM tapes WHERE id = ?", currentTapeID).Scan(&newCapacity, &newUsed)
+			s.mu.Lock()
+			if p, ok := s.activeJobs[job.ID]; ok {
+				p.TapeLabel = currentLabel
+				p.TapeCapacityBytes = newCapacity
+				p.TapeUsedBytes = newUsed
+				p.DevicePath = devicePath
+			}
+			s.mu.Unlock()
+
+			s.updateProgress(job.ID, "streaming", fmt.Sprintf("Continuing backup on tape %s (%d files remaining)", currentLabel, len(remaining)))
+		}
+
+		// Update spanning set as completed
+		s.db.Exec("UPDATE tape_spanning_sets SET total_tapes = ?, status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+			seqNum, spanningSetID)
+
+		// Update TOC total_tapes on all member tapes (now that we know the final count).
+		// This is informational — each tape already has its per-tape TOC written.
+		s.logger.Info("Spanning backup completed", map[string]interface{}{
+			"spanning_set_id": spanningSetID,
+			"total_tapes":     seqNum,
+			"total_files":     len(files),
+			"total_bytes":     totalBytes,
 		})
 	}
 
@@ -1366,50 +1496,8 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		VALUES (?, ?, ?, ?, ?)
 	`, source.ID, backupSetID, len(files), totalBytes, snapshotData)
 
-	// Update backup set status
-	endTime := time.Now()
-	s.db.Exec(`
-		UPDATE backup_sets SET 
-			end_time = ?, 
-			status = ?, 
-			file_count = ?, 
-			total_bytes = ?,
-			encrypted = ?,
-			encryption_key_id = ?,
-			compressed = ?,
-			compression_type = ?
-		WHERE id = ?
-	`, endTime, models.BackupSetStatusCompleted, len(files), totalBytes, encrypted, encryptionKeyID, compressed, compressionType, backupSetID)
-
-	// Update tape usage
-	s.db.Exec(`
-		UPDATE tapes SET 
-			used_bytes = used_bytes + ?, 
-			write_count = write_count + 1,
-			last_written_at = ?,
-			status = CASE WHEN status = 'blank' THEN 'active' ELSE status END
-		WHERE id = ?
-	`, totalBytes, endTime, tapeID)
-
-	// Update tape with encryption key info for library visibility
-	if encrypted && encryptionKeyID != nil {
-		var keyFingerprint, keyName string
-		if err := s.db.QueryRow("SELECT key_fingerprint, name FROM encryption_keys WHERE id = ?", *encryptionKeyID).Scan(&keyFingerprint, &keyName); err != nil {
-			s.logger.Warn("Failed to look up encryption key for tape tracking", map[string]interface{}{
-				"encryption_key_id": *encryptionKeyID,
-				"error":             err.Error(),
-			})
-		} else if keyFingerprint != "" {
-			if _, err := s.db.Exec("UPDATE tapes SET encryption_key_fingerprint = ?, encryption_key_name = ? WHERE id = ?", keyFingerprint, keyName, tapeID); err != nil {
-				s.logger.Warn("Failed to update tape encryption tracking", map[string]interface{}{
-					"tape_id": tapeID,
-					"error":   err.Error(),
-				})
-			}
-		}
-	}
-
 	// Update job last run
+	endTime := time.Now()
 	s.db.Exec("UPDATE backup_jobs SET last_run_at = ? WHERE id = ?", endTime, job.ID)
 
 	s.updateProgress(job.ID, "completed", fmt.Sprintf("Backup completed: %d files, %d bytes in %s", len(files), totalBytes, endTime.Sub(startTime).String()))
@@ -1452,6 +1540,255 @@ func (s *Service) updateBackupSetStatus(id int64, status models.BackupSetStatus,
 			"backup_set_id": id,
 			"error":         errorMsg,
 		})
+	}
+}
+
+// finishTapeParams holds the parameters for finalizing a single tape during a backup.
+type finishTapeParams struct {
+	ctx             context.Context
+	job             *models.BackupJob
+	source          *models.BackupSource
+	backupSetID     int64
+	tapeID          int64
+	tapeLabel       string
+	tapeUUID        string
+	pool            string
+	driveSvc        *tape.Service
+	files           []FileInfo // only the files written to this specific tape
+	totalBytes      int64
+	backupType      models.BackupType
+	encrypted       bool
+	encryptionKeyID *int64
+	compressed      bool
+	compressionType models.CompressionType
+	startTime       time.Time
+	spanningSetID   int64 // 0 if not spanning
+	sequenceNumber  int   // 1-based tape index within spanning set
+	totalTapes      int   // 0 if not yet known (updated later)
+}
+
+// finishTape writes the per-tape TOC and updates catalog/tape records for
+// the files written to this specific tape. Each tape in a multi-tape backup
+// receives a self-describing TOC containing only its own files.
+func (s *Service) finishTape(p finishTapeParams) error {
+	s.updateProgress(p.job.ID, "cataloging", "Writing file mark...")
+	if err := p.driveSvc.WriteFileMark(p.ctx); err != nil {
+		s.logger.Warn("Failed to write file mark", map[string]interface{}{"error": err.Error()})
+	}
+
+	// Catalog the files written to this tape with checksums
+	s.updateProgress(p.job.ID, "cataloging", fmt.Sprintf("Cataloging %d files on tape %s...", len(p.files), p.tapeLabel))
+	s.logger.Info("Cataloging files for tape", map[string]interface{}{
+		"tape_label": p.tapeLabel,
+		"file_count": len(p.files),
+	})
+	for i, f := range p.files {
+		relPath, _ := filepath.Rel(p.source.Path, f.Path)
+
+		s.mu.Lock()
+		if prog, ok := s.activeJobs[p.job.ID]; ok {
+			prog.FileCount = int64(i + 1)
+		}
+		s.mu.Unlock()
+
+		checksum, checksumErr := s.CalculateChecksum(f.Path)
+		if checksumErr != nil {
+			s.logger.Warn("Failed to calculate checksum", map[string]interface{}{
+				"file":  relPath,
+				"error": checksumErr.Error(),
+			})
+			checksum = ""
+		}
+
+		_, err := s.db.Exec(`
+			INSERT INTO catalog_entries (backup_set_id, file_path, file_size, file_mode, mod_time, checksum)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`, p.backupSetID, relPath, f.Size, f.Mode, f.ModTime, checksum)
+		if err != nil {
+			s.logger.Warn("Failed to insert catalog entry", map[string]interface{}{
+				"file":  relPath,
+				"error": err.Error(),
+			})
+		}
+	}
+
+	// Write per-tape TOC containing only the files on this tape
+	s.updateProgress(p.job.ID, "cataloging", fmt.Sprintf("Writing TOC for tape %s (%d files)...", p.tapeLabel, len(p.files)))
+	tocData := tape.NewTapeTOC(p.tapeLabel, p.tapeUUID, p.pool)
+	tocData.SpanningSetID = p.spanningSetID
+	tocData.SequenceNumber = p.sequenceNumber
+	tocData.TotalTapes = p.totalTapes
+
+	tocBackupSet := tape.TOCBackupSet{
+		FileNumber:      1,
+		JobName:         p.job.Name,
+		BackupType:      string(p.backupType),
+		StartTime:       p.startTime,
+		EndTime:         time.Now(),
+		FileCount:       int64(len(p.files)),
+		TotalBytes:      p.totalBytes,
+		Encrypted:       p.encrypted,
+		Compressed:      p.compressed,
+		CompressionType: string(p.compressionType),
+		Files:           make([]tape.TOCFileEntry, 0, len(p.files)),
+	}
+	for _, f := range p.files {
+		relPath, _ := filepath.Rel(p.source.Path, f.Path)
+		var checksum string
+		if err := s.db.QueryRow("SELECT COALESCE(checksum, '') FROM catalog_entries WHERE backup_set_id = ? AND file_path = ?", p.backupSetID, relPath).Scan(&checksum); err != nil {
+			s.logger.Warn("Failed to look up checksum for TOC entry", map[string]interface{}{
+				"file":  relPath,
+				"error": err.Error(),
+			})
+		}
+		tocBackupSet.Files = append(tocBackupSet.Files, tape.TOCFileEntry{
+			Path:     relPath,
+			Size:     f.Size,
+			Mode:     f.Mode,
+			ModTime:  f.ModTime.Format(time.RFC3339),
+			Checksum: checksum,
+		})
+	}
+	tocData.BackupSets = append(tocData.BackupSets, tocBackupSet)
+	if err := p.driveSvc.WriteTOC(p.ctx, tocData); err != nil {
+		s.logger.Warn("Failed to write TOC to tape", map[string]interface{}{"error": err.Error()})
+	} else {
+		s.logger.Info("Per-tape TOC written", map[string]interface{}{
+			"file_count":      len(p.files),
+			"tape_label":      p.tapeLabel,
+			"spanning_set_id": p.spanningSetID,
+			"sequence_number": p.sequenceNumber,
+		})
+	}
+
+	// Update backup set for this tape
+	endTime := time.Now()
+	s.db.Exec(`
+		UPDATE backup_sets SET 
+			end_time = ?, status = ?, file_count = ?, total_bytes = ?,
+			encrypted = ?, encryption_key_id = ?, compressed = ?, compression_type = ?
+		WHERE id = ?
+	`, endTime, models.BackupSetStatusCompleted, len(p.files), p.totalBytes,
+		p.encrypted, p.encryptionKeyID, p.compressed, p.compressionType, p.backupSetID)
+
+	// Update tape usage
+	s.db.Exec(`
+		UPDATE tapes SET 
+			used_bytes = used_bytes + ?, write_count = write_count + 1,
+			last_written_at = ?,
+			status = CASE WHEN status = 'blank' THEN 'active' ELSE status END
+		WHERE id = ?
+	`, p.totalBytes, endTime, p.tapeID)
+
+	// Track encryption key on tape if applicable
+	if p.encrypted && p.encryptionKeyID != nil {
+		var keyFingerprint, keyName string
+		if err := s.db.QueryRow("SELECT key_fingerprint, name FROM encryption_keys WHERE id = ?", *p.encryptionKeyID).Scan(&keyFingerprint, &keyName); err != nil {
+			s.logger.Warn("Failed to look up encryption key for tape tracking", map[string]interface{}{
+				"encryption_key_id": *p.encryptionKeyID,
+				"error":             err.Error(),
+			})
+		} else if keyFingerprint != "" {
+			if _, err := s.db.Exec("UPDATE tapes SET encryption_key_fingerprint = ?, encryption_key_name = ? WHERE id = ?", keyFingerprint, keyName, p.tapeID); err != nil {
+				s.logger.Warn("Failed to update tape encryption tracking", map[string]interface{}{
+					"tape_id": p.tapeID,
+					"error":   err.Error(),
+				})
+			}
+		}
+	}
+
+	return nil
+}
+
+// splitFilesForTape partitions files into a batch that fits on the current tape
+// and the remaining files for subsequent tapes. It reserves ~10% of remaining
+// capacity for tar headers, file marks, and the TOC.
+func (s *Service) splitFilesForTape(files []FileInfo, remainingCapacity int64) (thisTape []FileInfo, remaining []FileInfo) {
+	usableCapacity := (remainingCapacity * 9) / 10
+	if usableCapacity <= 0 {
+		return nil, files
+	}
+
+	var currentSize int64
+	for i, f := range files {
+		// Account for tar header overhead (~1KB per file including padding)
+		fileWithOverhead := f.Size + 1024
+		if currentSize+fileWithOverhead > usableCapacity && i > 0 {
+			return files[:i], files[i:]
+		}
+		currentSize += fileWithOverhead
+	}
+	return files, nil
+}
+
+// allocateNextTape finds the next available tape in the given pool, excluding
+// tapes already used in this backup. Returns the tape ID or an error.
+func (s *Service) allocateNextTape(ctx context.Context, poolID int64, excludeTapeIDs []int64) (int64, error) {
+	query := `
+		SELECT id FROM tapes
+		WHERE pool_id = ? AND status IN ('active', 'blank')
+		AND (capacity_bytes - used_bytes) > 0
+	`
+	args := []interface{}{poolID}
+
+	if len(excludeTapeIDs) > 0 {
+		placeholders := make([]string, len(excludeTapeIDs))
+		for i, id := range excludeTapeIDs {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		query += " AND id NOT IN (" + strings.Join(placeholders, ",") + ")"
+	}
+
+	query += " ORDER BY used_bytes ASC LIMIT 1"
+
+	var nextTapeID int64
+	if err := s.db.QueryRow(query, args...).Scan(&nextTapeID); err != nil {
+		return 0, fmt.Errorf("no available tape in pool: %w", err)
+	}
+	return nextTapeID, nil
+}
+
+// createTapeChangeRequest inserts a tape change request and notifies the operator.
+func (s *Service) createTapeChangeRequest(ctx context.Context, currentTapeID int64, spanningSetID int64, reason string) (int64, error) {
+	result, err := s.db.Exec(`
+		INSERT INTO tape_change_requests (spanning_set_id, current_tape_id, reason, status, requested_at)
+		VALUES (?, ?, ?, 'pending', CURRENT_TIMESTAMP)
+	`, spanningSetID, currentTapeID, reason)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create tape change request: %w", err)
+	}
+	id, _ := result.LastInsertId()
+	return id, nil
+}
+
+// waitForTapeChange polls the tape_change_requests table until the request is
+// completed by the operator loading a new tape. Returns the new tape ID.
+func (s *Service) waitForTapeChange(ctx context.Context, requestID int64) (int64, error) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			// Cancel the pending request
+			s.db.Exec("UPDATE tape_change_requests SET status = 'cancelled' WHERE id = ? AND status = 'pending'", requestID)
+			return 0, ctx.Err()
+		case <-ticker.C:
+			var status string
+			var newTapeID *int64
+			err := s.db.QueryRow("SELECT status, new_tape_id FROM tape_change_requests WHERE id = ?", requestID).Scan(&status, &newTapeID)
+			if err != nil {
+				return 0, fmt.Errorf("failed to check tape change request: %w", err)
+			}
+			if status == "completed" && newTapeID != nil {
+				return *newTapeID, nil
+			}
+			if status == "cancelled" {
+				return 0, fmt.Errorf("tape change request was cancelled")
+			}
+		}
 	}
 }
 
