@@ -26,10 +26,14 @@ func New(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("failed to create database directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
+
+	// SQLite only supports one writer at a time; limit open connections
+	// to avoid SQLITE_BUSY errors under concurrent access.
+	db.SetMaxOpenConns(1)
 
 	// Test connection
 	if err := db.Ping(); err != nil {

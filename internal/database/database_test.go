@@ -82,6 +82,79 @@ func TestMigrate(t *testing.T) {
 	}
 }
 
+func TestBusyTimeoutConfigured(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	// Verify busy_timeout is set (should be 5000ms)
+	var busyTimeout int
+	err = db.QueryRow("PRAGMA busy_timeout").Scan(&busyTimeout)
+	if err != nil {
+		t.Fatalf("failed to query busy_timeout: %v", err)
+	}
+	if busyTimeout != 5000 {
+		t.Errorf("expected busy_timeout 5000, got %d", busyTimeout)
+	}
+
+	// Verify WAL mode is enabled
+	var journalMode string
+	err = db.QueryRow("PRAGMA journal_mode").Scan(&journalMode)
+	if err != nil {
+		t.Fatalf("failed to query journal_mode: %v", err)
+	}
+	if journalMode != "wal" {
+		t.Errorf("expected journal_mode 'wal', got '%s'", journalMode)
+	}
+}
+
+func TestConcurrentAccess(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	db, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	// Create a test table
+	_, err = db.Exec("CREATE TABLE test_concurrent (id INTEGER PRIMARY KEY, value TEXT)")
+	if err != nil {
+		t.Fatalf("failed to create table: %v", err)
+	}
+
+	// Run concurrent inserts - should not get SQLITE_BUSY with proper settings
+	errs := make(chan error, 10)
+	for i := 0; i < 10; i++ {
+		go func(i int) {
+			_, err := db.Exec("INSERT INTO test_concurrent (value) VALUES (?)", i)
+			errs <- err
+		}(i)
+	}
+
+	for i := 0; i < 10; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent insert %d failed: %v", i, err)
+		}
+	}
+
+	// Verify all rows inserted
+	var count int
+	err = db.QueryRow("SELECT COUNT(*) FROM test_concurrent").Scan(&count)
+	if err != nil {
+		t.Fatalf("failed to count rows: %v", err)
+	}
+	if count != 10 {
+		t.Errorf("expected 10 rows, got %d", count)
+	}
+}
+
 func TestMigrateIdempotent(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
