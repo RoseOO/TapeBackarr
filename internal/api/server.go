@@ -1778,6 +1778,7 @@ func (s *Server) handleListDrives(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				if !found {
+					drives[i].CurrentTapeID = nil
 					drives[i].UnknownTape = &models.UnknownTapeInfo{
 						Label:     labelData.Label,
 						UUID:      labelData.UUID,
@@ -1799,6 +1800,9 @@ func (s *Server) handleListDrives(w http.ResponseWriter, r *http.Request) {
 						})
 					}
 				}
+			} else {
+				// No label data found — clear stale tape association
+				drives[i].CurrentTapeID = nil
 			}
 
 			// Try to get vendor/model info if missing
@@ -1819,6 +1823,7 @@ func (s *Server) handleListDrives(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			drives[i].Status = models.DriveStatusOffline
+			drives[i].CurrentTapeID = nil
 		}
 
 		// Update the DB with the probed status
@@ -1943,6 +1948,14 @@ func (s *Server) handleEjectTape(w http.ResponseWriter, r *http.Request) {
 
 	if cache := s.tapeService.GetLabelCache(); cache != nil {
 		cache.Invalidate(s.tapeService.DevicePath())
+	}
+
+	// Clear current_tape_id in DB so the drive no longer shows a stale tape
+	if _, err := s.db.Exec("UPDATE tape_drives SET current_tape_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?", driveID); err != nil {
+		s.logger.Warn("Failed to clear current_tape_id after eject", map[string]interface{}{
+			"drive_id": driveID,
+			"error":    err.Error(),
+		})
 	}
 
 	if s.eventBus != nil {
