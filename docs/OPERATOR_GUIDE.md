@@ -14,8 +14,11 @@ Quick reference guide for operators managing daily tape backup operations.
 | Restore files | Restore → Search → Select → Insert tape → Restore |
 | View recent errors | Logs → Filter by Error level |
 | Switch tape drive | Drives → Select drive → Click "Select" |
+| Clean drive | Drives → Select drive → Click "Clean" |
+| Retry failed job | Jobs → Select job → Click "Retry" |
 | Backup database | API: POST /api/v1/database-backup/backup |
 | View documentation | Sidebar → Documentation (📖) |
+| Library inventory | Libraries → Select library → Run Inventory |
 
 ### Emergency Contacts
 
@@ -364,6 +367,7 @@ mt -f /dev/nst0 rewind
 
 | Term | Definition |
 |------|------------|
+| **Autochanger** | Tape library that automatically loads/unloads tapes |
 | **Backup Set** | A single backup operation, may span multiple tapes |
 | **Catalog** | Database of all backed-up files and their locations |
 | **File Mark** | Tape marker separating backup sets |
@@ -373,6 +377,7 @@ mt -f /dev/nst0 rewind
 | **Pool** | Group of tapes with same purpose (DAILY, WEEKLY, etc.) |
 | **Spanning** | Backup continuing across multiple tapes |
 | **Tape Label** | Identifier written at the start of the tape |
+| **TOC** | Table of Contents — JSON file catalog written on tape after backup data |
 
 ---
 
@@ -421,6 +426,47 @@ If your system has multiple tape drives, you can select which drive to use.
 | 🟡 Busy | Drive is performing an operation |
 | 🔴 Offline | Drive is not responding |
 | ⛔ Error | Drive has encountered an error |
+
+---
+
+## Tape Library (Autochanger) Operations
+
+If your setup includes a tape library (autochanger), TapeBackarr can control it directly via the **Libraries** section.
+
+### Adding a Library
+
+1. Navigate to **Libraries** in the sidebar (or use the API)
+2. Click **Scan for Libraries** to auto-detect SCSI medium changers
+3. Select a detected library or add manually with device path (e.g., `/dev/sg3`)
+
+### Running an Inventory
+
+1. Go to the library detail page
+2. Click **Run Inventory**
+3. The system runs `mtx status` and updates all slot information
+4. Barcodes are matched to tapes in the database where possible
+
+### Loading and Unloading Tapes
+
+| Action | Description |
+|--------|-------------|
+| **Load** | Move a tape from a storage slot into a drive |
+| **Unload** | Return a tape from a drive to a storage slot |
+| **Transfer** | Move a tape between two storage slots |
+
+### Slot Types
+
+| Type | Description |
+|------|-------------|
+| **Storage** | Standard tape storage slots |
+| **Import/Export** | Mail slots for inserting/removing tapes from the library |
+| **Drive** | Slots representing tape drive bays |
+
+### Library Automation Tips
+
+- Run an inventory after physically adding or removing tapes
+- Use batch label with a library to label many tapes sequentially
+- Combine library operations with scheduled backup jobs for fully automated tape rotation
 
 ---
 

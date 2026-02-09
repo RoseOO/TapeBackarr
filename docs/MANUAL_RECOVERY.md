@@ -167,7 +167,7 @@ dd if=/dev/nst0 bs=512 count=1 2>/dev/null
 
 Output example:
 ```
-TAPEBACKARR|WEEKLY-001|1705334400
+TAPEBACKARR|WEEKLY-001|a1b2c3d4-e5f6-7890-abcd-ef1234567890|WEEKLY|1705334400||none
 ```
 
 ### 5. Skip to File Mark

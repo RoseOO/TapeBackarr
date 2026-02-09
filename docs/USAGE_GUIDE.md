@@ -151,7 +151,7 @@ TapeBackarr writes a label block at the beginning of each tape:
 3. Click **Write Label**
 4. Confirm the operation (this will rewind and write to the tape)
 
-The label format is: `TAPEBACKARR|label|timestamp`
+The label format is: `TAPEBACKARR|label|uuid|pool|timestamp|encryption_fingerprint|compression_type`
 
 ### Tape Pools
 
