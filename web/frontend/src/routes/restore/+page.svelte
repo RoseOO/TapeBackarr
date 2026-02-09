@@ -87,9 +87,11 @@
     selectedFiles = [];
     catalogLoading = true;
     try {
-      catalogEntries = await api.getBackupFiles(set.id);
+      const result = await api.getBackupFiles(set.id);
+      catalogEntries = Array.isArray(result) ? result : [];
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load catalog';
+      catalogEntries = [];
     } finally {
       catalogLoading = false;
     }

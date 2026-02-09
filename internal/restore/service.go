@@ -618,7 +618,9 @@ func calculateChecksum(path string) (string, error) {
 // BrowseCatalog returns files in a backup set, optionally filtered by path prefix
 func (s *Service) BrowseCatalog(ctx context.Context, backupSetID int64, pathPrefix string, limit int) ([]models.CatalogEntry, error) {
 	query := `
-		SELECT id, backup_set_id, file_path, file_size, file_mode, mod_time, checksum, block_offset
+		SELECT id, backup_set_id, file_path, file_size,
+		       COALESCE(file_mode, 0), COALESCE(mod_time, ''),
+		       COALESCE(checksum, ''), COALESCE(block_offset, 0)
 		FROM catalog_entries
 		WHERE backup_set_id = ?
 	`
@@ -638,11 +640,17 @@ func (s *Service) BrowseCatalog(ctx context.Context, backupSetID int64, pathPref
 	}
 	defer rows.Close()
 
-	var entries []models.CatalogEntry
+	entries := make([]models.CatalogEntry, 0)
 	for rows.Next() {
 		var e models.CatalogEntry
-		if err := rows.Scan(&e.ID, &e.BackupSetID, &e.FilePath, &e.FileSize, &e.FileMode, &e.ModTime, &e.Checksum, &e.BlockOffset); err != nil {
+		var modTimeStr string
+		if err := rows.Scan(&e.ID, &e.BackupSetID, &e.FilePath, &e.FileSize, &e.FileMode, &modTimeStr, &e.Checksum, &e.BlockOffset); err != nil {
 			continue
+		}
+		if modTimeStr != "" {
+			if t, err := time.Parse("2006-01-02 15:04:05", modTimeStr); err == nil {
+				e.ModTime = t
+			}
 		}
 		entries = append(entries, e)
 	}

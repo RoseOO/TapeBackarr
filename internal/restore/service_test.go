@@ -193,6 +193,75 @@ func TestGetFolderContents(t *testing.T) {
 	}
 }
 
+func TestBrowseCatalog(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	backupSetID := setupTestData(t, db)
+
+	svc := &Service{db: db}
+
+	t.Run("returns all entries", func(t *testing.T) {
+		entries, err := svc.BrowseCatalog(context.Background(), backupSetID, "", 100)
+		if err != nil {
+			t.Fatalf("BrowseCatalog failed: %v", err)
+		}
+		if len(entries) != 5 {
+			t.Errorf("expected 5 entries, got %d", len(entries))
+		}
+	})
+
+	t.Run("filters by prefix", func(t *testing.T) {
+		entries, err := svc.BrowseCatalog(context.Background(), backupSetID, "documents/", 100)
+		if err != nil {
+			t.Fatalf("BrowseCatalog failed: %v", err)
+		}
+		if len(entries) != 4 {
+			t.Errorf("expected 4 entries, got %d", len(entries))
+		}
+	})
+
+	t.Run("returns empty slice for non-existent set", func(t *testing.T) {
+		entries, err := svc.BrowseCatalog(context.Background(), 99999, "", 100)
+		if err != nil {
+			t.Fatalf("BrowseCatalog failed: %v", err)
+		}
+		if entries == nil {
+			t.Error("expected non-nil empty slice, got nil")
+		}
+		if len(entries) != 0 {
+			t.Errorf("expected 0 entries, got %d", len(entries))
+		}
+	})
+
+	t.Run("handles NULL nullable columns", func(t *testing.T) {
+		// Insert entries with NULL file_mode, mod_time, checksum, and block_offset
+		_, err := db.Exec(`INSERT INTO catalog_entries (backup_set_id, file_path, file_size) VALUES (?, ?, ?)`,
+			backupSetID, "nulltest/file1.dat", 4096)
+		if err != nil {
+			t.Fatalf("failed to insert catalog entry with NULLs: %v", err)
+		}
+		_, err = db.Exec(`INSERT INTO catalog_entries (backup_set_id, file_path, file_size) VALUES (?, ?, ?)`,
+			backupSetID, "nulltest/file2.dat", 8192)
+		if err != nil {
+			t.Fatalf("failed to insert catalog entry with NULLs: %v", err)
+		}
+
+		entries, err := svc.BrowseCatalog(context.Background(), backupSetID, "nulltest/", 100)
+		if err != nil {
+			t.Fatalf("BrowseCatalog failed: %v", err)
+		}
+		if len(entries) != 2 {
+			t.Errorf("expected 2 entries with NULL columns, got %d", len(entries))
+		}
+		for _, e := range entries {
+			if e.FileSize == 0 {
+				t.Errorf("expected non-zero file size for %s", e.FilePath)
+			}
+		}
+	})
+}
+
 func TestRestoreRequestFolderPaths(t *testing.T) {
 	// Test that RestoreRequest properly supports folder paths
 	req := RestoreRequest{
