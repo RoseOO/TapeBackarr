@@ -115,7 +115,8 @@
   function parsePatterns(json: string): string[] {
     if (!json) return [];
     try {
-      return JSON.parse(json);
+      const parsed = JSON.parse(json);
+      return Array.isArray(parsed) ? parsed : [];
     } catch {
       return [];
     }

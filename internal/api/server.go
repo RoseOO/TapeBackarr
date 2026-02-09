@@ -1992,6 +1992,12 @@ func (s *Server) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.IncludePatterns == nil {
+		req.IncludePatterns = []string{}
+	}
+	if req.ExcludePatterns == nil {
+		req.ExcludePatterns = []string{}
+	}
 	includeJSON, _ := json.Marshal(req.IncludePatterns)
 	excludeJSON, _ := json.Marshal(req.ExcludePatterns)
 

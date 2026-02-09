@@ -273,7 +273,7 @@
             </div>
           {/if}
           <div class="terminal-output">
-            {#each job.log_lines as line}
+            {#each (job.log_lines || []) as line}
               <div class="terminal-line">{line}</div>
             {/each}
           </div>
