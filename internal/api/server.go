@@ -2908,6 +2908,46 @@ func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Delete child records that reference backup_sets belonging to this job.
+	// Table names are hardcoded; no user input is used in the query.
+	backupSetChildren := []string{"catalog_entries", "snapshots", "restore_operations", "tape_spanning_members"}
+	for _, table := range backupSetChildren {
+		query := fmt.Sprintf("DELETE FROM %s WHERE backup_set_id IN (SELECT id FROM backup_sets WHERE job_id = ?)", table)
+		if _, err := s.db.Exec(query, id); err != nil {
+			if s.logger != nil {
+				s.logger.Warn("failed to delete child references for job", map[string]interface{}{"table": table, "job_id": id, "error": err.Error()})
+			}
+		}
+	}
+
+	// Delete tape_change_requests referencing job_executions for this job (before deleting job_executions)
+	if _, err := s.db.Exec("DELETE FROM tape_change_requests WHERE job_execution_id IN (SELECT id FROM job_executions WHERE job_id = ?)", id); err != nil {
+		if s.logger != nil {
+			s.logger.Warn("failed to delete tape_change_requests for job", map[string]interface{}{"job_id": id, "error": err.Error()})
+		}
+	}
+
+	// Delete job_executions referencing this job
+	if _, err := s.db.Exec("DELETE FROM job_executions WHERE job_id = ?", id); err != nil {
+		if s.logger != nil {
+			s.logger.Warn("failed to delete job_executions for job", map[string]interface{}{"job_id": id, "error": err.Error()})
+		}
+	}
+
+	// Delete tape_spanning_sets referencing this job
+	if _, err := s.db.Exec("DELETE FROM tape_spanning_sets WHERE job_id = ?", id); err != nil {
+		if s.logger != nil {
+			s.logger.Warn("failed to delete tape_spanning_sets for job", map[string]interface{}{"job_id": id, "error": err.Error()})
+		}
+	}
+
+	// Delete backup_sets for this job
+	if _, err := s.db.Exec("DELETE FROM backup_sets WHERE job_id = ?", id); err != nil {
+		if s.logger != nil {
+			s.logger.Warn("failed to delete backup_sets for job", map[string]interface{}{"job_id": id, "error": err.Error()})
+		}
+	}
+
 	_, err = s.db.Exec("DELETE FROM backup_jobs WHERE id = ?", id)
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
@@ -5751,6 +5791,13 @@ func (s *Server) handleProxmoxDeleteJob(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		s.respondError(w, http.StatusBadRequest, "invalid job id")
 		return
+	}
+
+	// Delete child records referencing this Proxmox backup job
+	if _, err := s.db.Exec("DELETE FROM proxmox_job_executions WHERE job_id = ?", id); err != nil {
+		if s.logger != nil {
+			s.logger.Warn("failed to delete proxmox_job_executions for job", map[string]interface{}{"job_id": id, "error": err.Error()})
+		}
 	}
 
 	_, err = s.db.Exec("DELETE FROM proxmox_backup_jobs WHERE id = ?", id)
