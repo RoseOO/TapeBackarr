@@ -1533,14 +1533,24 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 	// Instead of failing immediately when the tape is missing or wrong, we notify the
 	// operator and wait for them to insert the correct tape.
 	const tapeRetryInterval = 10 * time.Second
-	notifiedUser := false
+	const maxConsecutiveErrors = 30 // give up after ~5 minutes of persistent drive errors
+	lastNotifiedIssue := ""
+	consecutiveErrors := 0
 	for {
 		// Check if a tape is loaded in the drive
 		tapeLoaded, loadErr := driveSvc.IsTapeLoaded(ctx)
 		if loadErr != nil {
+			consecutiveErrors++
 			s.logger.Warn("Error checking tape status, will retry", map[string]interface{}{
-				"error": loadErr.Error(), "tape": expectedLabel,
+				"error": loadErr.Error(), "tape": expectedLabel, "consecutive_errors": consecutiveErrors,
 			})
+			if consecutiveErrors >= maxConsecutiveErrors {
+				s.updateProgress(job.ID, "failed", "Persistent drive error: "+loadErr.Error())
+				s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "persistent drive error")
+				return nil, fmt.Errorf("persistent drive error after %d retries: %w", consecutiveErrors, loadErr)
+			}
+		} else {
+			consecutiveErrors = 0
 		}
 
 		if loadErr != nil || !tapeLoaded {
@@ -1548,13 +1558,14 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 			waitMsg := fmt.Sprintf("No tape found in drive %s. Please insert tape %q to continue backup job %q.",
 				devicePath, expectedLabel, job.Name)
 			s.updateProgress(job.ID, "waiting", waitMsg)
-			if !notifiedUser {
+			issueKey := "no_tape"
+			if lastNotifiedIssue != issueKey {
 				s.emitEvent("warning", "backup", "Tape Required",
 					fmt.Sprintf("Job %s: no tape in drive. Please insert tape %s.", job.Name, expectedLabel))
 				if s.WrongTapeCallback != nil {
 					s.WrongTapeCallback(ctx, expectedLabel, "no tape loaded")
 				}
-				notifiedUser = true
+				lastNotifiedIssue = issueKey
 			}
 			select {
 			case <-ctx.Done():
@@ -1575,13 +1586,14 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 			waitMsg := fmt.Sprintf("Cannot read tape label in drive %s (error: %s). Please check tape %q is correctly inserted.",
 				devicePath, readErr.Error(), expectedLabel)
 			s.updateProgress(job.ID, "waiting", waitMsg)
-			if !notifiedUser {
+			issueKey := "read_error"
+			if lastNotifiedIssue != issueKey {
 				s.emitEvent("warning", "backup", "Tape Read Error",
 					fmt.Sprintf("Job %s: cannot read tape label. Please check tape %s.", job.Name, expectedLabel))
 				if s.WrongTapeCallback != nil {
 					s.WrongTapeCallback(ctx, expectedLabel, "unreadable")
 				}
-				notifiedUser = true
+				lastNotifiedIssue = issueKey
 			}
 			select {
 			case <-ctx.Done():
@@ -1613,12 +1625,15 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 				expectedLabel, actualLabel)
 		}
 		s.updateProgress(job.ID, "waiting", waitMsg)
-		s.emitEvent("warning", "backup", "Wrong Tape Inserted",
-			fmt.Sprintf("Job %s: %s", job.Name, waitMsg))
-		if s.WrongTapeCallback != nil {
-			s.WrongTapeCallback(ctx, expectedLabel, actualLabel)
+		issueKey := "wrong_tape:" + actualLabel
+		if lastNotifiedIssue != issueKey {
+			s.emitEvent("warning", "backup", "Wrong Tape Inserted",
+				fmt.Sprintf("Job %s: %s", job.Name, waitMsg))
+			if s.WrongTapeCallback != nil {
+				s.WrongTapeCallback(ctx, expectedLabel, actualLabel)
+			}
+			lastNotifiedIssue = issueKey
 		}
-		notifiedUser = true
 
 		select {
 		case <-ctx.Done():
