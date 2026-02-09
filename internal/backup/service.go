@@ -140,10 +140,10 @@ func buildCompressionCmd(ctx context.Context, compression models.CompressionType
 }
 
 // relayBufferSize is the buffer size used by countingReader.WriteTo when
-// Go's exec package relays data via io.Copy (e.g. Cmd.Stdin). 256KB
-// matches the typical LTO block size and is 8× larger than io.Copy's
+// Go's exec package relays data via io.Copy (e.g. Cmd.Stdin). 1MB
+// matches the optimal LTO block size and is 32× larger than io.Copy's
 // default 32KB, reducing syscall overhead in the streaming pipeline.
-const relayBufferSize = 256 * 1024
+const relayBufferSize = 1024 * 1024
 
 // countingReader wraps an io.Reader and counts bytes read through it.
 // It uses atomic operations instead of a mutex for the byte counter to avoid
@@ -197,7 +197,7 @@ func (cr *countingReader) Read(p []byte) (int, error) {
 
 // WriteTo implements io.WriterTo so that io.Copy (used internally by Go's
 // exec package to relay data when Cmd.Stdin is not an *os.File) transfers
-// data in 256KB chunks instead of the default 32KB. This keeps the mbuffer
+// data in 1MB chunks instead of the default 32KB. This keeps the mbuffer
 // fed faster and prevents tape shoe-shining during streaming.
 func (cr *countingReader) WriteTo(w io.Writer) (int64, error) {
 	buf := make([]byte, relayBufferSize)
@@ -265,7 +265,7 @@ type Service struct {
 // NewService creates a new backup service
 func NewService(db *database.DB, tapeService *tape.Service, logger *logging.Logger, blockSize int, bufferSizeMB int) *Service {
 	if bufferSizeMB <= 0 {
-		bufferSizeMB = 1024
+		bufferSizeMB = 2048
 	}
 	return &Service{
 		db:           db,
@@ -727,7 +727,7 @@ func (s *Service) StreamToTape(ctx context.Context, sourcePath string, files []F
 	tarArgs := []string{
 		"-c", // Create archive
 		// tar -b flag expects count of 512-byte blocks, so divide blockSize by 512
-		// Example: blockSize=262144 → -b 512 → 512*512 = 262144 bytes
+		// Example: blockSize=1048576 → -b 2048 → 2048*512 = 1048576 bytes
 		// This ensures tar and mbuffer use the same block size
 		"-b", fmt.Sprintf("%d", s.blockSize/512),
 		"-C", sourcePath,   // Change to source directory
@@ -742,7 +742,7 @@ func (s *Service) StreamToTape(ctx context.Context, sourcePath string, files []F
 		// Use mbuffer for better streaming performance
 		tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
 		// mbuffer -s flag expects block size in bytes, matching tar's effective block size
-		// Example: blockSize=262144 → -s 262144 → 262144 bytes (256KB optimal for LTO)
+		// Example: blockSize=1048576 → -s 1048576 → 1048576 bytes (1MB optimal for LTO)
 		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", fmt.Sprintf("%dM", s.bufferSizeMB), "-P", "80", "-o", devicePath)
 
 		// Pipe tar output through counting reader to mbuffer

@@ -122,8 +122,8 @@ func DefaultConfig() *Config {
 			Drives: []DriveConfig{
 				{DevicePath: "/dev/nst0", DisplayName: "Primary LTO Drive", Enabled: true},
 			},
-			BufferSizeMB:     1024,
-			BlockSize:        262144,
+			BufferSizeMB:     2048,
+			BlockSize:        1048576,
 			WriteRetries:     3,
 			VerifyAfterWrite: true,
 		},
