@@ -891,17 +891,27 @@ func TestDeleteJobWithParentSetFK(t *testing.T) {
 	}
 
 	// Create source, job, tape
-	db.Exec("INSERT INTO backup_sources (name, source_type, path) VALUES (?, ?, ?)", "src", "local", "/tmp")
-	db.Exec("INSERT INTO backup_jobs (name, source_id, pool_id, backup_type, retention_days, enabled) VALUES (?, ?, ?, ?, ?, ?)",
-		"TestJob", 1, 1, "full", 30, true)
-	db.Exec("INSERT INTO tapes (uuid, barcode, label, pool_id, status, capacity_bytes, used_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		"uuid-1", "T01", "T01", 1, "active", int64(1500000000000), int64(0))
+	if _, err := db.Exec("INSERT INTO backup_sources (name, source_type, path) VALUES (?, ?, ?)", "src", "local", "/tmp"); err != nil {
+		t.Fatalf("failed to insert source: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO backup_jobs (name, source_id, pool_id, backup_type, retention_days, enabled) VALUES (?, ?, ?, ?, ?, ?)",
+		"TestJob", 1, 1, "full", 30, true); err != nil {
+		t.Fatalf("failed to insert job: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO tapes (uuid, barcode, label, pool_id, status, capacity_bytes, used_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		"uuid-1", "T01", "T01", 1, "active", int64(1500000000000), int64(0)); err != nil {
+		t.Fatalf("failed to insert tape: %v", err)
+	}
 
 	// Create parent backup set (full), then child (incremental) referencing it
-	db.Exec("INSERT INTO backup_sets (job_id, tape_id, backup_type, start_time, status) VALUES (?, ?, ?, datetime('now'), ?)",
-		1, 1, "full", "completed")
-	db.Exec("INSERT INTO backup_sets (job_id, tape_id, backup_type, start_time, status, parent_set_id) VALUES (?, ?, ?, datetime('now'), ?, ?)",
-		1, 1, "incremental", "completed", 1)
+	if _, err := db.Exec("INSERT INTO backup_sets (job_id, tape_id, backup_type, start_time, status) VALUES (?, ?, ?, datetime('now'), ?)",
+		1, 1, "full", "completed"); err != nil {
+		t.Fatalf("failed to insert parent backup set: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO backup_sets (job_id, tape_id, backup_type, start_time, status, parent_set_id) VALUES (?, ?, ?, datetime('now'), ?, ?)",
+		1, 1, "incremental", "completed", 1); err != nil {
+		t.Fatalf("failed to insert child backup set: %v", err)
+	}
 
 	tapeService := tape.NewService("/dev/null", 65536)
 	sched := scheduler.NewService(db, logger, nil)
@@ -953,18 +963,30 @@ func TestDeleteJobWithSpanningSetFK(t *testing.T) {
 	}
 
 	// Create source, job, tape
-	db.Exec("INSERT INTO backup_sources (name, source_type, path) VALUES (?, ?, ?)", "src", "local", "/tmp")
-	db.Exec("INSERT INTO backup_jobs (name, source_id, pool_id, backup_type, retention_days, enabled) VALUES (?, ?, ?, ?, ?, ?)",
-		"TestJob", 1, 1, "full", 30, true)
-	db.Exec("INSERT INTO tapes (uuid, barcode, label, pool_id, status, capacity_bytes, used_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		"uuid-1", "T01", "T01", 1, "active", int64(1500000000000), int64(0))
+	if _, err := db.Exec("INSERT INTO backup_sources (name, source_type, path) VALUES (?, ?, ?)", "src", "local", "/tmp"); err != nil {
+		t.Fatalf("failed to insert source: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO backup_jobs (name, source_id, pool_id, backup_type, retention_days, enabled) VALUES (?, ?, ?, ?, ?, ?)",
+		"TestJob", 1, 1, "full", 30, true); err != nil {
+		t.Fatalf("failed to insert job: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO tapes (uuid, barcode, label, pool_id, status, capacity_bytes, used_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		"uuid-1", "T01", "T01", 1, "active", int64(1500000000000), int64(0)); err != nil {
+		t.Fatalf("failed to insert tape: %v", err)
+	}
 
 	// Create backup set, spanning set, and tape_change_request referencing the spanning set
-	db.Exec("INSERT INTO backup_sets (job_id, tape_id, backup_type, start_time, status) VALUES (?, ?, ?, datetime('now'), ?)",
-		1, 1, "full", "completed")
-	db.Exec("INSERT INTO tape_spanning_sets (job_id, total_tapes, status) VALUES (?, ?, ?)", 1, 1, "completed")
-	db.Exec("INSERT INTO tape_change_requests (spanning_set_id, current_tape_id, reason, status) VALUES (?, ?, ?, ?)",
-		1, 1, "tape_full", "completed")
+	if _, err := db.Exec("INSERT INTO backup_sets (job_id, tape_id, backup_type, start_time, status) VALUES (?, ?, ?, datetime('now'), ?)",
+		1, 1, "full", "completed"); err != nil {
+		t.Fatalf("failed to insert backup set: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO tape_spanning_sets (job_id, total_tapes, status) VALUES (?, ?, ?)", 1, 1, "completed"); err != nil {
+		t.Fatalf("failed to insert spanning set: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO tape_change_requests (spanning_set_id, current_tape_id, reason, status) VALUES (?, ?, ?, ?)",
+		1, 1, "tape_full", "completed"); err != nil {
+		t.Fatalf("failed to insert tape change request: %v", err)
+	}
 
 	tapeService := tape.NewService("/dev/null", 65536)
 	sched := scheduler.NewService(db, logger, nil)
@@ -1015,14 +1037,20 @@ func TestSelectTapeFromPoolPrefersDriveLoaded(t *testing.T) {
 	}
 
 	// Create two active tapes in the same pool
-	db.Exec("INSERT INTO tapes (uuid, barcode, label, pool_id, status, capacity_bytes, used_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		"uuid-a", "T01", "TapeA", 1, "active", int64(1500000000000), int64(100))
-	db.Exec("INSERT INTO tapes (uuid, barcode, label, pool_id, status, capacity_bytes, used_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		"uuid-b", "T02", "TapeB", 1, "active", int64(1500000000000), int64(500))
+	if _, err := db.Exec("INSERT INTO tapes (uuid, barcode, label, pool_id, status, capacity_bytes, used_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		"uuid-a", "T01", "TapeA", 1, "active", int64(1500000000000), int64(100)); err != nil {
+		t.Fatalf("failed to insert tapeA: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO tapes (uuid, barcode, label, pool_id, status, capacity_bytes, used_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		"uuid-b", "T02", "TapeB", 1, "active", int64(1500000000000), int64(500)); err != nil {
+		t.Fatalf("failed to insert tapeB: %v", err)
+	}
 
 	// Load TapeB into a drive (TapeA is not in any drive)
-	db.Exec("INSERT INTO tape_drives (device_path, display_name, status, enabled, current_tape_id) VALUES (?, ?, ?, ?, ?)",
-		"/dev/nst0", "Drive0", "ready", 1, 2)
+	if _, err := db.Exec("INSERT INTO tape_drives (device_path, display_name, status, enabled, current_tape_id) VALUES (?, ?, ?, ?, ?)",
+		"/dev/nst0", "Drive0", "ready", 1, 2); err != nil {
+		t.Fatalf("failed to insert drive: %v", err)
+	}
 
 	s := &Server{db: db}
 
