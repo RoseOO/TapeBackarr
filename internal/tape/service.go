@@ -893,10 +893,8 @@ func (s *Service) parseTemperaturePage(output string, stats *DriveStatisticsData
 	scanner := bufio.NewScanner(strings.NewReader(output))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if strings.Contains(line, "Current temperature") {
-			if v := extractSgLogsValue(line); v > 0 {
-				stats.TemperatureC = v
-			}
+		if strings.Contains(line, "Current temperature") && !strings.Contains(line, "not available") {
+			stats.TemperatureC = extractSgLogsValue(line)
 		}
 	}
 }

@@ -642,12 +642,12 @@
               <div class="stat-value">{driveStats.lifetime_power_cycles}</div>
             </div>
             <div class="stat-card">
-              <div class="stat-label">Read Compression (x100)</div>
-              <div class="stat-value">{driveStats.read_compression_pct || 0}</div>
+              <div class="stat-label">Read Compression Ratio</div>
+              <div class="stat-value">{driveStats.read_compression_pct ? (driveStats.read_compression_pct / 100).toFixed(2) + 'x' : 'N/A'}</div>
             </div>
             <div class="stat-card">
-              <div class="stat-label">Write Compression (x100)</div>
-              <div class="stat-value">{driveStats.write_compression_pct || 0}</div>
+              <div class="stat-label">Write Compression Ratio</div>
+              <div class="stat-value">{driveStats.write_compression_pct ? (driveStats.write_compression_pct / 100).toFixed(2) + 'x' : 'N/A'}</div>
             </div>
             {#if driveStats.tape_alert_flags}
               <div class="stat-card stat-danger">
