@@ -1068,7 +1068,7 @@ func TestComputeChecksumsAsync(t *testing.T) {
 	}
 
 	checksums := &sync.Map{}
-	svc.computeChecksumsAsync(context.Background(), files, checksums)
+	svc.computeChecksumsAsync(context.Background(), files, checksums, 0, tmpDir)
 
 	// Both files should have checksums
 	val1, ok1 := checksums.Load(file1)
@@ -1112,7 +1112,7 @@ func TestComputeChecksumsAsyncContextCancellation(t *testing.T) {
 	cancel() // Cancel immediately
 
 	checksums := &sync.Map{}
-	svc.computeChecksumsAsync(ctx, files, checksums)
+	svc.computeChecksumsAsync(ctx, files, checksums, 0, tmpDir)
 
 	// With immediate cancellation, very few (or zero) checksums should be computed
 	count := 0
@@ -1134,7 +1134,7 @@ func TestComputeChecksumsAsyncMissingFile(t *testing.T) {
 	}
 
 	checksums := &sync.Map{}
-	svc.computeChecksumsAsync(context.Background(), files, checksums)
+	svc.computeChecksumsAsync(context.Background(), files, checksums, 0, "")
 
 	// Missing file should not produce a checksum
 	_, ok := checksums.Load("/nonexistent/file.txt")

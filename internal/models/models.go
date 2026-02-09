@@ -151,12 +151,8 @@ const (
 	// at full streaming speed with no host CPU involvement. Pre-compressing data
 	// (gzip/zstd) is counterproductive: it prevents hardware compression, reduces
 	// throughput, and wastes CPU cycles.
-	CompressionLTO CompressionType = "lto"
-	// Deprecated: CompressionGzip is retained for backward compatibility with existing
-	// database records. New jobs should use CompressionNone or CompressionLTO.
+	CompressionLTO  CompressionType = "lto"
 	CompressionGzip CompressionType = "gzip"
-	// Deprecated: CompressionZstd is retained for backward compatibility with existing
-	// database records. New jobs should use CompressionNone or CompressionLTO.
 	CompressionZstd CompressionType = "zstd"
 )
 

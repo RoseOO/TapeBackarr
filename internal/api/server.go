@@ -2703,6 +2703,14 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	if compression == "" {
 		compression = "none"
 	}
+	// Validate compression type
+	switch models.CompressionType(compression) {
+	case models.CompressionNone, models.CompressionLTO, models.CompressionGzip, models.CompressionZstd:
+		// valid
+	default:
+		s.respondError(w, http.StatusBadRequest, "invalid compression type: "+compression+". Valid options: none, lto, gzip, zstd")
+		return
+	}
 
 	result, err := s.db.Exec(`
 		INSERT INTO backup_jobs (name, source_id, pool_id, backup_type, schedule_cron, retention_days, enabled, encryption_enabled, encryption_key_id, compression)

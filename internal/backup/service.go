@@ -1164,29 +1164,93 @@ func (s *Service) CalculateChecksum(path string) (string, error) {
 }
 
 // computeChecksumsAsync computes SHA256 checksums for all files concurrently,
-// storing results in the provided sync.Map (path -> checksum string).
-// This runs in parallel with the tape streaming so that checksums are ready
-// by the time finishTape catalogs the files, avoiding a second full re-read
-// of every file from the source.
-func (s *Service) computeChecksumsAsync(ctx context.Context, files []FileInfo, checksums *sync.Map) {
+// storing results in the provided sync.Map (path -> checksum string) AND
+// inserting catalog entries into the database as each batch of checksums
+// completes. This builds the catalog incrementally during streaming rather
+// than in one large batch after streaming finishes, preventing the "stuck in
+// cataloging" state for large file counts. The TOC file list is written to
+// tape separately at the end by finishTape.
+func (s *Service) computeChecksumsAsync(ctx context.Context, files []FileInfo, checksums *sync.Map, backupSetID int64, sourcePath string) {
 	numWorkers := runtime.NumCPU()
 	if numWorkers < 4 {
 		numWorkers = 4
 	}
+
+	type catalogEntry struct {
+		relPath  string
+		fi       FileInfo
+		checksum string
+	}
+
+	// Channel for catalog entries; writer goroutine batches them into DB transactions
+	entryCh := make(chan catalogEntry, numWorkers*2)
+
+	// Writer goroutine: batches catalog inserts for efficient DB writes
+	var writerWg sync.WaitGroup
+	writerWg.Add(1)
+	go func() {
+		defer writerWg.Done()
+		const batchSize = 500
+		batch := make([]catalogEntry, 0, batchSize)
+
+		flush := func() {
+			if len(batch) == 0 || s.db == nil {
+				batch = batch[:0]
+				return
+			}
+			tx, err := s.db.Begin()
+			if err != nil {
+				batch = batch[:0]
+				return
+			}
+			stmt, err := tx.Prepare(`
+				INSERT INTO catalog_entries (backup_set_id, file_path, file_size, file_mode, mod_time, checksum)
+				VALUES (?, ?, ?, ?, ?, ?)
+			`)
+			if err != nil {
+				tx.Rollback()
+				batch = batch[:0]
+				return
+			}
+			for _, e := range batch {
+				if _, err := stmt.Exec(backupSetID, e.relPath, e.fi.Size, e.fi.Mode, e.fi.ModTime, e.checksum); err != nil {
+					s.logger.Warn("Failed to insert catalog entry", map[string]interface{}{
+						"file":  e.relPath,
+						"error": err.Error(),
+					})
+				}
+			}
+			stmt.Close()
+			tx.Commit()
+			batch = batch[:0]
+		}
+
+		for entry := range entryCh {
+			batch = append(batch, entry)
+			if len(batch) >= batchSize {
+				flush()
+			}
+		}
+		flush() // remaining entries
+	}()
+
+	// Checksum workers
 	sem := make(chan struct{}, numWorkers)
 	var wg sync.WaitGroup
 
 	for _, f := range files {
 		select {
 		case <-ctx.Done():
-			return
+			break
 		case sem <- struct{}{}:
+		}
+		if ctx.Err() != nil {
+			break
 		}
 		wg.Add(1)
 		go func(fi FileInfo) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			// Respect cancellation within each worker
 			select {
 			case <-ctx.Done():
 				return
@@ -1196,9 +1260,13 @@ func (s *Service) computeChecksumsAsync(ctx context.Context, files []FileInfo, c
 			if err == nil {
 				checksums.Store(fi.Path, checksum)
 			}
+			relPath, _ := filepath.Rel(sourcePath, fi.Path)
+			entryCh <- catalogEntry{relPath: relPath, fi: fi, checksum: checksum}
 		}(f)
 	}
 	wg.Wait()
+	close(entryCh)
+	writerWg.Wait()
 }
 
 // CreateSnapshot creates a snapshot of the current file state
@@ -1488,7 +1556,12 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 	var encryptionKeyID *int64
 	var compressed bool
 	var compressionType models.CompressionType
-	useCompression := job.Compression != "" && job.Compression != models.CompressionNone
+	// CompressionLTO means "let the LTO drive handle compression" — no software
+	// compression is applied. The drive performs block-level compression at full
+	// streaming speed with no host CPU involvement.
+	useCompression := job.Compression != "" &&
+		job.Compression != models.CompressionNone &&
+		job.Compression != models.CompressionLTO
 	var encKey string
 
 	if job.EncryptionEnabled && job.EncryptionKeyID != nil {
@@ -1538,10 +1611,12 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		return s.StreamToTape(ctx, source.Path, batch, devicePath, progressCb, &pauseFlag)
 	}
 
-	// Start concurrent checksum computation for all files so checksums are
-	// ready by the time finishTape catalogs them — no re-reading from source.
+	// Start concurrent checksum computation for all files. Checksums are
+	// computed in parallel with tape streaming and catalog entries are written
+	// to the database incrementally as they complete — no post-streaming
+	// cataloging bottleneck. The TOC file list is written to tape at the end.
 	fileChecksums := &sync.Map{}
-	go s.computeChecksumsAsync(ctx, files, fileChecksums)
+	go s.computeChecksumsAsync(ctx, files, fileChecksums, backupSetID, source.Path)
 
 	// Check if all files fit on the current tape
 	remainingCapacity := tapeCapacity - tapeUsed
@@ -1568,7 +1643,8 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 
 		if err := s.finishTape(finishTapeParams{
 			ctx: ctx, job: job, source: source,
-			backupSetID: backupSetID, tapeID: tapeID,
+			backupSetID: backupSetID, initialBackupSetID: backupSetID,
+			tapeID: tapeID,
 			tapeLabel: expectedLabel, tapeUUID: expectedUUID,
 			driveSvc: driveSvc, files: files, totalBytes: totalBytes,
 			actualTapeBytes: actualTapeBytes,
@@ -1669,7 +1745,8 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 				// Finish this tape with its per-tape TOC
 				if err := s.finishTape(finishTapeParams{
 					ctx: ctx, job: job, source: source,
-					backupSetID: currentBackupSetID, tapeID: currentTapeID,
+					backupSetID: currentBackupSetID, initialBackupSetID: backupSetID,
+					tapeID: currentTapeID,
 					tapeLabel: currentLabel, tapeUUID: currentUUID,
 					pool: "", driveSvc: currentDriveSvc,
 					files: batch, totalBytes: batchBytes,
@@ -1849,80 +1926,59 @@ func (s *Service) updateBackupSetStatus(id int64, status models.BackupSetStatus,
 
 // finishTapeParams holds the parameters for finalizing a single tape during a backup.
 type finishTapeParams struct {
-	ctx             context.Context
-	job             *models.BackupJob
-	source          *models.BackupSource
-	backupSetID     int64
-	tapeID          int64
-	tapeLabel       string
-	tapeUUID        string
-	pool            string
-	driveSvc        *tape.Service
-	files           []FileInfo // only the files written to this specific tape
-	totalBytes      int64
-	actualTapeBytes int64 // actual bytes written to tape device (post-compression); 0 means use totalBytes
-	backupType      models.BackupType
-	encrypted       bool
-	encryptionKeyID *int64
-	compressed      bool
-	compressionType models.CompressionType
-	startTime       time.Time
-	spanningSetID   int64 // 0 if not spanning
-	sequenceNumber  int   // 1-based tape index within spanning set
-	totalTapes      int   // 0 if not yet known (updated later)
-	checksums       *sync.Map // pre-computed file checksums (path -> string), computed concurrently during streaming
+	ctx                context.Context
+	job                *models.BackupJob
+	source             *models.BackupSource
+	backupSetID        int64
+	initialBackupSetID int64 // the backupSetID used during checksum computation; for multi-tape tape 2+, catalog entries are reassigned from this ID
+	tapeID             int64
+	tapeLabel          string
+	tapeUUID           string
+	pool               string
+	driveSvc           *tape.Service
+	files              []FileInfo // only the files written to this specific tape
+	totalBytes         int64
+	actualTapeBytes    int64 // actual bytes written to tape device (post-compression); 0 means use totalBytes
+	backupType         models.BackupType
+	encrypted          bool
+	encryptionKeyID    *int64
+	compressed         bool
+	compressionType    models.CompressionType
+	startTime          time.Time
+	spanningSetID      int64 // 0 if not spanning
+	sequenceNumber     int   // 1-based tape index within spanning set
+	totalTapes         int   // 0 if not yet known (updated later)
+	checksums          *sync.Map // pre-computed file checksums (path -> string), computed concurrently during streaming
 }
 
 // finishTape writes the per-tape TOC and updates catalog/tape records for
 // the files written to this specific tape. Each tape in a multi-tape backup
 // receives a self-describing TOC containing only its own files.
+//
+// Catalog entries (file checksums) are already written to the database
+// incrementally by computeChecksumsAsync during streaming. finishTape only
+// needs to reassign entries to the correct backup_set_id for multi-tape
+// spanning (tape 2+), then write the TOC file list to tape.
 func (s *Service) finishTape(p finishTapeParams) error {
 	s.updateProgress(p.job.ID, "cataloging", "Writing file mark...")
 	if err := p.driveSvc.WriteFileMark(p.ctx); err != nil {
 		s.logger.Warn("Failed to write file mark", map[string]interface{}{"error": err.Error()})
 	}
 
-	// Catalog the files written to this tape using pre-computed checksums.
-	// Checksums are computed concurrently during the streaming phase so we
-	// don't re-read every file from the source here.
-	s.updateProgress(p.job.ID, "cataloging", fmt.Sprintf("Cataloging %d files on tape %s...", len(p.files), p.tapeLabel))
-	s.logger.Info("Cataloging files for tape", map[string]interface{}{
-		"tape_label": p.tapeLabel,
-		"file_count": len(p.files),
-	})
-	for i, f := range p.files {
-		// Respect context cancellation during cataloging
-		select {
-		case <-p.ctx.Done():
-			return p.ctx.Err()
-		default:
-		}
-
-		relPath, _ := filepath.Rel(p.source.Path, f.Path)
-
-		s.mu.Lock()
-		if prog, ok := s.activeJobs[p.job.ID]; ok {
-			prog.FileCount = int64(i + 1)
-		}
-		s.mu.Unlock()
-
-		// Use pre-computed checksum from concurrent computation during streaming
-		var checksum string
-		if p.checksums != nil {
-			if val, ok := p.checksums.Load(f.Path); ok {
-				checksum = val.(string)
+	// For multi-tape tape 2+, catalog entries were inserted with the initial
+	// backup_set_id during checksum computation. Reassign them to this tape's
+	// backup_set_id so restore knows which files are on which tape.
+	if p.initialBackupSetID != 0 && p.initialBackupSetID != p.backupSetID && len(p.files) > 0 {
+		s.updateProgress(p.job.ID, "cataloging", fmt.Sprintf("Reassigning %d catalog entries to tape %s...", len(p.files), p.tapeLabel))
+		for _, f := range p.files {
+			select {
+			case <-p.ctx.Done():
+				return p.ctx.Err()
+			default:
 			}
-		}
-
-		_, err := s.db.Exec(`
-			INSERT INTO catalog_entries (backup_set_id, file_path, file_size, file_mode, mod_time, checksum)
-			VALUES (?, ?, ?, ?, ?, ?)
-		`, p.backupSetID, relPath, f.Size, f.Mode, f.ModTime, checksum)
-		if err != nil {
-			s.logger.Warn("Failed to insert catalog entry", map[string]interface{}{
-				"file":  relPath,
-				"error": err.Error(),
-			})
+			relPath, _ := filepath.Rel(p.source.Path, f.Path)
+			s.db.Exec(`UPDATE catalog_entries SET backup_set_id = ? WHERE backup_set_id = ? AND file_path = ?`,
+				p.backupSetID, p.initialBackupSetID, relPath)
 		}
 	}
 
@@ -2028,10 +2084,13 @@ func (s *Service) finishTape(p finishTapeParams) error {
 }
 
 // splitFilesForTape partitions files into a batch that fits on the current tape
-// and the remaining files for subsequent tapes. It reserves ~10% of remaining
-// capacity for tar headers, file marks, and the TOC.
+// and the remaining files for subsequent tapes. It reserves ~1% of remaining
+// capacity for tar headers, file marks, and the TOC. The overhead is small:
+// tar headers are ~1KB per file, file marks are negligible, and the TOC is a
+// small JSON document. A 1% reserve is more than sufficient and avoids wasting
+// significant tape capacity (e.g. 10% of a 1.5TB tape = 150GB unused).
 func (s *Service) splitFilesForTape(files []FileInfo, remainingCapacity int64) (thisTape []FileInfo, remaining []FileInfo) {
-	usableCapacity := (remainingCapacity * 9) / 10
+	usableCapacity := (remainingCapacity * 99) / 100
 	if usableCapacity <= 0 {
 		return nil, files
 	}
