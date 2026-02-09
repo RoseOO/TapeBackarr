@@ -345,6 +345,16 @@ func (s *Service) Load(ctx context.Context) error {
 	return nil
 }
 
+// Retension runs a tape retension pass (full wind/rewind cycle)
+func (s *Service) Retension(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, "mt", "-f", s.devicePath, "retension")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("retension failed: %s", string(output))
+	}
+	return nil
+}
+
 // SeekToFileNumber positions the tape at the specified file mark
 func (s *Service) SeekToFileNumber(ctx context.Context, fileNum int64) error {
 	// First rewind
@@ -405,6 +415,15 @@ const (
 	labelMagic = "TAPEBACKARR"
 	// labelDelimiter separates fields in the label block
 	labelDelimiter = "|"
+)
+
+const (
+	// tocMagic is the identifier for TapeBackarr TOC entries
+	tocMagic = "TAPEBACKARR_TOC"
+	// tocVersion is the current TOC format version
+	tocVersion = 1
+	// tocBlockSize is the block size for TOC reads/writes (64KB)
+	tocBlockSize = 65536
 )
 
 // ReadTapeLabel reads the label from the beginning of the tape
@@ -839,6 +858,25 @@ func (s *Service) WriteTOC(ctx context.Context, toc *TapeTOC) error {
 		return fmt.Errorf("failed to write TOC to tape: %s", string(output))
 	}
 
+	// Write a file mark after the TOC data
+	if err := s.WriteFileMark(ctx); err != nil {
+		return fmt.Errorf("failed to write file mark after TOC: %w", err)
+	}
+
+	return nil
+}
+
+// GetDriveStatistics collects drive statistics from tapeinfo and sg_logs
+func (s *Service) GetDriveStatistics(ctx context.Context) (*DriveStatisticsData, error) {
+	stats := &DriveStatisticsData{}
+
+	// Try tapeinfo first
+	cmd := exec.CommandContext(ctx, "tapeinfo", "-f", s.devicePath)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		s.parseTapeInfoStats(string(output), stats)
+	}
+
 	// Try sg_logs for temperature page
 	cmd = exec.CommandContext(ctx, "sg_logs", "-p", "0x0d", s.devicePath)
 	output, err = cmd.CombinedOutput()
@@ -900,7 +938,6 @@ func (s *Service) parseTapeInfoStats(output string, stats *DriveStatisticsData) 
 		}
 	}
 
-	return nil
 }
 
 // ReadTOC reads the Table of Contents from the tape at the current position.
@@ -917,6 +954,18 @@ func (s *Service) ReadTOC(ctx context.Context) (*TapeTOC, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read TOC from tape: %w", err)
 	}
+
+	// Trim null padding from block-aligned read
+	trimmed := output
+	for i := len(trimmed) - 1; i >= 0; i-- {
+		if trimmed[i] != 0 {
+			trimmed = trimmed[:i+1]
+			break
+		}
+	}
+
+	return UnmarshalTOC(trimmed)
+}
 
 // parseTemperaturePage parses sg_logs temperature page (0x0d) output
 func (s *Service) parseTemperaturePage(output string, stats *DriveStatisticsData) {
@@ -1018,7 +1067,7 @@ func extractSgLogsValue(line string) int64 {
 		return v
 	}
 
-	return UnmarshalTOC(raw)
+	return 0
 }
 
 // extractSgLogsColonValue extracts an integer value from a colon-delimited sg_logs line
