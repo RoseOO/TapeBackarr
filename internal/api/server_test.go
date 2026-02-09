@@ -14,6 +14,7 @@ import (
 	"github.com/RoseOO/TapeBackarr/internal/backup"
 	"github.com/RoseOO/TapeBackarr/internal/database"
 	"github.com/RoseOO/TapeBackarr/internal/logging"
+	"github.com/RoseOO/TapeBackarr/internal/scheduler"
 	"github.com/RoseOO/TapeBackarr/internal/tape"
 
 	"github.com/go-chi/chi/v5"
@@ -714,5 +715,160 @@ func TestTelegramActiveCommandStreamingPhase(t *testing.T) {
 	// Should show files count during streaming
 	if !strings.Contains(result, "Files: 20/100") {
 		t.Errorf("expected files count, got: %s", result)
+	}
+}
+
+func TestDeleteJobWithForeignKeys(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := database.New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("failed to migrate database: %v", err)
+	}
+
+	logger, err := logging.NewLogger("warn", "text", "")
+	if err != nil {
+		t.Fatalf("failed to create logger: %v", err)
+	}
+
+	// Insert a backup source, job, tape, backup set, and job execution
+	_, err = db.Exec("INSERT INTO backup_sources (name, source_type, path) VALUES (?, ?, ?)", "src", "local", "/tmp")
+	if err != nil {
+		t.Fatalf("failed to insert source: %v", err)
+	}
+	_, err = db.Exec("INSERT INTO backup_jobs (name, source_id, pool_id, backup_type, retention_days, enabled) VALUES (?, ?, ?, ?, ?, ?)",
+		"TestJob", 1, 1, "full", 30, true)
+	if err != nil {
+		t.Fatalf("failed to insert job: %v", err)
+	}
+	_, err = db.Exec("INSERT INTO tapes (uuid, barcode, label, pool_id, status, capacity_bytes, used_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		"uuid-1", "T01", "T01", 1, "active", int64(1500000000000), int64(0))
+	if err != nil {
+		t.Fatalf("failed to insert tape: %v", err)
+	}
+	_, err = db.Exec("INSERT INTO backup_sets (job_id, tape_id, backup_type, start_time, status) VALUES (?, ?, ?, datetime('now'), ?)",
+		1, 1, "full", "completed")
+	if err != nil {
+		t.Fatalf("failed to insert backup set: %v", err)
+	}
+	_, err = db.Exec("INSERT INTO job_executions (job_id, backup_set_id, status) VALUES (?, ?, ?)", 1, 1, "completed")
+	if err != nil {
+		t.Fatalf("failed to insert job execution: %v", err)
+	}
+	_, err = db.Exec("INSERT INTO catalog_entries (backup_set_id, file_path, file_size) VALUES (?, ?, ?)", 1, "/test/file.txt", 1024)
+	if err != nil {
+		t.Fatalf("failed to insert catalog entry: %v", err)
+	}
+
+	tapeService := tape.NewService("/dev/null", 65536)
+	sched := scheduler.NewService(db, logger, nil)
+	r := chi.NewRouter()
+	s := &Server{
+		router:      r,
+		db:          db,
+		tapeService: tapeService,
+		logger:      logger,
+		scheduler:   sched,
+	}
+
+	r.Delete("/api/v1/jobs/{id}", s.handleDeleteJob)
+
+	req := httptest.NewRequest("DELETE", "/api/v1/jobs/1", nil)
+	rr := httptest.NewRecorder()
+	s.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]string
+	json.NewDecoder(rr.Body).Decode(&resp)
+	if resp["status"] != "deleted" {
+		t.Errorf("expected status 'deleted', got %q", resp["status"])
+	}
+
+	// Verify all related records are gone
+	var count int
+	db.QueryRow("SELECT COUNT(*) FROM backup_jobs WHERE id = 1").Scan(&count)
+	if count != 0 {
+		t.Error("backup job should be deleted")
+	}
+	db.QueryRow("SELECT COUNT(*) FROM backup_sets WHERE job_id = 1").Scan(&count)
+	if count != 0 {
+		t.Error("backup sets should be deleted")
+	}
+	db.QueryRow("SELECT COUNT(*) FROM job_executions WHERE job_id = 1").Scan(&count)
+	if count != 0 {
+		t.Error("job executions should be deleted")
+	}
+	db.QueryRow("SELECT COUNT(*) FROM catalog_entries WHERE backup_set_id = 1").Scan(&count)
+	if count != 0 {
+		t.Error("catalog entries should be deleted")
+	}
+}
+
+func TestDeleteProxmoxJobWithForeignKeys(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := database.New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("failed to migrate database: %v", err)
+	}
+
+	logger, err := logging.NewLogger("warn", "text", "")
+	if err != nil {
+		t.Fatalf("failed to create logger: %v", err)
+	}
+
+	// Insert a proxmox backup job and execution
+	_, err = db.Exec("INSERT INTO proxmox_backup_jobs (name, pool_id, enabled) VALUES (?, ?, ?)", "PBSJob", 1, true)
+	if err != nil {
+		t.Fatalf("failed to insert proxmox job: %v", err)
+	}
+	_, err = db.Exec("INSERT INTO proxmox_job_executions (job_id, status) VALUES (?, ?)", 1, "completed")
+	if err != nil {
+		t.Fatalf("failed to insert proxmox execution: %v", err)
+	}
+
+	r := chi.NewRouter()
+	s := &Server{
+		router: r,
+		db:     db,
+		logger: logger,
+	}
+
+	r.Delete("/api/v1/proxmox/jobs/{id}", s.handleProxmoxDeleteJob)
+
+	req := httptest.NewRequest("DELETE", "/api/v1/proxmox/jobs/1", nil)
+	rr := httptest.NewRecorder()
+	s.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]string
+	json.NewDecoder(rr.Body).Decode(&resp)
+	if resp["message"] != "Proxmox backup job deleted" {
+		t.Errorf("expected message 'Proxmox backup job deleted', got %q", resp["message"])
+	}
+
+	// Verify all related records are gone
+	var count int
+	db.QueryRow("SELECT COUNT(*) FROM proxmox_backup_jobs WHERE id = 1").Scan(&count)
+	if count != 0 {
+		t.Error("proxmox backup job should be deleted")
+	}
+	db.QueryRow("SELECT COUNT(*) FROM proxmox_job_executions WHERE job_id = 1").Scan(&count)
+	if count != 0 {
+		t.Error("proxmox job executions should be deleted")
 	}
 }
