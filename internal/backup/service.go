@@ -2192,13 +2192,25 @@ func (s *Service) finishTape(p finishTapeParams) error {
 
 			tx, err := s.db.Begin()
 			if err != nil {
-				s.logger.Warn("Failed to begin transaction for catalog reassignment", map[string]interface{}{"error": err.Error()})
+				s.logger.Warn("Failed to begin transaction for catalog reassignment", map[string]interface{}{
+					"error":       err.Error(),
+					"batch_start": i,
+					"batch_size":  len(batch),
+					"total_files": len(p.files),
+					"tape":        p.tapeLabel,
+				})
 				continue
 			}
 			stmt, err := tx.Prepare(`UPDATE catalog_entries SET backup_set_id = ? WHERE backup_set_id = ? AND file_path = ?`)
 			if err != nil {
 				tx.Rollback()
-				s.logger.Warn("Failed to prepare statement for catalog reassignment", map[string]interface{}{"error": err.Error()})
+				s.logger.Warn("Failed to prepare statement for catalog reassignment", map[string]interface{}{
+					"error":       err.Error(),
+					"batch_start": i,
+					"batch_size":  len(batch),
+					"total_files": len(p.files),
+					"tape":        p.tapeLabel,
+				})
 				continue
 			}
 			for _, f := range batch {
@@ -2302,7 +2314,13 @@ func (s *Service) finishTape(p finishTapeParams) error {
 
 		tx, err := s.db.Begin()
 		if err != nil {
-			s.logger.Warn("Failed to begin transaction for block_offset update", map[string]interface{}{"error": err.Error()})
+			s.logger.Warn("Failed to begin transaction for block_offset update", map[string]interface{}{
+				"error":       err.Error(),
+				"batch_start": i,
+				"batch_size":  len(batch),
+				"total_files": len(p.files),
+				"tape":        p.tapeLabel,
+			})
 			// Advance cumulative offset even on failure to maintain correctness
 			for _, f := range batch {
 				cumulativeOffset += f.Size + tarHeaderOverhead
@@ -2312,7 +2330,13 @@ func (s *Service) finishTape(p finishTapeParams) error {
 		stmt, err := tx.Prepare(`UPDATE catalog_entries SET block_offset = ? WHERE backup_set_id = ? AND file_path = ?`)
 		if err != nil {
 			tx.Rollback()
-			s.logger.Warn("Failed to prepare statement for block_offset update", map[string]interface{}{"error": err.Error()})
+			s.logger.Warn("Failed to prepare statement for block_offset update", map[string]interface{}{
+				"error":       err.Error(),
+				"batch_start": i,
+				"batch_size":  len(batch),
+				"total_files": len(p.files),
+				"tape":        p.tapeLabel,
+			})
 			for _, f := range batch {
 				cumulativeOffset += f.Size + tarHeaderOverhead
 			}
