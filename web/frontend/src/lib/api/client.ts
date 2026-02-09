@@ -523,6 +523,27 @@ export async function getLibraries() {
   return fetchApi('/libraries');
 }
 
+// Drive statistics and management
+export async function getDriveStatistics(driveId: number) {
+  return fetchApi(`/drives/${driveId}/statistics`);
+}
+
+export async function getDriveAlerts(driveId: number) {
+  return fetchApi(`/drives/${driveId}/alerts`);
+}
+
+export async function cleanDrive(driveId: number) {
+  return fetchApi(`/drives/${driveId}/clean`, {
+    method: 'POST',
+  });
+}
+
+export async function retensionDrive(driveId: number) {
+  return fetchApi(`/drives/${driveId}/retension`, {
+    method: 'POST',
+  });
+}
+
 export async function getLibrary(id: number) {
   return fetchApi(`/libraries/${id}`);
 }
