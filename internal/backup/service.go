@@ -145,16 +145,17 @@ func buildCompressionCmd(ctx context.Context, compression models.CompressionType
 // default 32KB, reducing syscall overhead in the streaming pipeline.
 const relayBufferSize = 1024 * 1024
 
-// pipelineDepth is the number of pre-read buffers in the concurrent relay
-// used by countingReader.WriteTo. Each buffer holds relayBufferSize bytes.
-// Total in-flight data = pipelineDepth × relayBufferSize (default: 16 × 1MB
-// = 16MB). This decouples reads from writes: a reader goroutine continuously
-// drains the source (e.g. NFS via tar) while the writer independently feeds
-// the destination (e.g. mbuffer pipe). Without this, the sequential
-// read→write loop stalls the source while writing and stalls the destination
-// while reading, reducing effective throughput below the network line rate
-// and contributing to tape shoe-shining.
-const pipelineDepth = 16
+// defaultPipelineDepth is the default number of pre-read buffers in the
+// concurrent relay used by countingReader.WriteTo. Each buffer holds
+// relayBufferSize bytes. Total in-flight data = depth × relayBufferSize
+// (default: 64 × 1MB = 64MB). This decouples reads from writes: a reader
+// goroutine continuously drains the source (e.g. NFS via tar) while the
+// writer independently feeds the destination (e.g. mbuffer pipe). 64MB of
+// in-process buffering absorbs NFS latency spikes that would otherwise
+// starve the tape drive and cause shoe-shining. The depth can be overridden
+// per-instance via countingReader.pipelineDepth or globally through the
+// pipeline_depth_mb configuration option.
+const defaultPipelineDepth = 64
 
 // countingReader wraps an io.Reader and counts bytes read through it.
 // It uses atomic operations instead of a mutex for the byte counter to avoid
@@ -169,11 +170,12 @@ const pipelineDepth = 16
 // streaming performance: the pipeline keeps the source continuously drained
 // and the mbuffer continuously fed, preventing tape shoe-shining.
 type countingReader struct {
-	reader       io.Reader
-	count        int64 // accessed atomically
-	lastCallback int64 // unix nanoseconds of last callback, accessed atomically
-	callback     func(bytesRead int64)
-	paused       *int32 // atomic: 0=running, 1=paused
+	reader        io.Reader
+	count         int64 // accessed atomically
+	lastCallback  int64 // unix nanoseconds of last callback, accessed atomically
+	callback      func(bytesRead int64)
+	paused        *int32 // atomic: 0=running, 1=paused
+	pipelineDepth int    // 0 = use defaultPipelineDepth
 }
 
 // waitWhilePaused blocks until the pause flag is cleared.
@@ -213,8 +215,8 @@ func (cr *countingReader) Read(p []byte) (int, error) {
 // buffers to w. This eliminates the sequential read→write bottleneck: the
 // source (NFS via tar) stays drained even while the destination (mbuffer
 // pipe) blocks on a write, and vice versa. The buffered channel provides
-// pipelineDepth × relayBufferSize (16MB default) of in-process buffering
-// that absorbs NFS latency spikes and keeps the tape streaming continuously.
+// depth × relayBufferSize (64MB default) of in-process buffering that
+// absorbs NFS latency spikes and keeps the tape streaming continuously.
 func (cr *countingReader) WriteTo(w io.Writer) (int64, error) {
 	type relayChunk struct {
 		data []byte
@@ -222,14 +224,19 @@ func (cr *countingReader) WriteTo(w io.Writer) (int64, error) {
 		err  error
 	}
 
-	ch := make(chan relayChunk, pipelineDepth)
+	depth := cr.pipelineDepth
+	if depth <= 0 {
+		depth = defaultPipelineDepth
+	}
+
+	ch := make(chan relayChunk, depth)
 	done := make(chan struct{})
-	pool := make(chan []byte, pipelineDepth+1)
+	pool := make(chan []byte, depth+1)
 
 	// Pre-allocate a pool of reusable buffers to avoid GC pressure.
-	// pipelineDepth+1 total buffers: up to pipelineDepth queued in the
-	// channel, plus one actively being filled or drained.
-	for i := 0; i < pipelineDepth+1; i++ {
+	// depth+1 total buffers: up to depth queued in the channel, plus
+	// one actively being filled or drained.
+	for i := 0; i < depth+1; i++ {
 		pool <- make([]byte, relayBufferSize)
 	}
 
@@ -323,6 +330,7 @@ type Service struct {
 	logger             *logging.Logger
 	blockSize          int
 	bufferSizeMB       int
+	pipelineDepth      int
 	mu                 sync.Mutex
 	activeJobs         map[int64]*JobProgress
 	cancelFuncs        map[int64]context.CancelFunc
@@ -334,20 +342,30 @@ type Service struct {
 }
 
 // NewService creates a new backup service
-func NewService(db *database.DB, tapeService *tape.Service, logger *logging.Logger, blockSize int, bufferSizeMB int) *Service {
+func NewService(db *database.DB, tapeService *tape.Service, logger *logging.Logger, blockSize int, bufferSizeMB int, pipelineDepthMB int) *Service {
 	if bufferSizeMB <= 0 {
 		bufferSizeMB = 2048
 	}
+	// Convert pipeline depth from MB to buffer count (each buffer is relayBufferSize).
+	// Default 64MB → 64 buffers of 1MB each.
+	depth := defaultPipelineDepth
+	if pipelineDepthMB > 0 {
+		depth = pipelineDepthMB * 1024 * 1024 / relayBufferSize
+		if depth < 4 {
+			depth = 4
+		}
+	}
 	return &Service{
-		db:           db,
-		tapeService:  tapeService,
-		logger:       logger,
-		blockSize:    blockSize,
-		bufferSizeMB: bufferSizeMB,
-		activeJobs:   make(map[int64]*JobProgress),
-		cancelFuncs:  make(map[int64]context.CancelFunc),
-		pauseFlags:   make(map[int64]*int32),
-		resumeFiles:  make(map[int64][]string),
+		db:            db,
+		tapeService:   tapeService,
+		logger:        logger,
+		blockSize:     blockSize,
+		bufferSizeMB:  bufferSizeMB,
+		pipelineDepth: depth,
+		activeJobs:    make(map[int64]*JobProgress),
+		cancelFuncs:   make(map[int64]context.CancelFunc),
+		pauseFlags:    make(map[int64]*int32),
+		resumeFiles:   make(map[int64][]string),
 	}
 }
 
@@ -814,7 +832,7 @@ func (s *Service) StreamToTape(ctx context.Context, sourcePath string, files []F
 		tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
 		// mbuffer -s flag expects block size in bytes, matching tar's effective block size
 		// Example: blockSize=1048576 → -s 1048576 → 1048576 bytes (1MB optimal for LTO)
-		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", fmt.Sprintf("%dM", s.bufferSizeMB), "-P", "80", "-o", devicePath)
+		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", fmt.Sprintf("%dM", s.bufferSizeMB), "-P", "90", "-o", devicePath)
 
 		// Pipe tar output through counting reader to mbuffer
 		tarCmd.Dir = sourcePath
@@ -823,7 +841,7 @@ func (s *Service) StreamToTape(ctx context.Context, sourcePath string, files []F
 			return 0, fmt.Errorf("failed to create pipe: %w", err)
 		}
 
-		cr := &countingReader{reader: pipe, callback: progressCb, paused: pauseFlag}
+		cr := &countingReader{reader: pipe, callback: progressCb, paused: pauseFlag, pipelineDepth: s.pipelineDepth}
 		mbufferCmd.Stdin = cr
 
 		if err := tarCmd.Start(); err != nil {
@@ -921,19 +939,19 @@ func (s *Service) StreamToTapeEncrypted(ctx context.Context, sourcePath string, 
 	if err != nil {
 		return 0, fmt.Errorf("failed to create tar pipe: %w", err)
 	}
-	cr := &countingReader{reader: tarPipe, callback: progressCb, paused: pauseFlag}
+	cr := &countingReader{reader: tarPipe, callback: progressCb, paused: pauseFlag, pipelineDepth: s.pipelineDepth}
 	opensslCmd.Stdin = cr
 
 	if mbufferErr == nil {
 		// Use mbuffer for buffering before writing to tape
-		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", fmt.Sprintf("%dM", s.bufferSizeMB), "-P", "80", "-o", devicePath)
+		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", fmt.Sprintf("%dM", s.bufferSizeMB), "-P", "90", "-o", devicePath)
 
 		opensslPipe, err := opensslCmd.StdoutPipe()
 		if err != nil {
 			return 0, fmt.Errorf("failed to create openssl pipe: %w", err)
 		}
 		// Count actual encrypted bytes going to tape
-		tapeCr := &countingReader{reader: opensslPipe}
+		tapeCr := &countingReader{reader: opensslPipe, pipelineDepth: s.pipelineDepth}
 		mbufferCmd.Stdin = tapeCr
 
 		// Start the pipeline
@@ -1051,20 +1069,20 @@ func (s *Service) StreamToTapeCompressed(ctx context.Context, sourcePath string,
 	if err != nil {
 		return 0, fmt.Errorf("failed to create tar pipe: %w", err)
 	}
-	cr := &countingReader{reader: tarPipe, callback: progressCb, paused: pauseFlag}
+	cr := &countingReader{reader: tarPipe, callback: progressCb, paused: pauseFlag, pipelineDepth: s.pipelineDepth}
 	compCmd.Stdin = cr
 
 	// Check if mbuffer is available
 	_, mbufferErr := exec.LookPath("mbuffer")
 
 	if mbufferErr == nil {
-		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", fmt.Sprintf("%dM", s.bufferSizeMB), "-P", "80", "-o", devicePath)
+		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", fmt.Sprintf("%dM", s.bufferSizeMB), "-P", "90", "-o", devicePath)
 		compPipe, err := compCmd.StdoutPipe()
 		if err != nil {
 			return 0, fmt.Errorf("failed to create compression pipe: %w", err)
 		}
 		// Count actual compressed bytes going to tape
-		tapeCr := &countingReader{reader: compPipe}
+		tapeCr := &countingReader{reader: compPipe, pipelineDepth: s.pipelineDepth}
 		mbufferCmd.Stdin = tapeCr
 
 		if err := tarCmd.Start(); err != nil {
@@ -1184,7 +1202,7 @@ func (s *Service) StreamToTapeCompressedEncrypted(ctx context.Context, sourcePat
 	if err != nil {
 		return 0, fmt.Errorf("failed to create tar pipe: %w", err)
 	}
-	cr := &countingReader{reader: tarPipe, callback: progressCb, paused: pauseFlag}
+	cr := &countingReader{reader: tarPipe, callback: progressCb, paused: pauseFlag, pipelineDepth: s.pipelineDepth}
 	compCmd.Stdin = cr
 
 	compPipe, err := compCmd.StdoutPipe()
@@ -1196,13 +1214,13 @@ func (s *Service) StreamToTapeCompressedEncrypted(ctx context.Context, sourcePat
 	_, mbufferErr := exec.LookPath("mbuffer")
 
 	if mbufferErr == nil {
-		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", fmt.Sprintf("%dM", s.bufferSizeMB), "-P", "80", "-o", devicePath)
+		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", fmt.Sprintf("%dM", s.bufferSizeMB), "-P", "90", "-o", devicePath)
 		opensslPipe, err := opensslCmd.StdoutPipe()
 		if err != nil {
 			return 0, fmt.Errorf("failed to create openssl pipe: %w", err)
 		}
 		// Count actual compressed+encrypted bytes going to tape
-		tapeCr := &countingReader{reader: opensslPipe}
+		tapeCr := &countingReader{reader: opensslPipe, pipelineDepth: s.pipelineDepth}
 		mbufferCmd.Stdin = tapeCr
 
 		if err := tarCmd.Start(); err != nil {
