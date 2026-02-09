@@ -50,6 +50,10 @@ type TapeRequirement struct {
 	Order      int         `json:"order"` // Insertion order
 }
 
+// tapeReadyTimeout is how long Restore waits for the tape drive to report
+// as online and ready before giving up.
+const tapeReadyTimeout = 30 * time.Second
+
 // Service handles restore operations
 type Service struct {
 	db          *database.DB
@@ -249,6 +253,15 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 	err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE current_tape_id = ?", tapeID).Scan(&devicePath)
 	if err != nil {
 		return nil, fmt.Errorf("tape not loaded in any drive: %w", err)
+	}
+
+	// Ensure tape is physically loaded and ready before any tape operations
+	s.logger.Info("Waiting for tape to be ready", map[string]interface{}{
+		"device_path": devicePath,
+		"tape_id":     tapeID,
+	})
+	if err := s.tapeService.WaitForTape(ctx, tapeReadyTimeout); err != nil {
+		return nil, fmt.Errorf("tape not ready: %w", err)
 	}
 
 	// Ensure destination exists
