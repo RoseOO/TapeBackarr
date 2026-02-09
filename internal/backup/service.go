@@ -1339,7 +1339,10 @@ func (s *Service) StreamToTapeLTFS(ctx context.Context, sourcePath string, files
 
 	// Write files to LTFS with progress tracking
 	totalBytes, _, err := ltfsSvc.WriteFiles(ctx, sourcePath, filePaths, func(bytesWritten int64) {
-		// Honour pause flag
+		// Honour the pause flag: poll at 100ms intervals (matching the
+		// pause-polling interval used throughout the backup pipeline, e.g.
+		// countingReader.waitWhilePaused) to allow operators to pause/resume
+		// the LTFS copy without introducing noticeable latency on resume.
 		if pauseFlag != nil {
 			for atomic.LoadInt32(pauseFlag) == 1 {
 				time.Sleep(100 * time.Millisecond)

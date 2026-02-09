@@ -1835,7 +1835,7 @@ func TestWrongTapeCallbackNoTapeLoaded(t *testing.T) {
 // reads that prevent shoe-shining.
 func TestFileSortingByPath(t *testing.T) {
 	// Simulate an unsorted file list as would come from concurrent ScanSource
-	unsortedFiles := []FileInfo{
+	files := []FileInfo{
 		{Path: "/data/zebra/z.txt", Size: 100},
 		{Path: "/data/alpha/a.txt", Size: 200},
 		{Path: "/data/beta/b.txt", Size: 300},
@@ -1846,14 +1846,14 @@ func TestFileSortingByPath(t *testing.T) {
 	}
 
 	// Apply the same sort as RunBackup
-	sort.Slice(unsortedFiles, func(i, j int) bool {
-		return unsortedFiles[i].Path < unsortedFiles[j].Path
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].Path < files[j].Path
 	})
 
 	// Verify files are sorted by path
-	for i := 1; i < len(unsortedFiles); i++ {
-		if unsortedFiles[i].Path < unsortedFiles[i-1].Path {
-			t.Errorf("files not sorted: %s comes after %s", unsortedFiles[i].Path, unsortedFiles[i-1].Path)
+	for i := 1; i < len(files); i++ {
+		if files[i].Path < files[i-1].Path {
+			t.Errorf("files not sorted: %s comes after %s", files[i].Path, files[i-1].Path)
 		}
 	}
 
@@ -1868,7 +1868,7 @@ func TestFileSortingByPath(t *testing.T) {
 		"/data/zebra/z.txt",
 	}
 
-	for i, f := range unsortedFiles {
+	for i, f := range files {
 		if f.Path != expected[i] {
 			t.Errorf("position %d: expected %s, got %s", i, expected[i], f.Path)
 		}

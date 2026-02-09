@@ -371,19 +371,23 @@ func (l *LTFSService) FormatAndLabel(ctx context.Context, label string, uuid str
 	}
 
 	// Write TapeBackarr metadata file to LTFS root
-	metadata := fmt.Sprintf(`{
-  "magic": "TAPEBACKARR_LTFS",
-  "version": 1,
-  "label": %q,
-  "uuid": %q,
-  "pool": %q,
-  "format": "ltfs",
-  "created_at": %q
-}
-`, label, uuid, pool, time.Now().Format(time.RFC3339))
+	metaObj := LTFSLabel{
+		Magic:     "TAPEBACKARR_LTFS",
+		Version:   1,
+		Label:     label,
+		UUID:      uuid,
+		Pool:      pool,
+		Format:    "ltfs",
+		CreatedAt: time.Now().Format(time.RFC3339),
+	}
+	metadata, err := json.MarshalIndent(metaObj, "", "  ")
+	if err != nil {
+		l.Unmount(ctx)
+		return fmt.Errorf("failed to marshal LTFS metadata: %w", err)
+	}
 
 	metadataPath := filepath.Join(l.mountPoint, ".tapebackarr.json")
-	if err := os.WriteFile(metadataPath, []byte(metadata), 0644); err != nil {
+	if err := os.WriteFile(metadataPath, metadata, 0644); err != nil {
 		l.Unmount(ctx)
 		return fmt.Errorf("failed to write metadata to LTFS: %w", err)
 	}
