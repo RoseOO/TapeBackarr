@@ -727,7 +727,7 @@
                 </option>
               {/each}
               {#if drives.length === 0}
-                <option value={null}>No drives available</option>
+                <option value={undefined}>No drives available</option>
               {/if}
             </select>
             <small style="color: var(--text-muted)">Select the tape drive to read from. The correct tape must be loaded.</small>

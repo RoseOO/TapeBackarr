@@ -384,7 +384,11 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 			return nil, fmt.Errorf("failed to rewind tape: %w", err)
 		}
 		// Skip label
-		driveSvc.SeekToFileNumber(ctx, 1)
+		if err := driveSvc.SeekToFileNumber(ctx, 1); err != nil {
+			s.logger.Warn("Failed to seek past label, continuing anyway", map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
 	}
 
 	// --- Step 6: Build tar extract command and execute pipeline ---

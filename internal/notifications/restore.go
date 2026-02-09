@@ -1,6 +1,9 @@
 package notifications
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // RestoreNotifier sends restore-specific notifications via all configured
 // channels (email and/or telegram).
@@ -19,10 +22,10 @@ func NewRestoreNotifier(telegram *TelegramService, email *EmailService) *Restore
 // is needed for the restore to continue.
 func (n *RestoreNotifier) SendRestoreTapeChangeRequired(ctx context.Context, expectedLabel string, actualLabel string) error {
 	if n.telegram != nil && n.telegram.IsEnabled() {
-		_ = n.telegram.NotifyTapeChangeRequired(ctx, "Restore", actualLabel, "Restore requires a different tape", expectedLabel)
+		_ = n.telegram.NotifyTapeChangeRequired(ctx, "Restore", actualLabel, fmt.Sprintf("Please insert tape %s to continue the restore", expectedLabel), expectedLabel)
 	}
 	if n.email != nil && n.email.IsEnabled() {
-		_ = n.email.NotifyTapeChangeRequired(ctx, "Restore", actualLabel, "Restore requires a different tape", expectedLabel)
+		_ = n.email.NotifyTapeChangeRequired(ctx, "Restore", actualLabel, fmt.Sprintf("Please insert tape %s to continue the restore", expectedLabel), expectedLabel)
 	}
 	return nil
 }
@@ -34,7 +37,7 @@ func (n *RestoreNotifier) SendRestoreWrongTape(ctx context.Context, expectedLabe
 	}
 	// Email doesn't have a specific wrong-tape method; reuse tape change.
 	if n.email != nil && n.email.IsEnabled() {
-		_ = n.email.NotifyTapeChangeRequired(ctx, "Restore", actualLabel, "Wrong tape loaded for restore", expectedLabel)
+		_ = n.email.NotifyTapeChangeRequired(ctx, "Restore", actualLabel, fmt.Sprintf("Wrong tape loaded — please insert tape %s", expectedLabel), expectedLabel)
 	}
 	return nil
 }
