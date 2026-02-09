@@ -1802,7 +1802,9 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 			if allocErr != nil {
 				s.logger.Warn("Could not auto-allocate next tape", map[string]interface{}{"error": allocErr.Error()})
 			} else {
-				s.db.QueryRow("SELECT label FROM tapes WHERE id = ?", nextTapeID).Scan(&nextTapeLabel)
+				if err := s.db.QueryRow("SELECT label FROM tapes WHERE id = ?", nextTapeID).Scan(&nextTapeLabel); err != nil {
+					s.logger.Warn("Could not look up next tape label", map[string]interface{}{"tape_id": nextTapeID, "error": err.Error()})
+				}
 			}
 
 			// Need another tape — request a change
