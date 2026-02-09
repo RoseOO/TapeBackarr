@@ -680,10 +680,12 @@ func TestCountingReaderWriteTo(t *testing.T) {
 	}
 	reader := bytes.NewReader(data)
 
+	var callbackCalled int32
 	var lastCount int64
 	cr := &countingReader{
 		reader: reader,
 		callback: func(bytesRead int64) {
+			atomic.AddInt32(&callbackCalled, 1)
 			atomic.StoreInt64(&lastCount, bytesRead)
 		},
 	}
@@ -705,6 +707,14 @@ func TestCountingReaderWriteTo(t *testing.T) {
 	// Verify data integrity
 	if !bytes.Equal(dst.Bytes(), data) {
 		t.Error("destination data does not match source")
+	}
+	// Verify progress callback was invoked (first read always fires
+	// because lastCallback starts at 0, so the throttle check passes)
+	if atomic.LoadInt32(&callbackCalled) < 1 {
+		t.Error("expected progress callback to be invoked at least once")
+	}
+	if atomic.LoadInt64(&lastCount) <= 0 {
+		t.Error("expected callback to report non-zero byte count")
 	}
 }
 

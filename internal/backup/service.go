@@ -139,6 +139,12 @@ func buildCompressionCmd(ctx context.Context, compression models.CompressionType
 	}
 }
 
+// relayBufferSize is the buffer size used by countingReader.WriteTo when
+// Go's exec package relays data via io.Copy (e.g. Cmd.Stdin). 256KB
+// matches the typical LTO block size and is 8× larger than io.Copy's
+// default 32KB, reducing syscall overhead in the streaming pipeline.
+const relayBufferSize = 256 * 1024
+
 // countingReader wraps an io.Reader and counts bytes read through it.
 // It uses atomic operations instead of a mutex for the byte counter to avoid
 // lock contention in the hot data path, and throttles the progress callback
@@ -146,7 +152,7 @@ func buildCompressionCmd(ctx context.Context, compression models.CompressionType
 // time.Now() calls, and float math in the callback.
 //
 // countingReader also implements io.WriterTo so that when Go's exec package
-// uses io.Copy to relay data (e.g. when set as Cmd.Stdin), a 256KB buffer
+// uses io.Copy to relay data (e.g. when set as Cmd.Stdin), a larger buffer
 // is used instead of io.Copy's default 32KB. This is critical for tape
 // streaming performance: the larger buffer reduces syscall overhead in the
 // tar → mbuffer → tape pipeline and keeps the mbuffer fed at full speed.
@@ -158,24 +164,33 @@ type countingReader struct {
 	paused       *int32 // atomic: 0=running, 1=paused
 }
 
-func (cr *countingReader) Read(p []byte) (int, error) {
-	// Check pause state
+// waitWhilePaused blocks until the pause flag is cleared.
+func (cr *countingReader) waitWhilePaused() {
 	for cr.paused != nil && atomic.LoadInt32(cr.paused) == 1 {
 		time.Sleep(100 * time.Millisecond)
 	}
-	n, err := cr.reader.Read(p)
-	if n > 0 {
-		total := atomic.AddInt64(&cr.count, int64(n))
-		if cr.callback != nil {
-			now := time.Now().UnixNano()
-			last := atomic.LoadInt64(&cr.lastCallback)
-			// Throttle callback to at most once per second to reduce overhead
-			if now-last >= int64(time.Second) {
-				if atomic.CompareAndSwapInt64(&cr.lastCallback, last, now) {
-					cr.callback(total)
-				}
+}
+
+// trackBytes updates the byte counter and fires the throttled progress callback.
+func (cr *countingReader) trackBytes(n int) {
+	total := atomic.AddInt64(&cr.count, int64(n))
+	if cr.callback != nil {
+		now := time.Now().UnixNano()
+		last := atomic.LoadInt64(&cr.lastCallback)
+		// Throttle callback to at most once per second to reduce overhead
+		if now-last >= int64(time.Second) {
+			if atomic.CompareAndSwapInt64(&cr.lastCallback, last, now) {
+				cr.callback(total)
 			}
 		}
+	}
+}
+
+func (cr *countingReader) Read(p []byte) (int, error) {
+	cr.waitWhilePaused()
+	n, err := cr.reader.Read(p)
+	if n > 0 {
+		cr.trackBytes(n)
 	}
 	return n, err
 }
@@ -185,24 +200,13 @@ func (cr *countingReader) Read(p []byte) (int, error) {
 // data in 256KB chunks instead of the default 32KB. This keeps the mbuffer
 // fed faster and prevents tape shoe-shining during streaming.
 func (cr *countingReader) WriteTo(w io.Writer) (int64, error) {
-	buf := make([]byte, 256*1024) // 256KB — matches typical LTO block size
+	buf := make([]byte, relayBufferSize)
 	var total int64
 	for {
-		for cr.paused != nil && atomic.LoadInt32(cr.paused) == 1 {
-			time.Sleep(100 * time.Millisecond)
-		}
+		cr.waitWhilePaused()
 		nr, readErr := cr.reader.Read(buf)
 		if nr > 0 {
-			newTotal := atomic.AddInt64(&cr.count, int64(nr))
-			if cr.callback != nil {
-				now := time.Now().UnixNano()
-				last := atomic.LoadInt64(&cr.lastCallback)
-				if now-last >= int64(time.Second) {
-					if atomic.CompareAndSwapInt64(&cr.lastCallback, last, now) {
-						cr.callback(newTotal)
-					}
-				}
-			}
+			cr.trackBytes(nr)
 			nw, writeErr := w.Write(buf[:nr])
 			total += int64(nw)
 			if writeErr != nil {
