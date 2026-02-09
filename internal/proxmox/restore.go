@@ -217,18 +217,12 @@ func (s *RestoreService) RestoreGuest(ctx context.Context, req *RestoreRequest) 
 		return result, err
 	}
 
-	// Rewind tape and seek past label to the backup data
-	if err := driveSvc.Rewind(ctx); err != nil {
+	// Position tape past the label to the backup data
+	if err := driveSvc.SeekToFileNumber(ctx, 1); err != nil {
 		result.Status = "failed"
-		result.Error = fmt.Sprintf("failed to rewind tape: %v", err)
+		result.Error = fmt.Sprintf("failed to seek past tape label: %v", err)
 		s.updateRestoreStatus(restoreID, "failed", result.Error)
 		return result, err
-	}
-	// Skip past the tape label to the data area
-	if err := driveSvc.SeekToFileNumber(ctx, 1); err != nil {
-		s.logger.Warn("Failed to seek past label, continuing anyway", map[string]interface{}{
-			"error": err.Error(),
-		})
 	}
 
 	// Extract backup from tape to temp directory

@@ -649,3 +649,38 @@ func TestResolveDriveDevicePathNotFound(t *testing.T) {
 		t.Error("expected error when no drive has the tape loaded")
 	}
 }
+
+func TestStartBlockReadFromDB(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	setupTestData(t, db)
+
+	// Test 1: NULL start_block should resolve to 0
+	var startBlock int64
+	err := db.QueryRow(`
+		SELECT COALESCE(start_block, 0) FROM backup_sets WHERE id = 1
+	`).Scan(&startBlock)
+	if err != nil {
+		t.Fatalf("failed to query start_block: %v", err)
+	}
+	if startBlock != 0 {
+		t.Errorf("expected start_block 0 for NULL, got %d", startBlock)
+	}
+
+	// Test 2: Set start_block and verify it's read correctly
+	_, err = db.Exec("UPDATE backup_sets SET start_block = ? WHERE id = 1", 42)
+	if err != nil {
+		t.Fatalf("failed to update start_block: %v", err)
+	}
+
+	err = db.QueryRow(`
+		SELECT COALESCE(start_block, 0) FROM backup_sets WHERE id = 1
+	`).Scan(&startBlock)
+	if err != nil {
+		t.Fatalf("failed to query start_block: %v", err)
+	}
+	if startBlock != 42 {
+		t.Errorf("expected start_block 42, got %d", startBlock)
+	}
+}

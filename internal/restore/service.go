@@ -370,24 +370,26 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 	}
 
 	// --- Step 5: Position tape ---
+	// The tape label was already read (and the tape rewound) during verification.
+	// We now need to position the tape head at the start of the backup data.
+	// The data lives at file number 1 (after the label at file 0 and its file mark).
+	// If start_block is recorded we try an absolute seek first, falling back to
+	// file-based positioning on failure.
 	if startBlock > 0 {
 		if err := driveSvc.SeekToBlock(ctx, startBlock); err != nil {
-			s.logger.Warn("Failed to seek to block, rewinding", map[string]interface{}{
-				"error": err.Error(),
+			s.logger.Warn("Failed to seek to block, falling back to file-based seek", map[string]interface{}{
+				"start_block": startBlock,
+				"error":       err.Error(),
 			})
-			if err := driveSvc.Rewind(ctx); err != nil {
-				return nil, fmt.Errorf("failed to rewind tape: %w", err)
+			// Fall back to seeking by file number
+			if err := driveSvc.SeekToFileNumber(ctx, 1); err != nil {
+				return nil, fmt.Errorf("failed to position tape: %w", err)
 			}
 		}
 	} else {
-		if err := driveSvc.Rewind(ctx); err != nil {
-			return nil, fmt.Errorf("failed to rewind tape: %w", err)
-		}
-		// Skip label
+		// No recorded start block — seek past the label to file 1
 		if err := driveSvc.SeekToFileNumber(ctx, 1); err != nil {
-			s.logger.Warn("Failed to seek past label, continuing anyway", map[string]interface{}{
-				"error": err.Error(),
-			})
+			return nil, fmt.Errorf("failed to seek past tape label: %w", err)
 		}
 	}
 

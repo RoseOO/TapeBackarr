@@ -375,6 +375,19 @@ func (s *Service) SeekToFileNumber(ctx context.Context, fileNum int64) error {
 	return nil
 }
 
+// GetTapePosition returns the current file number and block number of the tape head
+// by querying the drive status via mt.
+func (s *Service) GetTapePosition(ctx context.Context) (fileNumber, blockNumber int64, err error) {
+	status, err := s.GetStatus(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to get tape status: %w", err)
+	}
+	if status.Error != "" {
+		return 0, 0, fmt.Errorf("tape status error: %s", status.Error)
+	}
+	return status.FileNumber, status.BlockNumber, nil
+}
+
 // SeekToBlock positions the tape at the specified block
 func (s *Service) SeekToBlock(ctx context.Context, blockNum int64) error {
 	cmd := exec.CommandContext(ctx, "mt", "-f", s.devicePath, "seek", strconv.FormatInt(blockNum, 10))

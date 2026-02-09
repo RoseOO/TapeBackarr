@@ -1562,6 +1562,21 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		return nil, fmt.Errorf("failed to position tape past label: %w", err)
 	}
 
+	// Record the tape position so restore can seek directly to the data
+	_, startBlock, posErr := driveSvc.GetTapePosition(ctx)
+	if posErr != nil {
+		s.logger.Warn("Could not read tape position for start_block", map[string]interface{}{"error": posErr.Error()})
+	} else {
+		if _, dbErr := s.db.Exec("UPDATE backup_sets SET start_block = ? WHERE id = ?", startBlock, backupSetID); dbErr != nil {
+			s.logger.Warn("Failed to record start_block", map[string]interface{}{"error": dbErr.Error()})
+		} else {
+			s.logger.Info("Recorded backup start block", map[string]interface{}{
+				"start_block":   startBlock,
+				"backup_set_id": backupSetID,
+			})
+		}
+	}
+
 	// Determine encryption and compression settings
 	var encrypted bool
 	var encryptionKeyID *int64
@@ -1874,6 +1889,13 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 				s.updateProgress(job.ID, "failed", errMsg)
 				s.db.Exec("UPDATE tape_spanning_sets SET status = 'failed' WHERE id = ?", spanningSetID)
 				return nil, fmt.Errorf("%s", errMsg)
+			}
+
+			// Record the tape position so restore can seek directly to the data
+			if _, spanStartBlock, posErr := currentDriveSvc.GetTapePosition(ctx); posErr == nil {
+				if _, dbErr := s.db.Exec("UPDATE backup_sets SET start_block = ? WHERE id = ?", spanStartBlock, currentBackupSetID); dbErr != nil {
+					s.logger.Warn("Failed to record start_block for spanning tape", map[string]interface{}{"error": dbErr.Error()})
+				}
 			}
 
 			// Update progress for the new tape
