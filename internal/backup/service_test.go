@@ -1353,3 +1353,40 @@ func TestComputeChecksumsAsyncWritesCatalogToDB(t *testing.T) {
 		t.Errorf("expected 64-char SHA256 in DB, got %d chars: %s", len(checksum), checksum)
 	}
 }
+
+func TestTapeChangeCallbackField(t *testing.T) {
+	// Verify the TapeChangeCallback field works correctly on the Service struct
+	svc := &Service{}
+
+	// Nil callback should not panic
+	if svc.TapeChangeCallback != nil {
+		t.Error("expected TapeChangeCallback to be nil by default")
+	}
+
+	// Set callback and verify it's called with correct arguments
+	var calledWith struct {
+		jobName, currentTape, reason, nextTape string
+	}
+	svc.TapeChangeCallback = func(ctx context.Context, jobName, currentTape, reason, nextTape string) {
+		calledWith.jobName = jobName
+		calledWith.currentTape = currentTape
+		calledWith.reason = reason
+		calledWith.nextTape = nextTape
+	}
+
+	ctx := context.Background()
+	svc.TapeChangeCallback(ctx, "TestJob", "TAPE-001", "tape_full", "TAPE-002")
+
+	if calledWith.jobName != "TestJob" {
+		t.Errorf("expected jobName 'TestJob', got %q", calledWith.jobName)
+	}
+	if calledWith.currentTape != "TAPE-001" {
+		t.Errorf("expected currentTape 'TAPE-001', got %q", calledWith.currentTape)
+	}
+	if calledWith.reason != "tape_full" {
+		t.Errorf("expected reason 'tape_full', got %q", calledWith.reason)
+	}
+	if calledWith.nextTape != "TAPE-002" {
+		t.Errorf("expected nextTape 'TAPE-002', got %q", calledWith.nextTape)
+	}
+}

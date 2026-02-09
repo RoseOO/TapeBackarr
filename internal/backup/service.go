@@ -114,6 +114,10 @@ func (st *speedTracker) Speed() float64 {
 // EventCallback is called when backup progress events occur (for SSE/console)
 type EventCallback func(eventType, category, title, message string)
 
+// TapeChangeCallback is called when a tape change is required during multi-tape spanning.
+// It allows the caller to send notifications (e.g. Telegram) with the exact next tape label.
+type TapeChangeCallback func(ctx context.Context, jobName, currentTape, reason, nextTape string)
+
 // buildCompressionCmd returns the exec.Cmd for the given compression type.
 // For gzip it uses pigz (parallel gzip) with -1 (fastest) when available,
 // falling back to gzip -1. For zstd it uses automatic multi-threading.
@@ -197,8 +201,9 @@ type Service struct {
 	activeJobs    map[int64]*JobProgress
 	cancelFuncs   map[int64]context.CancelFunc
 	pauseFlags    map[int64]*int32
-	resumeFiles   map[int64][]string // files already processed for resume
-	EventCallback EventCallback
+	resumeFiles        map[int64][]string // files already processed for resume
+	EventCallback      EventCallback
+	TapeChangeCallback TapeChangeCallback
 }
 
 // NewService creates a new backup service
@@ -1783,15 +1788,39 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 				break
 			}
 
-			// Need another tape — request a change
-			s.updateProgress(job.ID, "waiting", fmt.Sprintf("Tape %s complete. Waiting for next tape... (%d files remaining)", currentLabel, len(remaining)))
-			s.emitEvent("warning", "backup", "Tape Change Required",
-				fmt.Sprintf("Job %s: tape %s is full. Please load a new tape from the pool. %d files remaining.", job.Name, currentLabel, len(remaining)))
+			// Auto-eject the completed tape so the operator can swap it
+			if ejectErr := currentDriveSvc.Eject(ctx); ejectErr != nil {
+				s.logger.Warn("Failed to auto-eject completed tape", map[string]interface{}{
+					"tape_label": currentLabel,
+					"error":      ejectErr.Error(),
+				})
+			}
 
 			// Try to allocate the next tape from the pool
 			nextTapeID, allocErr := s.allocateNextTape(ctx, job.PoolID, usedTapeIDs)
+			var nextTapeLabel string
 			if allocErr != nil {
 				s.logger.Warn("Could not auto-allocate next tape", map[string]interface{}{"error": allocErr.Error()})
+			} else {
+				if err := s.db.QueryRow("SELECT label FROM tapes WHERE id = ?", nextTapeID).Scan(&nextTapeLabel); err != nil {
+					s.logger.Warn("Could not look up next tape label", map[string]interface{}{"tape_id": nextTapeID, "error": err.Error()})
+				}
+			}
+
+			// Need another tape — request a change
+			if nextTapeLabel != "" {
+				s.updateProgress(job.ID, "waiting", fmt.Sprintf("Tape %s complete. Waiting for next tape %s... (%d files remaining)", currentLabel, nextTapeLabel, len(remaining)))
+				s.emitEvent("warning", "backup", "Tape Change Required",
+					fmt.Sprintf("Job %s: tape %s is full. Please load tape %s. %d files remaining.", job.Name, currentLabel, nextTapeLabel, len(remaining)))
+			} else {
+				s.updateProgress(job.ID, "waiting", fmt.Sprintf("Tape %s complete. Waiting for next tape... (%d files remaining)", currentLabel, len(remaining)))
+				s.emitEvent("warning", "backup", "Tape Change Required",
+					fmt.Sprintf("Job %s: tape %s is full. Please load a new tape from the pool. %d files remaining.", job.Name, currentLabel, len(remaining)))
+			}
+
+			// Send notification (e.g. Telegram) about the tape change
+			if s.TapeChangeCallback != nil {
+				s.TapeChangeCallback(ctx, job.Name, currentLabel, "tape_full", nextTapeLabel)
 			}
 
 			reqID, err := s.createTapeChangeRequest(ctx, currentTapeID, spanningSetID, "tape_full")
