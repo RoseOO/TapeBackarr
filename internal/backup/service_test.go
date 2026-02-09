@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1043,5 +1045,127 @@ func TestScanProgressFieldsInJobProgress(t *testing.T) {
 	}
 	if p.ScanBytesFound != 123456 {
 		t.Errorf("expected ScanBytesFound 123456, got %d", p.ScanBytesFound)
+	}
+}
+
+func TestComputeChecksumsAsync(t *testing.T) {
+	tmpDir := t.TempDir()
+	svc := &Service{}
+
+	// Create test files
+	file1 := filepath.Join(tmpDir, "file1.txt")
+	file2 := filepath.Join(tmpDir, "file2.txt")
+	os.WriteFile(file1, []byte("Hello, World!"), 0644)
+	os.WriteFile(file2, []byte("test content"), 0644)
+
+	files := []FileInfo{
+		{Path: file1, Size: 13},
+		{Path: file2, Size: 12},
+	}
+
+	checksums := &sync.Map{}
+	svc.computeChecksumsAsync(context.Background(), files, checksums)
+
+	// Both files should have checksums
+	val1, ok1 := checksums.Load(file1)
+	if !ok1 {
+		t.Fatal("expected checksum for file1")
+	}
+	if len(val1.(string)) != 64 {
+		t.Errorf("expected 64-char SHA256 hash, got %d chars", len(val1.(string)))
+	}
+
+	val2, ok2 := checksums.Load(file2)
+	if !ok2 {
+		t.Fatal("expected checksum for file2")
+	}
+	if val1.(string) == val2.(string) {
+		t.Error("different files should have different checksums")
+	}
+
+	// Known SHA256 for "Hello, World!"
+	expectedChecksum := "dffd6021bb2bd5b0af676290809ec3a53191dd81c7f70a4b28688a362182986f"
+	if val1.(string) != expectedChecksum {
+		t.Errorf("checksum mismatch: expected %s, got %s", expectedChecksum, val1.(string))
+	}
+}
+
+func TestComputeChecksumsAsyncContextCancellation(t *testing.T) {
+	tmpDir := t.TempDir()
+	svc := &Service{}
+
+	// Create many files
+	files := make([]FileInfo, 100)
+	for i := range files {
+		path := filepath.Join(tmpDir, fmt.Sprintf("file%d.txt", i))
+		os.WriteFile(path, []byte(fmt.Sprintf("content %d", i)), 0644)
+		files[i] = FileInfo{Path: path, Size: 10}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	checksums := &sync.Map{}
+	svc.computeChecksumsAsync(ctx, files, checksums)
+
+	// With immediate cancellation, very few (or zero) checksums should be computed
+	count := 0
+	checksums.Range(func(_, _ interface{}) bool {
+		count++
+		return true
+	})
+	// Should not have computed all 100 checksums
+	if count == 100 {
+		t.Error("expected fewer than 100 checksums after immediate cancellation")
+	}
+}
+
+func TestComputeChecksumsAsyncMissingFile(t *testing.T) {
+	svc := &Service{}
+
+	files := []FileInfo{
+		{Path: "/nonexistent/file.txt", Size: 100},
+	}
+
+	checksums := &sync.Map{}
+	svc.computeChecksumsAsync(context.Background(), files, checksums)
+
+	// Missing file should not produce a checksum
+	_, ok := checksums.Load("/nonexistent/file.txt")
+	if ok {
+		t.Error("expected no checksum for nonexistent file")
+	}
+}
+
+func TestCountingWriter(t *testing.T) {
+	var buf bytes.Buffer
+	cw := &countingWriter{writer: &buf}
+
+	data := []byte("hello world")
+	n, err := cw.Write(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if n != len(data) {
+		t.Errorf("expected %d bytes written, got %d", len(data), n)
+	}
+	if cw.bytesWritten() != int64(len(data)) {
+		t.Errorf("expected count %d, got %d", len(data), cw.bytesWritten())
+	}
+
+	// Write more data
+	data2 := []byte(" more data")
+	n2, err := cw.Write(data2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	expected := int64(n + n2)
+	if cw.bytesWritten() != expected {
+		t.Errorf("expected total %d, got %d", expected, cw.bytesWritten())
+	}
+
+	// Verify data was actually written to underlying writer
+	if buf.String() != "hello world more data" {
+		t.Errorf("expected 'hello world more data', got '%s'", buf.String())
 	}
 }

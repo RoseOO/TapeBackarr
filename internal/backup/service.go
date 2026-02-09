@@ -230,6 +230,20 @@ func (s *Service) GetActiveJobs() []*JobProgress {
 	return jobs
 }
 
+// InjectTestJob adds a job directly into activeJobs for testing purposes.
+func (s *Service) InjectTestJob(jobID int64, p *JobProgress) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.activeJobs[jobID] = p
+}
+
+// RemoveTestJob removes a job from activeJobs for testing cleanup.
+func (s *Service) RemoveTestJob(jobID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.activeJobs, jobID)
+}
+
 // CancelJob cancels a running backup job
 func (s *Service) CancelJob(jobID int64) bool {
 	s.mu.Lock()
