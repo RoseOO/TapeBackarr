@@ -2920,10 +2920,15 @@ func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Delete tape_change_requests referencing job_executions for this job (before deleting job_executions)
+	// Delete tape_change_requests referencing job_executions or tape_spanning_sets for this job
 	if _, err := s.db.Exec("DELETE FROM tape_change_requests WHERE job_execution_id IN (SELECT id FROM job_executions WHERE job_id = ?)", id); err != nil {
 		if s.logger != nil {
 			s.logger.Warn("failed to delete tape_change_requests for job", map[string]interface{}{"job_id": id, "error": err.Error()})
+		}
+	}
+	if _, err := s.db.Exec("DELETE FROM tape_change_requests WHERE spanning_set_id IN (SELECT id FROM tape_spanning_sets WHERE job_id = ?)", id); err != nil {
+		if s.logger != nil {
+			s.logger.Warn("failed to delete tape_change_requests by spanning_set for job", map[string]interface{}{"job_id": id, "error": err.Error()})
 		}
 	}
 
@@ -2938,6 +2943,13 @@ func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.db.Exec("DELETE FROM tape_spanning_sets WHERE job_id = ?", id); err != nil {
 		if s.logger != nil {
 			s.logger.Warn("failed to delete tape_spanning_sets for job", map[string]interface{}{"job_id": id, "error": err.Error()})
+		}
+	}
+
+	// Clear self-referencing parent_set_id before deleting backup_sets
+	if _, err := s.db.Exec("UPDATE backup_sets SET parent_set_id = NULL WHERE job_id = ?", id); err != nil {
+		if s.logger != nil {
+			s.logger.Warn("failed to clear parent_set_id for job", map[string]interface{}{"job_id": id, "error": err.Error()})
 		}
 	}
 
@@ -3084,10 +3096,37 @@ func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 // selectTapeFromPool picks the best tape from a pool based on status, available space, and retention.
 // It prefers active tapes with remaining space, then blank tapes.
 func (s *Server) selectTapeFromPool(poolID int64, retentionDays int) (int64, string, error) {
-	// First, try to find an active tape in the pool with remaining capacity
 	var tapeID int64
 	var tapeLabel string
+
+	// Prefer tapes currently loaded in an enabled drive so the backup can proceed immediately.
+
+	// Active tape loaded in a drive with remaining capacity
 	err := s.db.QueryRow(`
+		SELECT t.id, t.label FROM tapes t
+		JOIN tape_drives td ON td.current_tape_id = t.id AND COALESCE(td.enabled, 1) = 1
+		WHERE t.pool_id = ? AND t.status = 'active' AND (t.capacity_bytes - t.used_bytes) > 0
+		ORDER BY t.used_bytes ASC
+		LIMIT 1
+	`, poolID).Scan(&tapeID, &tapeLabel)
+	if err == nil {
+		return tapeID, tapeLabel, nil
+	}
+
+	// Blank tape loaded in a drive
+	err = s.db.QueryRow(`
+		SELECT t.id, t.label FROM tapes t
+		JOIN tape_drives td ON td.current_tape_id = t.id AND COALESCE(td.enabled, 1) = 1
+		WHERE t.pool_id = ? AND t.status = 'blank'
+		ORDER BY t.created_at ASC
+		LIMIT 1
+	`, poolID).Scan(&tapeID, &tapeLabel)
+	if err == nil {
+		return tapeID, tapeLabel, nil
+	}
+
+	// Fallback: active tape not necessarily in a drive
+	err = s.db.QueryRow(`
 		SELECT id, label FROM tapes
 		WHERE pool_id = ? AND status = 'active' AND (capacity_bytes - used_bytes) > 0
 		ORDER BY used_bytes ASC
@@ -3097,7 +3136,7 @@ func (s *Server) selectTapeFromPool(poolID int64, retentionDays int) (int64, str
 		return tapeID, tapeLabel, nil
 	}
 
-	// Next, try a blank tape in the pool
+	// Fallback: blank tape not necessarily in a drive
 	err = s.db.QueryRow(`
 		SELECT id, label FROM tapes
 		WHERE pool_id = ? AND status = 'blank'

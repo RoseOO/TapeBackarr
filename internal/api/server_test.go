@@ -872,3 +872,198 @@ func TestDeleteProxmoxJobWithForeignKeys(t *testing.T) {
 		t.Error("proxmox job executions should be deleted")
 	}
 }
+
+func TestDeleteJobWithParentSetFK(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := database.New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("failed to migrate database: %v", err)
+	}
+
+	logger, err := logging.NewLogger("warn", "text", "")
+	if err != nil {
+		t.Fatalf("failed to create logger: %v", err)
+	}
+
+	// Create source, job, tape
+	if _, err := db.Exec("INSERT INTO backup_sources (name, source_type, path) VALUES (?, ?, ?)", "src", "local", "/tmp"); err != nil {
+		t.Fatalf("failed to insert source: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO backup_jobs (name, source_id, pool_id, backup_type, retention_days, enabled) VALUES (?, ?, ?, ?, ?, ?)",
+		"TestJob", 1, 1, "full", 30, true); err != nil {
+		t.Fatalf("failed to insert job: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO tapes (uuid, barcode, label, pool_id, status, capacity_bytes, used_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		"uuid-1", "T01", "T01", 1, "active", int64(1500000000000), int64(0)); err != nil {
+		t.Fatalf("failed to insert tape: %v", err)
+	}
+
+	// Create parent backup set (full), then child (incremental) referencing it
+	if _, err := db.Exec("INSERT INTO backup_sets (job_id, tape_id, backup_type, start_time, status) VALUES (?, ?, ?, datetime('now'), ?)",
+		1, 1, "full", "completed"); err != nil {
+		t.Fatalf("failed to insert parent backup set: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO backup_sets (job_id, tape_id, backup_type, start_time, status, parent_set_id) VALUES (?, ?, ?, datetime('now'), ?, ?)",
+		1, 1, "incremental", "completed", 1); err != nil {
+		t.Fatalf("failed to insert child backup set: %v", err)
+	}
+
+	tapeService := tape.NewService("/dev/null", 65536)
+	sched := scheduler.NewService(db, logger, nil)
+	r := chi.NewRouter()
+	s := &Server{
+		router:      r,
+		db:          db,
+		tapeService: tapeService,
+		logger:      logger,
+		scheduler:   sched,
+	}
+
+	r.Delete("/api/v1/jobs/{id}", s.handleDeleteJob)
+
+	req := httptest.NewRequest("DELETE", "/api/v1/jobs/1", nil)
+	rr := httptest.NewRecorder()
+	s.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var count int
+	db.QueryRow("SELECT COUNT(*) FROM backup_sets WHERE job_id = 1").Scan(&count)
+	if count != 0 {
+		t.Error("backup sets with parent_set_id self-reference should be deleted")
+	}
+	db.QueryRow("SELECT COUNT(*) FROM backup_jobs WHERE id = 1").Scan(&count)
+	if count != 0 {
+		t.Error("backup job should be deleted")
+	}
+}
+
+func TestDeleteJobWithSpanningSetFK(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := database.New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("failed to migrate database: %v", err)
+	}
+
+	logger, err := logging.NewLogger("warn", "text", "")
+	if err != nil {
+		t.Fatalf("failed to create logger: %v", err)
+	}
+
+	// Create source, job, tape
+	if _, err := db.Exec("INSERT INTO backup_sources (name, source_type, path) VALUES (?, ?, ?)", "src", "local", "/tmp"); err != nil {
+		t.Fatalf("failed to insert source: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO backup_jobs (name, source_id, pool_id, backup_type, retention_days, enabled) VALUES (?, ?, ?, ?, ?, ?)",
+		"TestJob", 1, 1, "full", 30, true); err != nil {
+		t.Fatalf("failed to insert job: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO tapes (uuid, barcode, label, pool_id, status, capacity_bytes, used_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		"uuid-1", "T01", "T01", 1, "active", int64(1500000000000), int64(0)); err != nil {
+		t.Fatalf("failed to insert tape: %v", err)
+	}
+
+	// Create backup set, spanning set, and tape_change_request referencing the spanning set
+	if _, err := db.Exec("INSERT INTO backup_sets (job_id, tape_id, backup_type, start_time, status) VALUES (?, ?, ?, datetime('now'), ?)",
+		1, 1, "full", "completed"); err != nil {
+		t.Fatalf("failed to insert backup set: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO tape_spanning_sets (job_id, total_tapes, status) VALUES (?, ?, ?)", 1, 1, "completed"); err != nil {
+		t.Fatalf("failed to insert spanning set: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO tape_change_requests (spanning_set_id, current_tape_id, reason, status) VALUES (?, ?, ?, ?)",
+		1, 1, "tape_full", "completed"); err != nil {
+		t.Fatalf("failed to insert tape change request: %v", err)
+	}
+
+	tapeService := tape.NewService("/dev/null", 65536)
+	sched := scheduler.NewService(db, logger, nil)
+	r := chi.NewRouter()
+	s := &Server{
+		router:      r,
+		db:          db,
+		tapeService: tapeService,
+		logger:      logger,
+		scheduler:   sched,
+	}
+
+	r.Delete("/api/v1/jobs/{id}", s.handleDeleteJob)
+
+	req := httptest.NewRequest("DELETE", "/api/v1/jobs/1", nil)
+	rr := httptest.NewRecorder()
+	s.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var count int
+	db.QueryRow("SELECT COUNT(*) FROM tape_spanning_sets WHERE job_id = 1").Scan(&count)
+	if count != 0 {
+		t.Error("tape spanning sets should be deleted")
+	}
+	db.QueryRow("SELECT COUNT(*) FROM tape_change_requests WHERE spanning_set_id = 1").Scan(&count)
+	if count != 0 {
+		t.Error("tape change requests should be deleted")
+	}
+	db.QueryRow("SELECT COUNT(*) FROM backup_jobs WHERE id = 1").Scan(&count)
+	if count != 0 {
+		t.Error("backup job should be deleted")
+	}
+}
+
+func TestSelectTapeFromPoolPrefersDriveLoaded(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := database.New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("failed to migrate database: %v", err)
+	}
+
+	// Create two active tapes in the same pool
+	if _, err := db.Exec("INSERT INTO tapes (uuid, barcode, label, pool_id, status, capacity_bytes, used_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		"uuid-a", "T01", "TapeA", 1, "active", int64(1500000000000), int64(100)); err != nil {
+		t.Fatalf("failed to insert tapeA: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO tapes (uuid, barcode, label, pool_id, status, capacity_bytes, used_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		"uuid-b", "T02", "TapeB", 1, "active", int64(1500000000000), int64(500)); err != nil {
+		t.Fatalf("failed to insert tapeB: %v", err)
+	}
+
+	// Load TapeB into a drive (TapeA is not in any drive)
+	if _, err := db.Exec("INSERT INTO tape_drives (device_path, display_name, status, enabled, current_tape_id) VALUES (?, ?, ?, ?, ?)",
+		"/dev/nst0", "Drive0", "ready", 1, 2); err != nil {
+		t.Fatalf("failed to insert drive: %v", err)
+	}
+
+	s := &Server{db: db}
+
+	tapeID, tapeLabel, err := s.selectTapeFromPool(1, 30)
+	if err != nil {
+		t.Fatalf("selectTapeFromPool failed: %v", err)
+	}
+
+	// TapeB (id=2) should be selected because it's in a drive, even though TapeA has less used space
+	if tapeID != 2 {
+		t.Errorf("expected tape id 2 (loaded in drive), got %d", tapeID)
+	}
+	if tapeLabel != "TapeB" {
+		t.Errorf("expected tape label 'TapeB', got %q", tapeLabel)
+	}
+}
