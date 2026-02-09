@@ -149,7 +149,7 @@
 
   function getUsageColor(percent: number): string {
     if (percent >= 90) return 'var(--accent-danger, #dc3545)';
-    if (percent >= 75) return '#f39c12';
+    if (percent >= 75) return 'var(--accent-warning, #f39c12)';
     return 'var(--accent-success, #16c784)';
   }
 </script>
@@ -267,14 +267,15 @@
               <span class="pool-tape-count">{pool.tape_count} tape{pool.tape_count !== 1 ? 's' : ''}</span>
             </div>
             {#if pool.total_capacity_bytes > 0}
+              {@const usagePercent = getPoolUsagePercent(pool)}
               <div class="pool-storage-bar-container">
                 <div class="pool-storage-bar">
                   <div
                     class="pool-storage-fill"
-                    style="width: {getPoolUsagePercent(pool)}%; background: {getUsageColor(getPoolUsagePercent(pool))}"
+                    style="width: {usagePercent}%; background: {getUsageColor(usagePercent)}"
                   ></div>
                 </div>
-                <span class="pool-storage-percent">{getPoolUsagePercent(pool).toFixed(1)}%</span>
+                <span class="pool-storage-percent">{usagePercent.toFixed(1)}%</span>
               </div>
               <div class="pool-storage-details">
                 <span>Used: {formatBytes(pool.total_used_bytes)}</span>
