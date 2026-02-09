@@ -139,6 +139,27 @@ func NewServer(
 		go s.StartTelegramBot(context.Background())
 	}
 
+	// Wire up restore notifications (email + telegram)
+	if restoreService != nil {
+		var emailSvc *notifications.EmailService
+		if cfg != nil && cfg.Notifications.Email.Enabled {
+			emailSvc = notifications.NewEmailService(notifications.EmailConfig{
+				Enabled:    cfg.Notifications.Email.Enabled,
+				SMTPHost:   cfg.Notifications.Email.SMTPHost,
+				SMTPPort:   cfg.Notifications.Email.SMTPPort,
+				Username:   cfg.Notifications.Email.Username,
+				Password:   cfg.Notifications.Email.Password,
+				FromEmail:  cfg.Notifications.Email.FromEmail,
+				FromName:   cfg.Notifications.Email.FromName,
+				ToEmails:   cfg.Notifications.Email.ToEmails,
+				UseTLS:     cfg.Notifications.Email.UseTLS,
+				SkipVerify: cfg.Notifications.Email.SkipVerify,
+			})
+		}
+		restoreNotifier := notifications.NewRestoreNotifier(s.telegramService, emailSvc)
+		restoreService.SetNotifier(restoreNotifier)
+	}
+
 	return s
 }
 

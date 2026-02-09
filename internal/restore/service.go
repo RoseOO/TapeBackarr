@@ -29,6 +29,7 @@ type RestoreRequest struct {
 	DestinationType string   `json:"destination_type"` // local, smb, nfs
 	Verify          bool     `json:"verify"`
 	Overwrite       bool     `json:"overwrite"`
+	DriveID         *int64   `json:"drive_id,omitempty"` // Tape drive to use for restore
 }
 
 // RestoreResult represents the result of a restore operation
@@ -54,12 +55,22 @@ type TapeRequirement struct {
 // as online and ready before giving up.
 const tapeReadyTimeout = 30 * time.Second
 
+// tapeChangeWaitInterval is how often Restore polls for a tape change.
+const tapeChangeWaitInterval = 10 * time.Second
+
+// NotificationSender can send notifications via configured channels.
+type NotificationSender interface {
+	SendRestoreTapeChangeRequired(ctx context.Context, expectedLabel string, actualLabel string) error
+	SendRestoreWrongTape(ctx context.Context, expectedLabel string, actualLabel string) error
+}
+
 // Service handles restore operations
 type Service struct {
-	db          *database.DB
-	tapeService *tape.Service
-	logger      *logging.Logger
-	blockSize   int
+	db           *database.DB
+	tapeService  *tape.Service
+	logger       *logging.Logger
+	blockSize    int
+	notifier     NotificationSender
 }
 
 // NewService creates a new restore service
@@ -70,6 +81,11 @@ func NewService(db *database.DB, tapeService *tape.Service, logger *logging.Logg
 		logger:      logger,
 		blockSize:   blockSize,
 	}
+}
+
+// SetNotifier sets the notification sender for tape change prompts.
+func (s *Service) SetNotifier(n NotificationSender) {
+	s.notifier = n
 }
 
 // buildDecompressionCmd returns the exec.Cmd for the given compression type.
@@ -193,6 +209,72 @@ func (s *Service) GetRequiredTapes(ctx context.Context, req *RestoreRequest) ([]
 	return requirements, nil
 }
 
+// resolveDriveDevicePath determines the tape device path for the restore.
+// When req.DriveID is set the user explicitly selected a drive; otherwise
+// the drive is looked up by the tape that is currently loaded.
+func (s *Service) resolveDriveDevicePath(req *RestoreRequest, tapeID int64) (string, error) {
+	if req.DriveID != nil {
+		var devicePath string
+		err := s.db.QueryRow(
+			"SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1",
+			*req.DriveID,
+		).Scan(&devicePath)
+		if err != nil {
+			return "", fmt.Errorf("drive not found or not enabled: %w", err)
+		}
+		return devicePath, nil
+	}
+
+	var devicePath string
+	err := s.db.QueryRow(
+		"SELECT device_path FROM tape_drives WHERE current_tape_id = ?",
+		tapeID,
+	).Scan(&devicePath)
+	if err != nil {
+		return "", fmt.Errorf("tape not loaded in any drive: %w", err)
+	}
+	return devicePath, nil
+}
+
+// waitForCorrectTape verifies that the correct tape is loaded in the drive.
+// It reads the tape label and compares it to the expected label. If the wrong
+// tape is loaded it sends a notification and polls until the correct tape
+// appears or the context is cancelled.
+func (s *Service) waitForCorrectTape(ctx context.Context, driveSvc *tape.Service, expectedLabel string) error {
+	for {
+		label, err := driveSvc.ReadTapeLabel(ctx)
+		if err != nil {
+			s.logger.Warn("Could not read tape label, retrying", map[string]interface{}{
+				"error": err.Error(),
+			})
+		} else if label != nil && label.Label == expectedLabel {
+			s.logger.Info("Correct tape verified", map[string]interface{}{
+				"label": expectedLabel,
+			})
+			return nil
+		} else {
+			actualLabel := ""
+			if label != nil {
+				actualLabel = label.Label
+			}
+			s.logger.Warn("Wrong tape loaded", map[string]interface{}{
+				"expected": expectedLabel,
+				"actual":   actualLabel,
+			})
+			if s.notifier != nil {
+				_ = s.notifier.SendRestoreWrongTape(ctx, expectedLabel, actualLabel)
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(tapeChangeWaitInterval):
+			// poll again
+		}
+	}
+}
+
 // Restore performs a restore operation
 func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreResult, error) {
 	result := &RestoreResult{
@@ -248,46 +330,64 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 		})
 	}
 
-	// Get tape device path
-	var devicePath string
-	err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE current_tape_id = ?", tapeID).Scan(&devicePath)
-	if err != nil {
-		return nil, fmt.Errorf("tape not loaded in any drive: %w", err)
+	// Validate: if the backup is marked encrypted we must have a key.
+	if encrypted && encryptionKey == "" {
+		return nil, fmt.Errorf("backup set is marked as encrypted but no encryption key is available")
 	}
 
-	// Ensure tape is physically loaded and ready before any tape operations
+	// --- Step 1: Resolve drive and device path ---
+	devicePath, err := s.resolveDriveDevicePath(req, tapeID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create a drive-specific tape service for all tape operations
+	driveSvc := tape.NewServiceForDevice(devicePath, s.blockSize)
+
+	// --- Step 2: Wait for a tape to be physically ready ---
 	s.logger.Info("Waiting for tape to be ready", map[string]interface{}{
 		"device_path": devicePath,
 		"tape_id":     tapeID,
 	})
-	if err := s.tapeService.WaitForTape(ctx, tapeReadyTimeout); err != nil {
+	if err := driveSvc.WaitForTape(ctx, tapeReadyTimeout); err != nil {
 		return nil, fmt.Errorf("tape not ready: %w", err)
 	}
 
-	// Ensure destination exists
+	// --- Step 3: Verify the correct tape is loaded ---
+	var expectedLabel string
+	if err := s.db.QueryRow("SELECT label FROM tapes WHERE id = ?", tapeID).Scan(&expectedLabel); err == nil && expectedLabel != "" {
+		s.logger.Info("Verifying tape label", map[string]interface{}{
+			"expected_label": expectedLabel,
+		})
+		if err := s.waitForCorrectTape(ctx, driveSvc, expectedLabel); err != nil {
+			return nil, fmt.Errorf("tape verification failed: %w", err)
+		}
+	}
+
+	// --- Step 4: Ensure destination exists ---
 	if err := os.MkdirAll(req.DestPath, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create destination directory: %w", err)
 	}
 
-	// Position tape
+	// --- Step 5: Position tape ---
 	if startBlock > 0 {
-		if err := s.tapeService.SeekToBlock(ctx, startBlock); err != nil {
+		if err := driveSvc.SeekToBlock(ctx, startBlock); err != nil {
 			s.logger.Warn("Failed to seek to block, rewinding", map[string]interface{}{
 				"error": err.Error(),
 			})
-			if err := s.tapeService.Rewind(ctx); err != nil {
+			if err := driveSvc.Rewind(ctx); err != nil {
 				return nil, fmt.Errorf("failed to rewind tape: %w", err)
 			}
 		}
 	} else {
-		if err := s.tapeService.Rewind(ctx); err != nil {
+		if err := driveSvc.Rewind(ctx); err != nil {
 			return nil, fmt.Errorf("failed to rewind tape: %w", err)
 		}
 		// Skip label
-		s.tapeService.SeekToFileNumber(ctx, 1)
+		driveSvc.SeekToFileNumber(ctx, 1)
 	}
 
-	// Build tar extract command
+	// --- Step 6: Build tar extract command and execute pipeline ---
 	tarArgs := []string{
 		"-x",                                     // Extract
 		"-b", fmt.Sprintf("%d", s.blockSize/512), // Block size
@@ -303,13 +403,6 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 	// Add specific files if requested
 	if len(allFilePaths) > 0 {
 		tarArgs = append(tarArgs, allFilePaths...)
-	}
-
-	// Validate: if the backup is marked encrypted we must have a key.
-	// Without this check a corrupt/incomplete DB row could silently skip
-	// decryption and feed encrypted bytes to tar or a decompressor.
-	if encrypted && encryptionKey == "" {
-		return nil, fmt.Errorf("backup set is marked as encrypted but no encryption key is available")
 	}
 
 	if encrypted && compressed {

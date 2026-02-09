@@ -40,6 +40,17 @@
     order: number;
   }
 
+  interface TapeDrive {
+    id: number;
+    device_path: string;
+    display_name: string;
+    vendor: string;
+    model: string;
+    status: string;
+    enabled: boolean;
+    current_tape: string;
+  }
+
   let backupSets: BackupSet[] = [];
   let selectedSet: BackupSet | null = null;
   let catalogEntries: CatalogEntry[] = [];
@@ -58,6 +69,8 @@
   let filterStatus = 'all';
   let filterType = 'all';
   let sortBy = 'date';
+  let drives: TapeDrive[] = [];
+  let selectedDriveId: number | null = null;
 
   let restoreFormData = {
     dest_path: '/restore',
@@ -66,8 +79,20 @@
   };
 
   onMount(async () => {
-    await loadBackupSets();
+    await Promise.all([loadBackupSets(), loadDrives()]);
   });
+
+  async function loadDrives() {
+    try {
+      const result = await api.getDrives();
+      drives = (Array.isArray(result) ? result : []).filter((d: TapeDrive) => d.enabled);
+      if (drives.length > 0 && selectedDriveId === null) {
+        selectedDriveId = drives[0].id;
+      }
+    } catch (e) {
+      // Drives are optional; don't block restore if they fail to load
+    }
+  }
 
   async function loadBackupSets() {
     loading = true;
@@ -141,6 +166,7 @@
         dest_path: restoreFormData.dest_path,
         verify: restoreFormData.verify,
         overwrite: restoreFormData.overwrite,
+        drive_id: selectedDriveId ?? undefined,
       });
       restoreResult = result;
       restoreStep = 'done';
@@ -567,6 +593,22 @@
           </div>
 
           <form on:submit|preventDefault={() => restoreStep = 'confirm'}>
+            <div class="form-group">
+              <label for="drive">Tape Drive</label>
+              <select id="drive" bind:value={selectedDriveId}>
+                {#each drives as drive}
+                  <option value={drive.id}>
+                    {drive.display_name || drive.device_path}
+                    {#if drive.vendor || drive.model} ({drive.vendor} {drive.model}){/if}
+                    {#if drive.current_tape} — 📼 {drive.current_tape}{/if}
+                  </option>
+                {/each}
+                {#if drives.length === 0}
+                  <option value={null}>No drives available</option>
+                {/if}
+              </select>
+              <span class="form-hint">Select the tape drive to read from</span>
+            </div>
             <div class="form-group">
               <label for="dest">Destination Path</label>
               <input type="text" id="dest" bind:value={restoreFormData.dest_path} required />

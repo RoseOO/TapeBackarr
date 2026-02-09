@@ -27,6 +27,7 @@ type RestoreRequest struct {
 	StartAfter bool   `json:"start_after"`           // Start the guest after restore
 	Overwrite  bool   `json:"overwrite"`             // Overwrite if VMID exists
 	RestoreRAM bool   `json:"restore_ram"`           // Restore RAM state (if available)
+	DriveID    *int64 `json:"drive_id,omitempty"`    // Tape drive to use for restore
 }
 
 // RestoreResult represents the result of a restore operation
@@ -132,15 +133,64 @@ func (s *RestoreService) RestoreGuest(ctx context.Context, req *RestoreRequest) 
 		"guest_type":  backup.GuestType,
 	})
 
-	// Check if tape is loaded
+	// Check if tape is loaded - use explicit drive if provided
 	var devicePath string
-	err = s.db.QueryRow(`
-		SELECT device_path FROM tape_drives WHERE current_tape_id = ?
-	`, backup.TapeID).Scan(&devicePath)
-	if err != nil {
+	if req.DriveID != nil {
+		err = s.db.QueryRow(
+			"SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1",
+			*req.DriveID,
+		).Scan(&devicePath)
+		if err != nil {
+			result.Status = "failed"
+			result.Error = "drive not found or not enabled"
+			return result, fmt.Errorf("drive not found or not enabled: %w", err)
+		}
+	} else {
+		err = s.db.QueryRow(`
+			SELECT device_path FROM tape_drives WHERE current_tape_id = ?
+		`, backup.TapeID).Scan(&devicePath)
+		if err != nil {
+			result.Status = "failed"
+			result.Error = "required tape not loaded"
+			return result, fmt.Errorf("tape not loaded: %w", err)
+		}
+	}
+
+	// Create a drive-specific tape service for all tape operations
+	driveSvc := tape.NewServiceForDevice(devicePath, s.blockSize)
+
+	// Wait for tape to be physically ready
+	if err := driveSvc.WaitForTape(ctx, 30*time.Second); err != nil {
 		result.Status = "failed"
-		result.Error = "required tape not loaded"
-		return result, fmt.Errorf("tape not loaded: %w", err)
+		result.Error = fmt.Sprintf("tape not ready: %v", err)
+		return result, err
+	}
+
+	// Verify the correct tape is loaded by reading its label
+	var expectedLabel string
+	if err := s.db.QueryRow("SELECT label FROM tapes WHERE id = ?", backup.TapeID).Scan(&expectedLabel); err == nil && expectedLabel != "" {
+		s.logger.Info("Verifying tape label", map[string]interface{}{
+			"expected_label": expectedLabel,
+			"device_path":   devicePath,
+		})
+		label, err := driveSvc.ReadTapeLabel(ctx)
+		if err != nil {
+			result.Status = "failed"
+			result.Error = fmt.Sprintf("failed to read tape label: %v", err)
+			return result, err
+		}
+		if label == nil || label.Label != expectedLabel {
+			actualLabel := ""
+			if label != nil {
+				actualLabel = label.Label
+			}
+			result.Status = "failed"
+			result.Error = fmt.Sprintf("wrong tape loaded: expected %s, got %s", expectedLabel, actualLabel)
+			return result, fmt.Errorf("wrong tape loaded: expected %s, got %s", expectedLabel, actualLabel)
+		}
+		s.logger.Info("Correct tape verified", map[string]interface{}{
+			"label": expectedLabel,
+		})
 	}
 
 	// Create restore record
@@ -168,7 +218,7 @@ func (s *RestoreService) RestoreGuest(ctx context.Context, req *RestoreRequest) 
 	}
 
 	// Rewind tape and find the backup
-	if err := s.tapeService.Rewind(ctx); err != nil {
+	if err := driveSvc.Rewind(ctx); err != nil {
 		result.Status = "failed"
 		result.Error = fmt.Sprintf("failed to rewind tape: %v", err)
 		s.updateRestoreStatus(restoreID, "failed", result.Error)
