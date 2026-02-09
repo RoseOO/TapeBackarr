@@ -8,7 +8,7 @@ This guide documents how to recover data from TapeBackarr tapes **without** usin
 
 ```bash
 sudo apt-get update
-sudo apt-get install mt-st tar mbuffer lsscsi
+sudo apt-get install mt-st tar mbuffer lsscsi pigz
 ```
 
 ### Verify Tape Drive
