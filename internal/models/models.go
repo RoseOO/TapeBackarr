@@ -399,18 +399,23 @@ type DriveAlert struct {
 
 // DriveStatistics represents usage and performance statistics for a tape drive
 type DriveStatistics struct {
-	ID                 int64     `json:"id" db:"id"`
-	DriveID            int64     `json:"drive_id" db:"drive_id"`
-	TotalBytesRead     int64     `json:"total_bytes_read" db:"total_bytes_read"`
-	TotalBytesWritten  int64     `json:"total_bytes_written" db:"total_bytes_written"`
-	ReadErrors         int64     `json:"read_errors" db:"read_errors"`
-	WriteErrors        int64     `json:"write_errors" db:"write_errors"`
-	TotalLoadCount     int64     `json:"total_load_count" db:"total_load_count"`
-	CleaningRequired   bool      `json:"cleaning_required" db:"cleaning_required"`
-	LastCleanedAt      *time.Time `json:"last_cleaned_at" db:"last_cleaned_at"`
-	PowerOnHours       int64     `json:"power_on_hours" db:"power_on_hours"`
-	TapeMotionHours    float64   `json:"tape_motion_hours" db:"tape_motion_hours"`
-	UpdatedAt          time.Time `json:"updated_at" db:"updated_at"`
+	ID                  int64      `json:"id" db:"id"`
+	DriveID             int64      `json:"drive_id" db:"drive_id"`
+	TotalBytesRead      int64      `json:"total_bytes_read" db:"total_bytes_read"`
+	TotalBytesWritten   int64      `json:"total_bytes_written" db:"total_bytes_written"`
+	ReadErrors          int64      `json:"read_errors" db:"read_errors"`
+	WriteErrors         int64      `json:"write_errors" db:"write_errors"`
+	TotalLoadCount      int64      `json:"total_load_count" db:"total_load_count"`
+	CleaningRequired    bool       `json:"cleaning_required" db:"cleaning_required"`
+	LastCleanedAt       *time.Time `json:"last_cleaned_at" db:"last_cleaned_at"`
+	PowerOnHours        int64      `json:"power_on_hours" db:"power_on_hours"`
+	TapeMotionHours     float64    `json:"tape_motion_hours" db:"tape_motion_hours"`
+	TemperatureC        int64      `json:"temperature_c" db:"temperature_c"`
+	LifetimePowerCycles int64      `json:"lifetime_power_cycles" db:"lifetime_power_cycles"`
+	ReadCompressionPct  int64      `json:"read_compression_pct" db:"read_compression_pct"`
+	WriteCompressionPct int64      `json:"write_compression_pct" db:"write_compression_pct"`
+	TapeAlertFlags      string     `json:"tape_alert_flags" db:"tape_alert_flags"`
+	UpdatedAt           time.Time  `json:"updated_at" db:"updated_at"`
 }
 
 // APIKey represents an API key for programmatic access

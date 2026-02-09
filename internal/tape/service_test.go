@@ -228,3 +228,187 @@ func TestExtractSgLogsFloat(t *testing.T) {
 		})
 	}
 }
+
+func TestParseTemperaturePage(t *testing.T) {
+	svc := NewService("/dev/nst0", 65536)
+
+	tests := []struct {
+		name   string
+		output string
+		wantC  int64
+	}{
+		{
+			name: "parse current temperature",
+			output: `Temperature page  [0xd]
+  Current temperature = 42 C
+  Reference temperature = <not available>
+`,
+			wantC: 42,
+		},
+		{
+			name:   "empty output",
+			output: "",
+			wantC:  0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stats := &DriveStatisticsData{}
+			svc.parseTemperaturePage(tt.output, stats)
+			if stats.TemperatureC != tt.wantC {
+				t.Errorf("expected TemperatureC %d, got %d", tt.wantC, stats.TemperatureC)
+			}
+		})
+	}
+}
+
+func TestParseDeviceStatisticsPage(t *testing.T) {
+	svc := NewService("/dev/nst0", 65536)
+
+	tests := []struct {
+		name     string
+		output   string
+		wantFunc func(t *testing.T, stats *DriveStatisticsData)
+	}{
+		{
+			name: "parse device statistics page",
+			output: `Device statistics page (ssc-3 and adc)
+  Lifetime media loads: 932
+  Lifetime cleaning operations: 1
+  Lifetime power on hours: 102613
+  Lifetime media motion (head) hours: 4241
+  Lifetime power cycles: 29
+  Hard write errors: 0
+  Hard read errors: 0
+`,
+			wantFunc: func(t *testing.T, stats *DriveStatisticsData) {
+				if stats.TotalLoadCount != 932 {
+					t.Errorf("expected TotalLoadCount 932, got %d", stats.TotalLoadCount)
+				}
+				if stats.PowerOnHours != 102613 {
+					t.Errorf("expected PowerOnHours 102613, got %d", stats.PowerOnHours)
+				}
+				if stats.LifetimePowerCycles != 29 {
+					t.Errorf("expected LifetimePowerCycles 29, got %d", stats.LifetimePowerCycles)
+				}
+			},
+		},
+		{
+			name: "parse hard errors",
+			output: `Device statistics page
+  Hard write errors: 5
+  Hard read errors: 3
+`,
+			wantFunc: func(t *testing.T, stats *DriveStatisticsData) {
+				if stats.WriteErrors != 5 {
+					t.Errorf("expected WriteErrors 5, got %d", stats.WriteErrors)
+				}
+				if stats.ReadErrors != 3 {
+					t.Errorf("expected ReadErrors 3, got %d", stats.ReadErrors)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stats := &DriveStatisticsData{}
+			svc.parseDeviceStatisticsPage(tt.output, stats)
+			tt.wantFunc(t, stats)
+		})
+	}
+}
+
+func TestParseDataCompressionPage(t *testing.T) {
+	svc := NewService("/dev/nst0", 65536)
+
+	tests := []struct {
+		name     string
+		output   string
+		wantRead int64
+		wantWrite int64
+	}{
+		{
+			name: "parse compression ratios",
+			output: `Data compression page  (ssc-4) [0x1b]
+  Read compression ratio x100: 530
+  Write compression ratio x100: 250
+`,
+			wantRead:  530,
+			wantWrite: 250,
+		},
+		{
+			name: "zero compression",
+			output: `Data compression page
+  Read compression ratio x100: 0
+  Write compression ratio x100: 0
+`,
+			wantRead:  0,
+			wantWrite: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stats := &DriveStatisticsData{}
+			svc.parseDataCompressionPage(tt.output, stats)
+			if stats.ReadCompressionPct != tt.wantRead {
+				t.Errorf("expected ReadCompressionPct %d, got %d", tt.wantRead, stats.ReadCompressionPct)
+			}
+			if stats.WriteCompressionPct != tt.wantWrite {
+				t.Errorf("expected WriteCompressionPct %d, got %d", tt.wantWrite, stats.WriteCompressionPct)
+			}
+		})
+	}
+}
+
+func TestParseTapeAlertPage(t *testing.T) {
+	svc := NewService("/dev/nst0", 65536)
+
+	tests := []struct {
+		name      string
+		output    string
+		wantFlags string
+	}{
+		{
+			name: "no active alerts",
+			output: `Tape alert page (ssc-3) [0x2e]
+  Read warning: 0
+  Write warning: 0
+  Hard error: 0
+  Media life: 0
+  Cleaning required: 0
+`,
+			wantFlags: "",
+		},
+		{
+			name: "active alerts",
+			output: `Tape alert page (ssc-3) [0x2e]
+  Read warning: 0
+  Write warning: 1
+  Hard error: 0
+  Media life: 1
+  Cleaning required: 0
+  Reserved (30h): 0
+  Obsolete (28h): 0
+`,
+			wantFlags: "Write warning,Media life",
+		},
+		{
+			name:      "empty output",
+			output:    "",
+			wantFlags: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stats := &DriveStatisticsData{}
+			svc.parseTapeAlertPage(tt.output, stats)
+			if stats.TapeAlertFlags != tt.wantFlags {
+				t.Errorf("expected TapeAlertFlags %q, got %q", tt.wantFlags, stats.TapeAlertFlags)
+			}
+		})
+	}
+}

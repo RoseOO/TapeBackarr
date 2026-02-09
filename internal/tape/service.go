@@ -702,14 +702,19 @@ func (s *Service) ListTapeContents(ctx context.Context, maxEntries int) ([]TapeC
 
 // DriveStatisticsData holds parsed drive statistics from tapeinfo/sg_logs
 type DriveStatisticsData struct {
-	TotalBytesRead    int64   `json:"total_bytes_read"`
-	TotalBytesWritten int64   `json:"total_bytes_written"`
-	ReadErrors        int64   `json:"read_errors"`
-	WriteErrors       int64   `json:"write_errors"`
-	TotalLoadCount    int64   `json:"total_load_count"`
-	CleaningRequired  bool    `json:"cleaning_required"`
-	PowerOnHours      int64   `json:"power_on_hours"`
-	TapeMotionHours   float64 `json:"tape_motion_hours"`
+	TotalBytesRead      int64   `json:"total_bytes_read"`
+	TotalBytesWritten   int64   `json:"total_bytes_written"`
+	ReadErrors          int64   `json:"read_errors"`
+	WriteErrors         int64   `json:"write_errors"`
+	TotalLoadCount      int64   `json:"total_load_count"`
+	CleaningRequired    bool    `json:"cleaning_required"`
+	PowerOnHours        int64   `json:"power_on_hours"`
+	TapeMotionHours     float64 `json:"tape_motion_hours"`
+	TemperatureC        int64   `json:"temperature_c"`
+	LifetimePowerCycles int64   `json:"lifetime_power_cycles"`
+	ReadCompressionPct  int64   `json:"read_compression_pct"`
+	WriteCompressionPct int64   `json:"write_compression_pct"`
+	TapeAlertFlags      string  `json:"tape_alert_flags"`
 }
 
 // ForceClean sends a rewind-offline command to eject the current tape from the drive,
@@ -770,6 +775,34 @@ func (s *Service) GetDriveStatistics(ctx context.Context) (*DriveStatisticsData,
 	output, err = cmd.CombinedOutput()
 	if err == nil {
 		s.parseErrorCounters(string(output), stats, false)
+	}
+
+	// Try sg_logs for temperature page
+	cmd = exec.CommandContext(ctx, "sg_logs", "-p", "0x0d", s.devicePath)
+	output, err = cmd.CombinedOutput()
+	if err == nil {
+		s.parseTemperaturePage(string(output), stats)
+	}
+
+	// Try sg_logs for device statistics page
+	cmd = exec.CommandContext(ctx, "sg_logs", "-p", "0x14", s.devicePath)
+	output, err = cmd.CombinedOutput()
+	if err == nil {
+		s.parseDeviceStatisticsPage(string(output), stats)
+	}
+
+	// Try sg_logs for data compression page
+	cmd = exec.CommandContext(ctx, "sg_logs", "-p", "0x1b", s.devicePath)
+	output, err = cmd.CombinedOutput()
+	if err == nil {
+		s.parseDataCompressionPage(string(output), stats)
+	}
+
+	// Try sg_logs for tape alert page
+	cmd = exec.CommandContext(ctx, "sg_logs", "-p", "0x2e", s.devicePath)
+	output, err = cmd.CombinedOutput()
+	if err == nil {
+		s.parseTapeAlertPage(string(output), stats)
 	}
 
 	return stats, nil
@@ -855,6 +888,93 @@ func (s *Service) parseErrorCounters(output string, stats *DriveStatisticsData, 
 	}
 }
 
+// parseTemperaturePage parses sg_logs temperature page (0x0d) output
+func (s *Service) parseTemperaturePage(output string, stats *DriveStatisticsData) {
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.Contains(line, "Current temperature") {
+			if v := extractSgLogsValue(line); v > 0 {
+				stats.TemperatureC = v
+			}
+		}
+	}
+}
+
+// parseDeviceStatisticsPage parses sg_logs device statistics page (0x14) output
+func (s *Service) parseDeviceStatisticsPage(output string, stats *DriveStatisticsData) {
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		switch {
+		case strings.Contains(line, "Lifetime media loads"):
+			if v := extractSgLogsColonValue(line); v > 0 {
+				stats.TotalLoadCount = v
+			}
+		case strings.Contains(line, "Lifetime power on hours"):
+			if v := extractSgLogsColonValue(line); v > 0 {
+				stats.PowerOnHours = v
+			}
+		case strings.Contains(line, "Lifetime power cycles"):
+			if v := extractSgLogsColonValue(line); v > 0 {
+				stats.LifetimePowerCycles = v
+			}
+		case strings.Contains(line, "Hard write errors"):
+			if v := extractSgLogsColonValue(line); v > 0 {
+				stats.WriteErrors = v
+			}
+		case strings.Contains(line, "Hard read errors"):
+			if v := extractSgLogsColonValue(line); v > 0 {
+				stats.ReadErrors = v
+			}
+		}
+	}
+}
+
+// parseDataCompressionPage parses sg_logs data compression page (0x1b) output
+func (s *Service) parseDataCompressionPage(output string, stats *DriveStatisticsData) {
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		switch {
+		case strings.Contains(line, "Read compression ratio"):
+			if v := extractSgLogsColonValue(line); v > 0 {
+				stats.ReadCompressionPct = v
+			}
+		case strings.Contains(line, "Write compression ratio"):
+			if v := extractSgLogsColonValue(line); v > 0 {
+				stats.WriteCompressionPct = v
+			}
+		}
+	}
+}
+
+// parseTapeAlertPage parses sg_logs tape alert page (0x2e) output and collects active alert flags
+func (s *Service) parseTapeAlertPage(output string, stats *DriveStatisticsData) {
+	var activeAlerts []string
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		// Tape alert lines look like: "  Read warning: 0" or "  Media life: 1"
+		colonIdx := strings.LastIndex(line, ":")
+		if colonIdx < 0 {
+			continue
+		}
+		label := strings.TrimSpace(line[:colonIdx])
+		value := strings.TrimSpace(line[colonIdx+1:])
+		// Skip reserved/obsolete entries and non-flag lines
+		if strings.HasPrefix(label, "Reserved") || strings.HasPrefix(label, "Obsolete") {
+			continue
+		}
+		if value == "1" {
+			activeAlerts = append(activeAlerts, label)
+		}
+	}
+	if len(activeAlerts) > 0 {
+		stats.TapeAlertFlags = strings.Join(activeAlerts, ",")
+	}
+}
+
 // extractSgLogsValue extracts an integer value from an sg_logs output line
 func extractSgLogsValue(line string) int64 {
 	// sg_logs output format: "  Description = value"
@@ -882,6 +1002,22 @@ func extractSgLogsFloat(line string) float64 {
 	fields := strings.Fields(val)
 	if len(fields) > 0 {
 		v, _ := strconv.ParseFloat(fields[0], 64)
+		return v
+	}
+	return 0
+}
+
+// extractSgLogsColonValue extracts an integer value from a colon-delimited sg_logs line
+func extractSgLogsColonValue(line string) int64 {
+	// sg_logs output format: "  Description: value"
+	colonIdx := strings.LastIndex(line, ":")
+	if colonIdx < 0 {
+		return 0
+	}
+	val := strings.TrimSpace(line[colonIdx+1:])
+	fields := strings.Fields(val)
+	if len(fields) > 0 {
+		v, _ := strconv.ParseInt(fields[0], 10, 64)
 		return v
 	}
 	return 0

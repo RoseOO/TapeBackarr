@@ -42,6 +42,11 @@
     last_cleaned_at: string | null;
     power_on_hours: number;
     tape_motion_hours: number;
+    temperature_c: number;
+    lifetime_power_cycles: number;
+    read_compression_pct: number;
+    write_compression_pct: number;
+    tape_alert_flags: string;
     updated_at: string;
   }
 
@@ -622,6 +627,34 @@
               <div class="stat-label">Last Cleaned</div>
               <div class="stat-value">{driveStats.last_cleaned_at ? new Date(driveStats.last_cleaned_at).toLocaleDateString() : 'Never'}</div>
             </div>
+          </div>
+        </div>
+
+        <div class="stats-section">
+          <h3>Drive Health</h3>
+          <div class="stats-grid">
+            <div class="stat-card {driveStats.temperature_c > 60 ? 'stat-danger' : driveStats.temperature_c > 50 ? 'stat-warning' : ''}">
+              <div class="stat-label">Temperature</div>
+              <div class="stat-value">{driveStats.temperature_c ? driveStats.temperature_c + '°C' : 'N/A'}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Lifetime Power Cycles</div>
+              <div class="stat-value">{driveStats.lifetime_power_cycles}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Read Compression (x100)</div>
+              <div class="stat-value">{driveStats.read_compression_pct || 0}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Write Compression (x100)</div>
+              <div class="stat-value">{driveStats.write_compression_pct || 0}</div>
+            </div>
+            {#if driveStats.tape_alert_flags}
+              <div class="stat-card stat-danger">
+                <div class="stat-label">Tape Alerts</div>
+                <div class="stat-value">{driveStats.tape_alert_flags}</div>
+              </div>
+            {/if}
           </div>
         </div>
 
