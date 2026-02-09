@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,6 +18,13 @@ import (
 
 	"github.com/RoseOO/TapeBackarr/internal/models"
 )
+
+// DefaultOperationTimeout is the default timeout for tape operations like status, rewind, and label read.
+// This prevents the application from hanging indefinitely when a tape drive is unresponsive.
+const DefaultOperationTimeout = 30 * time.Second
+
+// ErrOperationTimeout is returned when a tape operation times out
+var ErrOperationTimeout = errors.New("tape operation timed out")
 
 // DriveStatus represents the current status of a tape drive
 type DriveStatus struct {
@@ -259,16 +267,30 @@ func ScanDrives(ctx context.Context) ([]map[string]string, error) {
 	return drives, nil
 }
 
-// GetStatus returns the current status of the tape drive
+// GetStatus returns the current status of the tape drive.
+// It enforces a timeout to prevent indefinite blocking when the drive is unresponsive.
 func (s *Service) GetStatus(ctx context.Context) (*DriveStatus, error) {
 	status := &DriveStatus{
 		DevicePath:  s.devicePath,
 		LastChecked: time.Now(),
 	}
 
-	cmd := exec.CommandContext(ctx, "mt", "-f", s.devicePath, "status")
+	// Create a context with timeout to prevent indefinite blocking
+	opCtx, cancel := context.WithTimeout(ctx, DefaultOperationTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(opCtx, "mt", "-f", s.devicePath, "status")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		// Check if the error was due to context timeout/cancellation
+		if opCtx.Err() == context.DeadlineExceeded {
+			status.Error = fmt.Sprintf("tape status operation timed out after %v", DefaultOperationTimeout)
+			return status, ErrOperationTimeout
+		}
+		if opCtx.Err() == context.Canceled {
+			status.Error = "tape status operation cancelled"
+			return status, ctx.Err()
+		}
 		status.Error = fmt.Sprintf("failed to get tape status: %s", string(output))
 		return status, nil
 	}
@@ -309,11 +331,23 @@ func (s *Service) GetStatus(ctx context.Context) (*DriveStatus, error) {
 	return status, nil
 }
 
-// Rewind rewinds the tape to the beginning
+// Rewind rewinds the tape to the beginning.
+// It enforces a timeout to prevent indefinite blocking when the drive is unresponsive.
 func (s *Service) Rewind(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "mt", "-f", s.devicePath, "rewind")
+	// Create a context with timeout to prevent indefinite blocking
+	opCtx, cancel := context.WithTimeout(ctx, DefaultOperationTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(opCtx, "mt", "-f", s.devicePath, "rewind")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		// Check if the error was due to context timeout/cancellation
+		if opCtx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("rewind timed out after %v: %w", DefaultOperationTimeout, ErrOperationTimeout)
+		}
+		if opCtx.Err() == context.Canceled {
+			return fmt.Errorf("rewind cancelled: %w", ctx.Err())
+		}
 		return fmt.Errorf("rewind failed: %s", string(output))
 	}
 	return nil
@@ -439,17 +473,29 @@ const (
 	tocBlockSize = 65536
 )
 
-// ReadTapeLabel reads the label from the beginning of the tape
+// ReadTapeLabel reads the label from the beginning of the tape.
+// It enforces a timeout to prevent indefinite blocking when the drive is unresponsive.
 func (s *Service) ReadTapeLabel(ctx context.Context) (*TapeLabelData, error) {
-	// Rewind to beginning
+	// Rewind to beginning (already has its own timeout)
 	if err := s.Rewind(ctx); err != nil {
 		return nil, err
 	}
 
+	// Create a context with timeout for the dd read operation
+	opCtx, cancel := context.WithTimeout(ctx, DefaultOperationTimeout)
+	defer cancel()
+
 	// Read first block which should contain the label
-	cmd := exec.CommandContext(ctx, "dd", fmt.Sprintf("if=%s", s.devicePath), "bs=512", "count=1")
+	cmd := exec.CommandContext(opCtx, "dd", fmt.Sprintf("if=%s", s.devicePath), "bs=512", "count=1")
 	output, err := cmd.Output()
 	if err != nil {
+		// Check if the error was due to context timeout/cancellation
+		if opCtx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("label read timed out after %v: %w", DefaultOperationTimeout, ErrOperationTimeout)
+		}
+		if opCtx.Err() == context.Canceled {
+			return nil, fmt.Errorf("label read cancelled: %w", ctx.Err())
+		}
 		return nil, fmt.Errorf("failed to read label: %w", err)
 	}
 
