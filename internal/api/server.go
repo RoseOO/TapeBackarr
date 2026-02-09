@@ -4582,11 +4582,14 @@ func (s *Server) handleProxmoxRestorePlan(w http.ResponseWriter, r *http.Request
 // handleProxmoxListJobs returns all Proxmox backup jobs
 func (s *Server) handleProxmoxListJobs(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`
-		SELECT id, name, description, node, vmid_filter, guest_type_filter, tag_filter,
-		       pool_id, backup_mode, compress, schedule_cron, retention_days,
-		       enabled, last_run_at, next_run_at, created_at
-		FROM proxmox_backup_jobs
-		ORDER BY created_at DESC
+		SELECT j.id, j.name, j.description, j.node, j.vmid_filter, j.guest_type_filter, j.tag_filter,
+		       j.pool_id, j.backup_mode, j.compress, j.schedule_cron, j.retention_days,
+		       j.enabled, j.last_run_at, j.next_run_at, j.created_at,
+		       COALESCE(j.notify_on_success, 0), COALESCE(j.notify_on_failure, 1), COALESCE(j.notes, ''),
+		       tp.name as pool_name
+		FROM proxmox_backup_jobs j
+		LEFT JOIN tape_pools tp ON j.pool_id = tp.id
+		ORDER BY j.created_at DESC
 	`)
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
@@ -4601,25 +4604,31 @@ func (s *Server) handleProxmoxListJobs(w http.ResponseWriter, r *http.Request) {
 		var description, node, vmidFilter, guestTypeFilter, tagFilter *string
 		var poolID *int64
 		var retentionDays int
-		var enabled bool
+		var enabled, notifyOnSuccess, notifyOnFailure bool
+		var notes string
 		var lastRunAt, nextRunAt *time.Time
 		var createdAt time.Time
+		var poolName *string
 
 		if err := rows.Scan(&id, &name, &description, &node, &vmidFilter, &guestTypeFilter, &tagFilter,
 			&poolID, &backupMode, &compress, &scheduleCron, &retentionDays,
-			&enabled, &lastRunAt, &nextRunAt, &createdAt); err != nil {
+			&enabled, &lastRunAt, &nextRunAt, &createdAt,
+			&notifyOnSuccess, &notifyOnFailure, &notes, &poolName); err != nil {
 			continue
 		}
 
 		job := map[string]interface{}{
-			"id":             id,
-			"name":           name,
-			"backup_mode":    backupMode,
-			"compress":       compress,
-			"schedule_cron":  scheduleCron,
-			"retention_days": retentionDays,
-			"enabled":        enabled,
-			"created_at":     createdAt,
+			"id":                id,
+			"name":              name,
+			"backup_mode":       backupMode,
+			"compression":       compress,
+			"schedule_cron":     scheduleCron,
+			"retention_days":    retentionDays,
+			"enabled":           enabled,
+			"notify_on_success": notifyOnSuccess,
+			"notify_on_failure": notifyOnFailure,
+			"notes":             notes,
+			"created_at":        createdAt,
 		}
 		if description != nil {
 			job["description"] = *description
@@ -4628,7 +4637,7 @@ func (s *Server) handleProxmoxListJobs(w http.ResponseWriter, r *http.Request) {
 			job["node"] = *node
 		}
 		if vmidFilter != nil {
-			job["vmid_filter"] = *vmidFilter
+			job["vmids"] = *vmidFilter
 		}
 		if guestTypeFilter != nil {
 			job["guest_type_filter"] = *guestTypeFilter
@@ -4638,6 +4647,9 @@ func (s *Server) handleProxmoxListJobs(w http.ResponseWriter, r *http.Request) {
 		}
 		if poolID != nil {
 			job["pool_id"] = *poolID
+		}
+		if poolName != nil {
+			job["pool_name"] = *poolName
 		}
 		if lastRunAt != nil {
 			job["last_run_at"] = *lastRunAt
@@ -4658,15 +4670,20 @@ func (s *Server) handleProxmoxCreateJob(w http.ResponseWriter, r *http.Request) 
 		Name            string `json:"name"`
 		Description     string `json:"description,omitempty"`
 		Node            string `json:"node,omitempty"`
+		VMIDs           string `json:"vmids,omitempty"`
 		VMIDFilter      string `json:"vmid_filter,omitempty"`
 		GuestTypeFilter string `json:"guest_type_filter,omitempty"`
 		TagFilter       string `json:"tag_filter,omitempty"`
 		PoolID          *int64 `json:"pool_id,omitempty"`
 		BackupMode      string `json:"backup_mode"`
 		Compress        string `json:"compress"`
+		Compression     string `json:"compression"`
 		ScheduleCron    string `json:"schedule_cron"`
 		RetentionDays   int    `json:"retention_days"`
 		Enabled         bool   `json:"enabled"`
+		NotifyOnSuccess bool   `json:"notify_on_success"`
+		NotifyOnFailure bool   `json:"notify_on_failure"`
+		Notes           string `json:"notes"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -4681,20 +4698,31 @@ func (s *Server) handleProxmoxCreateJob(w http.ResponseWriter, r *http.Request) 
 	if req.BackupMode == "" {
 		req.BackupMode = "snapshot"
 	}
+	// Accept either compress or compression field
+	if req.Compress == "" && req.Compression != "" {
+		req.Compress = req.Compression
+	}
 	if req.Compress == "" {
 		req.Compress = "zstd"
 	}
 	if req.RetentionDays == 0 {
 		req.RetentionDays = 30
 	}
+	// Accept either vmids or vmid_filter field
+	vmidFilter := req.VMIDFilter
+	if vmidFilter == "" && req.VMIDs != "" {
+		vmidFilter = req.VMIDs
+	}
 
 	result, err := s.db.Exec(`
 		INSERT INTO proxmox_backup_jobs (
 			name, description, node, vmid_filter, guest_type_filter, tag_filter,
-			pool_id, backup_mode, compress, schedule_cron, retention_days, enabled
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, req.Name, req.Description, req.Node, req.VMIDFilter, req.GuestTypeFilter, req.TagFilter,
-		req.PoolID, req.BackupMode, req.Compress, req.ScheduleCron, req.RetentionDays, req.Enabled)
+			pool_id, backup_mode, compress, schedule_cron, retention_days, enabled,
+			notify_on_success, notify_on_failure, notes
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, req.Name, req.Description, req.Node, vmidFilter, req.GuestTypeFilter, req.TagFilter,
+		req.PoolID, req.BackupMode, req.Compress, req.ScheduleCron, req.RetentionDays, req.Enabled,
+		req.NotifyOnSuccess, req.NotifyOnFailure, req.Notes)
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -4789,15 +4817,20 @@ func (s *Server) handleProxmoxUpdateJob(w http.ResponseWriter, r *http.Request) 
 		Name            string `json:"name,omitempty"`
 		Description     string `json:"description,omitempty"`
 		Node            string `json:"node,omitempty"`
+		VMIDs           string `json:"vmids,omitempty"`
 		VMIDFilter      string `json:"vmid_filter,omitempty"`
 		GuestTypeFilter string `json:"guest_type_filter,omitempty"`
 		TagFilter       string `json:"tag_filter,omitempty"`
 		PoolID          *int64 `json:"pool_id,omitempty"`
 		BackupMode      string `json:"backup_mode,omitempty"`
 		Compress        string `json:"compress,omitempty"`
+		Compression     string `json:"compression,omitempty"`
 		ScheduleCron    string `json:"schedule_cron,omitempty"`
 		RetentionDays   *int   `json:"retention_days,omitempty"`
 		Enabled         *bool  `json:"enabled,omitempty"`
+		NotifyOnSuccess *bool  `json:"notify_on_success,omitempty"`
+		NotifyOnFailure *bool  `json:"notify_on_failure,omitempty"`
+		Notes           *string `json:"notes,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -4821,9 +4854,14 @@ func (s *Server) handleProxmoxUpdateJob(w http.ResponseWriter, r *http.Request) 
 		updates = append(updates, "node = ?")
 		args = append(args, req.Node)
 	}
-	if req.VMIDFilter != "" {
+	// Accept either vmids or vmid_filter
+	vmidFilter := req.VMIDFilter
+	if vmidFilter == "" && req.VMIDs != "" {
+		vmidFilter = req.VMIDs
+	}
+	if vmidFilter != "" {
 		updates = append(updates, "vmid_filter = ?")
-		args = append(args, req.VMIDFilter)
+		args = append(args, vmidFilter)
 	}
 	if req.GuestTypeFilter != "" {
 		updates = append(updates, "guest_type_filter = ?")
@@ -4841,9 +4879,14 @@ func (s *Server) handleProxmoxUpdateJob(w http.ResponseWriter, r *http.Request) 
 		updates = append(updates, "backup_mode = ?")
 		args = append(args, req.BackupMode)
 	}
-	if req.Compress != "" {
+	// Accept either compress or compression
+	compress := req.Compress
+	if compress == "" && req.Compression != "" {
+		compress = req.Compression
+	}
+	if compress != "" {
 		updates = append(updates, "compress = ?")
-		args = append(args, req.Compress)
+		args = append(args, compress)
 	}
 	if req.ScheduleCron != "" {
 		updates = append(updates, "schedule_cron = ?")
@@ -4856,6 +4899,18 @@ func (s *Server) handleProxmoxUpdateJob(w http.ResponseWriter, r *http.Request) 
 	if req.Enabled != nil {
 		updates = append(updates, "enabled = ?")
 		args = append(args, *req.Enabled)
+	}
+	if req.NotifyOnSuccess != nil {
+		updates = append(updates, "notify_on_success = ?")
+		args = append(args, *req.NotifyOnSuccess)
+	}
+	if req.NotifyOnFailure != nil {
+		updates = append(updates, "notify_on_failure = ?")
+		args = append(args, *req.NotifyOnFailure)
+	}
+	if req.Notes != nil {
+		updates = append(updates, "notes = ?")
+		args = append(args, *req.Notes)
 	}
 
 	if len(updates) == 0 {
