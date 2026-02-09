@@ -481,6 +481,13 @@ func (s *Service) ReadTapeLabel(ctx context.Context) (*TapeLabelData, error) {
 		return nil, err
 	}
 
+	// Set variable block size mode so the 512-byte label block can be read
+	// regardless of the drive's configured fixed block size.
+	if err := s.SetBlockSize(ctx, 0); err != nil {
+		return nil, fmt.Errorf("failed to set variable block size for label read: %w", err)
+	}
+	defer s.SetBlockSize(ctx, s.blockSize)
+
 	// Create a context with timeout for the dd read operation
 	opCtx, cancel := context.WithTimeout(ctx, DefaultOperationTimeout)
 	defer cancel()
@@ -539,6 +546,13 @@ func (s *Service) WriteTapeLabel(ctx context.Context, label string, uuid string,
 	if err := s.Rewind(ctx); err != nil {
 		return err
 	}
+
+	// Set variable block size mode so the 512-byte label block can be written
+	// regardless of the drive's configured fixed block size.
+	if err := s.SetBlockSize(ctx, 0); err != nil {
+		return fmt.Errorf("failed to set variable block size for label write: %w", err)
+	}
+	defer s.SetBlockSize(ctx, s.blockSize)
 
 	// Create label block with UUID and pool info
 	fields := []string{labelMagic, label, uuid, pool, strconv.FormatInt(time.Now().Unix(), 10)}

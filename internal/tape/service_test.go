@@ -2,6 +2,7 @@ package tape
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -284,6 +285,67 @@ func TestTOCJSONStructure(t *testing.T) {
 	}
 	if raw["version"] != float64(tocVersion) {
 		t.Errorf("expected version %d, got %v", tocVersion, raw["version"])
+	}
+}
+
+func TestLabelBlockFormat(t *testing.T) {
+	// Verify that the label block is exactly 512 bytes and properly formatted.
+	// This matters because the label is written with dd bs=512 count=1.
+	fields := []string{labelMagic, "TAPE-001", "uuid-1234", "pool-a", "1234567890"}
+	labelStr := strings.Join(fields, labelDelimiter)
+
+	padded := make([]byte, 512)
+	copy(padded, []byte(labelStr))
+
+	if len(padded) != 512 {
+		t.Fatalf("expected padded block length 512, got %d", len(padded))
+	}
+
+	// The label text should be at the beginning
+	if !strings.HasPrefix(string(padded), "TAPEBACKARR|TAPE-001|") {
+		t.Errorf("padded block does not start with expected label prefix")
+	}
+
+	// Remainder should be null bytes
+	for i := len(labelStr); i < 512; i++ {
+		if padded[i] != 0 {
+			t.Errorf("expected null byte at position %d, got %d", i, padded[i])
+			break
+		}
+	}
+
+	// Simulate reading back: trim nulls and parse
+	raw := strings.TrimRight(string(padded), "\x00")
+	parts := strings.Split(raw, labelDelimiter)
+	if len(parts) < 5 {
+		t.Fatalf("expected at least 5 fields, got %d", len(parts))
+	}
+	if parts[0] != labelMagic {
+		t.Errorf("expected magic %q, got %q", labelMagic, parts[0])
+	}
+	if parts[1] != "TAPE-001" {
+		t.Errorf("expected label 'TAPE-001', got %q", parts[1])
+	}
+	if parts[2] != "uuid-1234" {
+		t.Errorf("expected UUID 'uuid-1234', got %q", parts[2])
+	}
+	if parts[3] != "pool-a" {
+		t.Errorf("expected pool 'pool-a', got %q", parts[3])
+	}
+}
+
+func TestServiceBlockSizeField(t *testing.T) {
+	// Verify that the Service stores and returns the configured block size.
+	// WriteTapeLabel and ReadTapeLabel use SetBlockSize(0) before the dd
+	// operation and defer restoration of s.blockSize afterwards.
+	svc := NewService("/dev/nst0", 65536)
+	if svc.GetBlockSize() != 65536 {
+		t.Errorf("expected block size 65536, got %d", svc.GetBlockSize())
+	}
+
+	svc2 := NewService("/dev/nst0", 0)
+	if svc2.GetBlockSize() != 0 {
+		t.Errorf("expected block size 0, got %d", svc2.GetBlockSize())
 	}
 }
 
