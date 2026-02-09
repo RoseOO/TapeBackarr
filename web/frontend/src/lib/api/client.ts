@@ -506,3 +506,60 @@ export async function batchUpdateTapes(data: { tape_ids: number[]; status?: stri
     body: JSON.stringify(data),
   });
 }
+
+// Tape Libraries (autochangers)
+export async function getLibraries() {
+  return fetchApi('/libraries');
+}
+
+export async function getLibrary(id: number) {
+  return fetchApi(`/libraries/${id}`);
+}
+
+export async function createLibrary(data: { name: string; device_path: string; vendor?: string; model?: string }) {
+  return fetchApi('/libraries', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteLibrary(id: number) {
+  return fetchApi(`/libraries/${id}`, {
+    method: 'DELETE',
+  });
+}
+
+export async function scanLibraries() {
+  return fetchApi('/libraries/scan');
+}
+
+export async function libraryInventory(id: number) {
+  return fetchApi(`/libraries/${id}/inventory`, {
+    method: 'POST',
+  });
+}
+
+export async function getLibrarySlots(id: number) {
+  return fetchApi(`/libraries/${id}/slots`);
+}
+
+export async function libraryLoad(id: number, slotNumber: number, driveNumber: number) {
+  return fetchApi(`/libraries/${id}/load`, {
+    method: 'POST',
+    body: JSON.stringify({ slot_number: slotNumber, drive_number: driveNumber }),
+  });
+}
+
+export async function libraryUnload(id: number, slotNumber: number, driveNumber: number) {
+  return fetchApi(`/libraries/${id}/unload`, {
+    method: 'POST',
+    body: JSON.stringify({ slot_number: slotNumber, drive_number: driveNumber }),
+  });
+}
+
+export async function libraryTransfer(id: number, sourceSlot: number, destSlot: number) {
+  return fetchApi(`/libraries/${id}/transfer`, {
+    method: 'POST',
+    body: JSON.stringify({ source_slot: sourceSlot, dest_slot: destSlot }),
+  });
+}
