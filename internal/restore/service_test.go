@@ -201,8 +201,8 @@ func TestBrowseCatalog(t *testing.T) {
 
 	svc := &Service{db: db}
 
-	t.Run("returns all entries", func(t *testing.T) {
-		entries, err := svc.BrowseCatalog(context.Background(), backupSetID, "", 100)
+	t.Run("returns all entries with no limit", func(t *testing.T) {
+		entries, err := svc.BrowseCatalog(context.Background(), backupSetID, "", 0, 0)
 		if err != nil {
 			t.Fatalf("BrowseCatalog failed: %v", err)
 		}
@@ -211,8 +211,45 @@ func TestBrowseCatalog(t *testing.T) {
 		}
 	})
 
+	t.Run("returns all entries with high limit", func(t *testing.T) {
+		entries, err := svc.BrowseCatalog(context.Background(), backupSetID, "", 100, 0)
+		if err != nil {
+			t.Fatalf("BrowseCatalog failed: %v", err)
+		}
+		if len(entries) != 5 {
+			t.Errorf("expected 5 entries, got %d", len(entries))
+		}
+	})
+
+	t.Run("respects limit", func(t *testing.T) {
+		entries, err := svc.BrowseCatalog(context.Background(), backupSetID, "", 2, 0)
+		if err != nil {
+			t.Fatalf("BrowseCatalog failed: %v", err)
+		}
+		if len(entries) != 2 {
+			t.Errorf("expected 2 entries, got %d", len(entries))
+		}
+	})
+
+	t.Run("respects offset", func(t *testing.T) {
+		all, err := svc.BrowseCatalog(context.Background(), backupSetID, "", 0, 0)
+		if err != nil {
+			t.Fatalf("BrowseCatalog failed: %v", err)
+		}
+		entries, err := svc.BrowseCatalog(context.Background(), backupSetID, "", 2, 2)
+		if err != nil {
+			t.Fatalf("BrowseCatalog failed: %v", err)
+		}
+		if len(entries) != 2 {
+			t.Errorf("expected 2 entries, got %d", len(entries))
+		}
+		if len(all) >= 3 && entries[0].FilePath != all[2].FilePath {
+			t.Errorf("offset not applied correctly: expected %s, got %s", all[2].FilePath, entries[0].FilePath)
+		}
+	})
+
 	t.Run("filters by prefix", func(t *testing.T) {
-		entries, err := svc.BrowseCatalog(context.Background(), backupSetID, "documents/", 100)
+		entries, err := svc.BrowseCatalog(context.Background(), backupSetID, "documents/", 0, 0)
 		if err != nil {
 			t.Fatalf("BrowseCatalog failed: %v", err)
 		}
@@ -222,7 +259,7 @@ func TestBrowseCatalog(t *testing.T) {
 	})
 
 	t.Run("returns empty slice for non-existent set", func(t *testing.T) {
-		entries, err := svc.BrowseCatalog(context.Background(), 99999, "", 100)
+		entries, err := svc.BrowseCatalog(context.Background(), 99999, "", 0, 0)
 		if err != nil {
 			t.Fatalf("BrowseCatalog failed: %v", err)
 		}
@@ -247,7 +284,7 @@ func TestBrowseCatalog(t *testing.T) {
 			t.Fatalf("failed to insert catalog entry with NULLs: %v", err)
 		}
 
-		entries, err := svc.BrowseCatalog(context.Background(), backupSetID, "nulltest/", 100)
+		entries, err := svc.BrowseCatalog(context.Background(), backupSetID, "nulltest/", 0, 0)
 		if err != nil {
 			t.Fatalf("BrowseCatalog failed: %v", err)
 		}
