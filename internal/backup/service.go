@@ -1053,7 +1053,12 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		}
 		var remaining []FileInfo
 		for _, f := range files {
-			relPath, _ := filepath.Rel(source.Path, f.Path)
+			relPath, err := filepath.Rel(source.Path, f.Path)
+			if err != nil {
+				// If we can't compute relative path, include the file to be safe
+				remaining = append(remaining, f)
+				continue
+			}
 			if !processedSet[relPath] {
 				remaining = append(remaining, f)
 			}
@@ -1499,7 +1504,16 @@ func (s *Service) saveFailedJobState(jobID int64, p *JobProgress, errorMessage s
 		}
 	}
 
-	stateJSON, _ := json.Marshal(state)
+	stateJSON, err := json.Marshal(state)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("Failed to marshal failed job resume state", map[string]interface{}{
+				"job_id": jobID,
+				"error":  err.Error(),
+			})
+		}
+		return
+	}
 
 	s.db.Exec(`
 		INSERT INTO job_executions (job_id, backup_set_id, status, files_processed, bytes_processed, error_message, can_resume, resume_state)

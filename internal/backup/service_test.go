@@ -563,3 +563,154 @@ func TestJobProgressFields(t *testing.T) {
 		t.Errorf("expected Status 'running', got '%s'", p.Status)
 	}
 }
+
+func TestResumeStateJSON(t *testing.T) {
+	state := ResumeState{
+		FilesProcessed: []string{"dir1/file1.txt", "dir2/file2.txt"},
+		BytesWritten:   1024000,
+		TotalFiles:     100,
+		TotalBytes:     10240000,
+		TapeID:         42,
+		BackupSetID:    7,
+	}
+
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("failed to marshal ResumeState: %v", err)
+	}
+
+	var decoded ResumeState
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("failed to unmarshal ResumeState: %v", err)
+	}
+
+	if len(decoded.FilesProcessed) != 2 {
+		t.Fatalf("expected 2 files processed, got %d", len(decoded.FilesProcessed))
+	}
+	if decoded.FilesProcessed[0] != "dir1/file1.txt" {
+		t.Errorf("expected first file 'dir1/file1.txt', got '%s'", decoded.FilesProcessed[0])
+	}
+	if decoded.BytesWritten != 1024000 {
+		t.Errorf("expected bytes written 1024000, got %d", decoded.BytesWritten)
+	}
+	if decoded.TotalFiles != 100 {
+		t.Errorf("expected total files 100, got %d", decoded.TotalFiles)
+	}
+	if decoded.BackupSetID != 7 {
+		t.Errorf("expected backup set ID 7, got %d", decoded.BackupSetID)
+	}
+}
+
+func TestResumeStateEmptyFilesProcessed(t *testing.T) {
+	state := ResumeState{
+		BytesWritten: 0,
+		TotalFiles:   50,
+		TotalBytes:   5000,
+	}
+
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("failed to marshal ResumeState: %v", err)
+	}
+
+	var decoded ResumeState
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("failed to unmarshal ResumeState: %v", err)
+	}
+
+	if len(decoded.FilesProcessed) != 0 {
+		t.Errorf("expected 0 files processed, got %d", len(decoded.FilesProcessed))
+	}
+}
+
+func TestPauseJobPersistsState(t *testing.T) {
+	// Test that PauseJob still works with nil db (no crash)
+	svc := NewService(nil, nil, nil, 65536)
+
+	var pauseFlag int32
+	svc.mu.Lock()
+	svc.activeJobs[1] = &JobProgress{
+		JobID:       1,
+		JobName:     "test-job",
+		Phase:       "streaming",
+		Status:      "running",
+		BytesWritten: 50000,
+		TotalFiles:  100,
+		TotalBytes:  100000,
+		BackupSetID: 5,
+	}
+	svc.pauseFlags[1] = &pauseFlag
+	svc.mu.Unlock()
+
+	if !svc.PauseJob(1) {
+		t.Error("expected PauseJob to return true")
+	}
+
+	svc.mu.Lock()
+	p := svc.activeJobs[1]
+	svc.mu.Unlock()
+
+	if p.Status != "paused" {
+		t.Errorf("expected status 'paused', got '%s'", p.Status)
+	}
+}
+
+func TestResumeFilesFiltering(t *testing.T) {
+	svc := NewService(nil, nil, nil, 65536)
+
+	// Simulate resume files being set
+	svc.mu.Lock()
+	svc.resumeFiles[1] = []string{"file1.txt", "subdir/file2.txt"}
+	svc.mu.Unlock()
+
+	// Verify resumeFiles is populated
+	svc.mu.Lock()
+	rf := svc.resumeFiles[1]
+	svc.mu.Unlock()
+
+	if len(rf) != 2 {
+		t.Fatalf("expected 2 resume files, got %d", len(rf))
+	}
+	if rf[0] != "file1.txt" {
+		t.Errorf("expected first resume file 'file1.txt', got '%s'", rf[0])
+	}
+
+	// Clean up
+	svc.mu.Lock()
+	delete(svc.resumeFiles, 1)
+	svc.mu.Unlock()
+
+	svc.mu.Lock()
+	rf = svc.resumeFiles[1]
+	svc.mu.Unlock()
+
+	if len(rf) != 0 {
+		t.Errorf("expected 0 resume files after cleanup, got %d", len(rf))
+	}
+}
+
+func TestSaveJobExecutionStateNilDB(t *testing.T) {
+	// Ensure saveJobExecutionState doesn't panic with nil DB
+	svc := NewService(nil, nil, nil, 65536)
+	p := &JobProgress{
+		JobID:       1,
+		BytesWritten: 1000,
+		TotalFiles:  10,
+		TotalBytes:  5000,
+	}
+	// Should not panic
+	svc.saveJobExecutionState(1, p)
+}
+
+func TestSaveFailedJobStateNilDB(t *testing.T) {
+	// Ensure saveFailedJobState doesn't panic with nil DB
+	svc := NewService(nil, nil, nil, 65536)
+	p := &JobProgress{
+		JobID:       1,
+		BytesWritten: 1000,
+		TotalFiles:  10,
+		TotalBytes:  5000,
+	}
+	// Should not panic
+	svc.saveFailedJobState(1, p, "network error")
+}

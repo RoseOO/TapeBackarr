@@ -318,7 +318,7 @@
   }
 
   async function handleRetry(job: Job) {
-    if (!confirm(`Retry backup job "${job.name}"? This will resume from the last checkpoint if available.`)) return;
+    if (!confirm(`Retry backup job "${job.name}"? This will resume from the last checkpoint if available, or start a fresh backup otherwise.`)) return;
     try {
       error = '';
       await api.retryJob(job.id);
