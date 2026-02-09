@@ -184,6 +184,16 @@
       error = e instanceof Error ? e.message : 'Failed to delete backup set';
     }
   }
+
+  async function handleCancelBackupSet(set: BackupSet) {
+    if (!confirm(`Cancel stuck backup set "${set.job_name}"? This will mark it as cancelled so it can be deleted.`)) return;
+    try {
+      await api.cancelBackupSet(set.id);
+      await loadBackupSets();
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to cancel backup set';
+    }
+  }
 </script>
 
 <div class="page-header">
@@ -272,7 +282,12 @@
               {#if set.compressed}
                 <span class="badge badge-info">{set.compression_type}</span>
               {/if}
-              {#if set.status === 'failed' || set.status === 'completed'}
+              {#if set.status === 'running' || set.status === 'pending'}
+                <button class="btn btn-warning btn-sm" on:click|stopPropagation={() => handleCancelBackupSet(set)}>
+                  ⛔ Cancel
+                </button>
+              {/if}
+              {#if set.status === 'failed' || set.status === 'completed' || set.status === 'cancelled'}
                 <button class="btn btn-danger btn-sm" on:click|stopPropagation={() => handleDeleteBackupSet(set)}>
                   🗑️ Delete
                 </button>

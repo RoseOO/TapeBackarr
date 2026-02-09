@@ -253,6 +253,7 @@ func (s *Server) setupRoutes() {
 			r.Get("/{id}", s.handleGetBackupSet)
 			r.Get("/{id}/files", s.handleListBackupFiles)
 			r.Delete("/{id}", s.handleDeleteBackupSet)
+			r.Post("/{id}/cancel", s.handleCancelBackupSet)
 		})
 
 		// Catalog
@@ -3424,15 +3425,26 @@ func (s *Server) handleDeleteBackupSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Only allow deletion of failed or completed backup sets
-	if status != "failed" && status != "completed" {
-		s.respondError(w, http.StatusBadRequest, "can only delete failed or completed backup sets")
+	// Only allow deletion of failed, completed, or cancelled backup sets
+	if status != "failed" && status != "completed" && status != "cancelled" {
+		s.respondError(w, http.StatusBadRequest, "can only delete failed, completed, or cancelled backup sets")
 		return
 	}
 
-	// Delete catalog entries first (foreign key)
-	if _, err := s.db.Exec("DELETE FROM catalog_entries WHERE backup_set_id = ?", id); err != nil {
-		s.logger.Warn("failed to delete catalog entries for backup set", map[string]interface{}{"backup_set_id": id, "error": err.Error()})
+	// Delete all foreign key references before deleting the backup set.
+	// Table names are hardcoded; no user input is used in the query.
+	fkTables := map[string]bool{
+		"catalog_entries":       true,
+		"job_executions":        true,
+		"snapshots":             true,
+		"restore_operations":    true,
+		"tape_spanning_members": true,
+	}
+	for table := range fkTables {
+		query := fmt.Sprintf("DELETE FROM %s WHERE backup_set_id = ?", table)
+		if _, err := s.db.Exec(query, id); err != nil {
+			s.logger.Warn("failed to delete foreign key references for backup set", map[string]interface{}{"table": table, "backup_set_id": id, "error": err.Error()})
+		}
 	}
 
 	// Delete the backup set
@@ -3444,6 +3456,38 @@ func (s *Server) handleDeleteBackupSet(w http.ResponseWriter, r *http.Request) {
 
 	s.auditLog(r, "delete", "backup_set", id, fmt.Sprintf("Deleted backup set #%d (status: %s)", id, status))
 	s.respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (s *Server) handleCancelBackupSet(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid backup set id")
+		return
+	}
+
+	// Check the backup set exists and get its status
+	var status string
+	err = s.db.QueryRow("SELECT status FROM backup_sets WHERE id = ?", id).Scan(&status)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "backup set not found")
+		return
+	}
+
+	// Only allow cancellation of running or pending backup sets
+	if status != "running" && status != "pending" {
+		s.respondError(w, http.StatusBadRequest, "can only cancel running or pending backup sets")
+		return
+	}
+
+	now := time.Now()
+	_, err = s.db.Exec("UPDATE backup_sets SET status = 'cancelled', end_time = ?, updated_at = ? WHERE id = ?", now, now, id)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to cancel backup set")
+		return
+	}
+
+	s.auditLog(r, "cancel", "backup_set", id, fmt.Sprintf("Cancelled stuck backup set #%d (was: %s)", id, status))
+	s.respondJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
 }
 
 // Catalog handlers
