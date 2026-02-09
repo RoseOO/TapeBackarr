@@ -42,6 +42,7 @@ type TapeConfig struct {
 	Drives           []DriveConfig `json:"drives,omitempty"`
 	BufferSizeMB     int           `json:"buffer_size_mb"`
 	BlockSize        int           `json:"block_size"`
+	PipelineDepthMB  int           `json:"pipeline_depth_mb"`
 	WriteRetries     int           `json:"write_retries"`
 	VerifyAfterWrite bool          `json:"verify_after_write"`
 }
@@ -124,6 +125,7 @@ func DefaultConfig() *Config {
 			},
 			BufferSizeMB:     2048,
 			BlockSize:        1048576,
+			PipelineDepthMB:  64,
 			WriteRetries:     3,
 			VerifyAfterWrite: true,
 		},

@@ -613,7 +613,7 @@ func TestTelegramActiveCommandCatalogingPhase(t *testing.T) {
 	}
 
 	tapeService := tape.NewService("/dev/null", 65536)
-	backupSvc := backup.NewService(db, tapeService, nil, 65536, 512)
+	backupSvc := backup.NewService(db, tapeService, nil, 65536, 512, 0)
 
 	// Inject an active job in "cataloging" phase
 	backupSvc.InjectTestJob(1, &backup.JobProgress{
@@ -675,7 +675,7 @@ func TestTelegramActiveCommandStreamingPhase(t *testing.T) {
 	}
 
 	tapeService := tape.NewService("/dev/null", 65536)
-	backupSvc := backup.NewService(db, tapeService, nil, 65536, 512)
+	backupSvc := backup.NewService(db, tapeService, nil, 65536, 512, 0)
 
 	// Inject an active job in "streaming" phase
 	backupSvc.InjectTestJob(1, &backup.JobProgress{

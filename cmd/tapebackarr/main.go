@@ -103,7 +103,7 @@ func main() {
 	}
 
 	// Create backup service
-	backupService := backup.NewService(db, tapeService, logger, cfg.Tape.BlockSize, cfg.Tape.BufferSizeMB)
+	backupService := backup.NewService(db, tapeService, logger, cfg.Tape.BlockSize, cfg.Tape.BufferSizeMB, cfg.Tape.PipelineDepthMB)
 	backupService.TapeChangeCallback = func(ctx context.Context, jobName, currentTape, reason, nextTape string) {
 		telegramService.NotifyTapeChangeRequired(ctx, jobName, currentTape, reason, nextTape)
 	}

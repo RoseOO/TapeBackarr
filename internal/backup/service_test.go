@@ -395,7 +395,7 @@ func TestFileInfoHashField(t *testing.T) {
 }
 
 func TestGetActiveJobs(t *testing.T) {
-	svc := NewService(nil, nil, nil, 65536, 512)
+	svc := NewService(nil, nil, nil, 65536, 512, 0)
 
 	// Initially no active jobs
 	jobs := svc.GetActiveJobs()
@@ -426,7 +426,7 @@ func TestGetActiveJobs(t *testing.T) {
 }
 
 func TestCancelJob(t *testing.T) {
-	svc := NewService(nil, nil, nil, 65536, 512)
+	svc := NewService(nil, nil, nil, 65536, 512, 0)
 
 	// Cancel non-existent job returns false
 	if svc.CancelJob(999) {
@@ -467,7 +467,7 @@ func TestCancelJob(t *testing.T) {
 }
 
 func TestPauseResumeJob(t *testing.T) {
-	svc := NewService(nil, nil, nil, 65536, 512)
+	svc := NewService(nil, nil, nil, 65536, 512, 0)
 
 	// Pause non-existent job returns false
 	if svc.PauseJob(999) {
@@ -512,7 +512,7 @@ func TestPauseResumeJob(t *testing.T) {
 }
 
 func TestEventCallback(t *testing.T) {
-	svc := NewService(nil, nil, nil, 65536, 512)
+	svc := NewService(nil, nil, nil, 65536, 512, 0)
 
 	var receivedEvents []string
 	svc.EventCallback = func(eventType, category, title, message string) {
@@ -550,7 +550,7 @@ func TestEventCallback(t *testing.T) {
 }
 
 func TestBackupFailureEmitsErrorEvent(t *testing.T) {
-	svc := NewService(nil, nil, nil, 65536, 512)
+	svc := NewService(nil, nil, nil, 65536, 512, 0)
 
 	var receivedEvents []string
 	svc.EventCallback = func(eventType, category, title, message string) {
@@ -807,6 +807,58 @@ func TestCountingReaderWriteToEmpty(t *testing.T) {
 	}
 }
 
+func TestCountingReaderWriteToCustomDepth(t *testing.T) {
+	// Verify that a custom pipelineDepth is honoured: data integrity and
+	// byte counting must still hold with a non-default depth.
+	data := make([]byte, 4*1024*1024+77) // ~4MB + odd tail
+	for i := range data {
+		data[i] = byte(i % 251)
+	}
+	reader := bytes.NewReader(data)
+
+	cr := &countingReader{
+		reader:        reader,
+		pipelineDepth: 8, // smaller than default to test override
+	}
+
+	var dst bytes.Buffer
+	n, err := cr.WriteTo(&dst)
+	if err != nil {
+		t.Fatalf("WriteTo error: %v", err)
+	}
+	if n != int64(len(data)) {
+		t.Errorf("WriteTo returned %d bytes, expected %d", n, len(data))
+	}
+	if cr.bytesRead() != int64(len(data)) {
+		t.Errorf("bytesRead() = %d, expected %d", cr.bytesRead(), len(data))
+	}
+	if !bytes.Equal(dst.Bytes(), data) {
+		t.Error("destination data does not match source")
+	}
+}
+
+func TestNewServicePipelineDepth(t *testing.T) {
+	tests := []struct {
+		name            string
+		pipelineDepthMB int
+		wantDepth       int
+	}{
+		{"zero uses default", 0, defaultPipelineDepth},
+		{"negative uses default", -1, defaultPipelineDepth},
+		{"64MB yields 64 buffers", 64, 64},
+		{"16MB yields 16 buffers", 16, 16},
+		{"1MB yields minimum 4", 1, 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := NewService(nil, nil, nil, 65536, 512, tt.pipelineDepthMB)
+			if svc.pipelineDepth != tt.wantDepth {
+				t.Errorf("pipelineDepth = %d, want %d", svc.pipelineDepth, tt.wantDepth)
+			}
+		})
+	}
+}
+
 func TestJobProgressFields(t *testing.T) {
 	p := JobProgress{
 		JobID:                     1,
@@ -900,7 +952,7 @@ func TestResumeStateEmptyFilesProcessed(t *testing.T) {
 
 func TestPauseJobPersistsState(t *testing.T) {
 	// Test that PauseJob still works with nil db (no crash)
-	svc := NewService(nil, nil, nil, 65536, 512)
+	svc := NewService(nil, nil, nil, 65536, 512, 0)
 
 	var pauseFlag int32
 	svc.mu.Lock()
@@ -931,7 +983,7 @@ func TestPauseJobPersistsState(t *testing.T) {
 }
 
 func TestResumeFilesFiltering(t *testing.T) {
-	svc := NewService(nil, nil, nil, 65536, 512)
+	svc := NewService(nil, nil, nil, 65536, 512, 0)
 
 	// Simulate resume files being set
 	svc.mu.Lock()
@@ -966,7 +1018,7 @@ func TestResumeFilesFiltering(t *testing.T) {
 
 func TestSaveJobExecutionStateNilDB(t *testing.T) {
 	// Ensure saveJobExecutionState doesn't panic with nil DB
-	svc := NewService(nil, nil, nil, 65536, 512)
+	svc := NewService(nil, nil, nil, 65536, 512, 0)
 	p := &JobProgress{
 		JobID:        1,
 		BytesWritten: 1000,
@@ -979,7 +1031,7 @@ func TestSaveJobExecutionStateNilDB(t *testing.T) {
 
 func TestSaveFailedJobStateNilDB(t *testing.T) {
 	// Ensure saveFailedJobState doesn't panic with nil DB
-	svc := NewService(nil, nil, nil, 65536, 512)
+	svc := NewService(nil, nil, nil, 65536, 512, 0)
 	p := &JobProgress{
 		JobID:        1,
 		BytesWritten: 1000,

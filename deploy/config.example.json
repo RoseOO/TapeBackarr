@@ -23,6 +23,7 @@
     ],
     "buffer_size_mb": 2048,
     "block_size": 1048576,
+    "pipeline_depth_mb": 64,
     "write_retries": 3,
     "verify_after_write": true
   },
