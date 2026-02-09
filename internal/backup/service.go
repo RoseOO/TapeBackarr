@@ -61,6 +61,23 @@ type JobProgress struct {
 // EventCallback is called when backup progress events occur (for SSE/console)
 type EventCallback func(eventType, category, title, message string)
 
+// buildCompressionCmd returns the exec.Cmd for the given compression type.
+// For gzip it uses pigz (parallel gzip) with -1 (fastest) when available,
+// falling back to gzip -1. For zstd it uses automatic multi-threading.
+func buildCompressionCmd(ctx context.Context, compression models.CompressionType) (*exec.Cmd, error) {
+	switch compression {
+	case models.CompressionGzip:
+		if _, err := exec.LookPath("pigz"); err == nil {
+			return exec.CommandContext(ctx, "pigz", "-1", "-c"), nil
+		}
+		return exec.CommandContext(ctx, "gzip", "-1", "-c"), nil
+	case models.CompressionZstd:
+		return exec.CommandContext(ctx, "zstd", "-T0", "-c", "--no-progress"), nil
+	default:
+		return nil, fmt.Errorf("unsupported compression type: %s", compression)
+	}
+}
+
 // countingReader wraps an io.Reader and counts bytes read through it.
 // It uses atomic operations instead of a mutex for the byte counter to avoid
 // lock contention in the hot data path, and throttles the progress callback
@@ -682,22 +699,9 @@ func (s *Service) StreamToTapeCompressed(ctx context.Context, sourcePath string,
 	tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
 	tarCmd.Dir = sourcePath
 
-	// Determine compression command
-	// Use pigz (parallel gzip) when available for multi-core throughput,
-	// otherwise fall back to gzip -1 (fastest) to avoid CPU bottleneck.
-	// Use zstd -T0 for automatic multi-threading.
-	var compCmd *exec.Cmd
-	switch compression {
-	case models.CompressionGzip:
-		if _, err := exec.LookPath("pigz"); err == nil {
-			compCmd = exec.CommandContext(ctx, "pigz", "-c")
-		} else {
-			compCmd = exec.CommandContext(ctx, "gzip", "-1", "-c")
-		}
-	case models.CompressionZstd:
-		compCmd = exec.CommandContext(ctx, "zstd", "-T0", "-c", "--no-progress")
-	default:
-		return fmt.Errorf("unsupported compression type: %s", compression)
+	compCmd, err := buildCompressionCmd(ctx, compression)
+	if err != nil {
+		return err
 	}
 
 	// Set up pipeline: tar -> countingReader -> compression -> tape
@@ -815,7 +819,7 @@ func (s *Service) StreamToTapeCompressedEncrypted(ctx context.Context, sourcePat
 	switch compression {
 	case models.CompressionGzip:
 		if _, err := exec.LookPath("pigz"); err == nil {
-			compCmd = exec.CommandContext(ctx, "pigz", "-c")
+			compCmd = exec.CommandContext(ctx, "pigz", "-1", "-c")
 		} else {
 			compCmd = exec.CommandContext(ctx, "gzip", "-1", "-c")
 		}
