@@ -1009,6 +1009,8 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		VALUES (?, ?, ?, ?, ?)
 	`, job.ID, tapeID, backupType, startTime, models.BackupSetStatusRunning)
 	if err != nil {
+		s.updateProgress(job.ID, "failed", "Failed to create backup set: "+err.Error())
+		s.emitEvent("error", "backup", "Backup Failed", fmt.Sprintf("Job %s failed: %s", job.Name, err.Error()))
 		return nil, fmt.Errorf("failed to create backup set: %w", err)
 	}
 

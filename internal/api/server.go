@@ -2747,9 +2747,9 @@ func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 	// Get job details
 	var job models.BackupJob
 	err = s.db.QueryRow(`
-		SELECT id, name, source_id, pool_id, backup_type, retention_days, encryption_enabled, encryption_key_id
+		SELECT id, name, source_id, pool_id, backup_type, retention_days, encryption_enabled, encryption_key_id, compression
 		FROM backup_jobs WHERE id = ?
-	`, id).Scan(&job.ID, &job.Name, &job.SourceID, &job.PoolID, &job.BackupType, &job.RetentionDays, &job.EncryptionEnabled, &job.EncryptionKeyID)
+	`, id).Scan(&job.ID, &job.Name, &job.SourceID, &job.PoolID, &job.BackupType, &job.RetentionDays, &job.EncryptionEnabled, &job.EncryptionKeyID, &job.Compression)
 	if err != nil {
 		s.respondError(w, http.StatusNotFound, "job not found")
 		return
@@ -2793,7 +2793,13 @@ func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 		// Run backup in background
 		go func() {
 			ctx := context.Background()
-			s.backupService.RunBackup(ctx, &job, &source, tapeID, backupType)
+			if _, err := s.backupService.RunBackup(ctx, &job, &source, tapeID, backupType); err != nil {
+				s.logger.Error("Backup job failed", map[string]interface{}{
+					"job_id":   job.ID,
+					"job_name": job.Name,
+					"error":    err.Error(),
+				})
+			}
 		}()
 
 		s.auditLog(r, "run", "backup_job", id, "Started backup job")
@@ -2815,7 +2821,13 @@ func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 	// Run backup in background with explicit tape
 	go func() {
 		ctx := context.Background()
-		s.backupService.RunBackup(ctx, &job, &source, tapeID, backupType)
+		if _, err := s.backupService.RunBackup(ctx, &job, &source, tapeID, backupType); err != nil {
+			s.logger.Error("Backup job failed", map[string]interface{}{
+				"job_id":   job.ID,
+				"job_name": job.Name,
+				"error":    err.Error(),
+			})
+		}
 	}()
 
 	s.auditLog(r, "run", "backup_job", id, "Started backup job")
@@ -3074,10 +3086,18 @@ func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 	// Run backup in background with optional resume state
 	go func() {
 		ctx := context.Background()
+		var err error
 		if resumeState != "" {
-			s.backupService.RunBackupWithResume(ctx, &job, &source, tapeID, job.BackupType, resumeState)
+			_, err = s.backupService.RunBackupWithResume(ctx, &job, &source, tapeID, job.BackupType, resumeState)
 		} else {
-			s.backupService.RunBackup(ctx, &job, &source, tapeID, job.BackupType)
+			_, err = s.backupService.RunBackup(ctx, &job, &source, tapeID, job.BackupType)
+		}
+		if err != nil {
+			s.logger.Error("Backup job failed", map[string]interface{}{
+				"job_id":   job.ID,
+				"job_name": job.Name,
+				"error":    err.Error(),
+			})
 		}
 	}()
 
