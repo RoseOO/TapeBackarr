@@ -102,7 +102,7 @@
     schedule_cron: '',
     retention_days: 30,
     encryption_key_id: null as number | null,
-    compression: 'none',
+    compression: 'lto',
   };
 
   let runFormData = {
@@ -241,7 +241,7 @@
       schedule_cron: '',
       retention_days: 30,
       encryption_key_id: null as number | null,
-      compression: 'none',
+      compression: 'lto',
     };
   }
 
@@ -533,7 +533,9 @@
               {/if}
             </td>
             <td>
-              {#if job.compression && job.compression !== 'none'}
+              {#if job.compression === 'lto'}
+                <span class="badge badge-info">📼 LTO Hardware</span>
+              {:else if job.compression && job.compression !== 'none'}
                 <span class="badge badge-info">{job.compression}</span>
               {:else}
                 <span class="badge" style="background: var(--bg-input); color: var(--text-muted)">None</span>
@@ -627,11 +629,12 @@
         <div class="form-group">
           <label for="compression">Compression</label>
           <select id="compression" bind:value={formData.compression}>
+            <option value="lto">LTO Hardware (recommended)</option>
             <option value="none">None</option>
-            <option value="gzip">Gzip</option>
-            <option value="zstd">Zstd</option>
+            <option value="gzip">Gzip (software)</option>
+            <option value="zstd">Zstd (software)</option>
           </select>
-          <small>Compress data before writing to tape. Recommended for LTO tapes.</small>
+          <small>LTO drives compress data in hardware at full speed. Software compression (gzip/zstd) is counterproductive for LTO — it prevents hardware compression and wastes CPU.</small>
         </div>
         <div class="modal-actions">
           <button type="button" class="btn btn-secondary" on:click={() => showCreateModal = false}>Cancel</button>
@@ -757,7 +760,7 @@
         {#if editJob.compression && editJob.compression !== 'none'}
           <div class="form-group">
             <label>Compression</label>
-            <div class="locked-field">📦 {editJob.compression} (cannot be changed after creation)</div>
+            <div class="locked-field">{editJob.compression === 'lto' ? '📼 LTO Hardware' : '📦 ' + editJob.compression} (cannot be changed after creation)</div>
           </div>
         {/if}
         <div class="form-group checkbox-group">

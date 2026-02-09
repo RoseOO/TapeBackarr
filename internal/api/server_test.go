@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/RoseOO/TapeBackarr/internal/backup"
 	"github.com/RoseOO/TapeBackarr/internal/database"
 	"github.com/RoseOO/TapeBackarr/internal/logging"
 	"github.com/RoseOO/TapeBackarr/internal/tape"
@@ -512,5 +513,123 @@ func TestDeleteRunningBackupSetFails(t *testing.T) {
 
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("expected status 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestTelegramActiveCommandCatalogingPhase(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := database.New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("failed to migrate database: %v", err)
+	}
+
+	tapeService := tape.NewService("/dev/null", 65536)
+	backupSvc := backup.NewService(db, tapeService, nil, 65536, 512)
+
+	// Inject an active job in "cataloging" phase
+	backupSvc.InjectTestJob(1, &backup.JobProgress{
+		JobID:             1,
+		JobName:           "test-backup",
+		Phase:             "cataloging",
+		Status:            "running",
+		TapeLabel:         "TAPE-001",
+		DevicePath:        "/dev/nst0",
+		BytesWritten:      1000000000,
+		TotalBytes:        5000000000,
+		TotalFiles:        100,
+		FileCount:         42,
+		TapeCapacityBytes: 1500000000000,
+		TapeUsedBytes:     500000000000,
+		StartTime:         time.Now().Add(-1 * time.Hour),
+	})
+	defer backupSvc.RemoveTestJob(1)
+
+	s := &Server{
+		db:            db,
+		tapeService:   tapeService,
+		backupService: backupSvc,
+	}
+
+	result := s.telegramActiveCommand()
+
+	// Should contain the cataloging phase icon
+	if !strings.Contains(result, "📋") {
+		t.Errorf("expected cataloging icon '📋', got: %s", result)
+	}
+	if !strings.Contains(result, "Phase: cataloging") {
+		t.Errorf("expected 'Phase: cataloging', got: %s", result)
+	}
+	// Should show cataloging-specific progress
+	if !strings.Contains(result, "Cataloging 42/100 files") {
+		t.Errorf("expected cataloging progress line, got: %s", result)
+	}
+	// Should NOT show stale speed during cataloging
+	if strings.Contains(result, "Speed:") {
+		t.Errorf("should not show stale speed during cataloging, got: %s", result)
+	}
+	// Should still have tape space info
+	if !strings.Contains(result, "Tape Space:") {
+		t.Errorf("expected tape space info, got: %s", result)
+	}
+}
+
+func TestTelegramActiveCommandStreamingPhase(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := database.New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("failed to migrate database: %v", err)
+	}
+
+	tapeService := tape.NewService("/dev/null", 65536)
+	backupSvc := backup.NewService(db, tapeService, nil, 65536, 512)
+
+	// Inject an active job in "streaming" phase
+	backupSvc.InjectTestJob(1, &backup.JobProgress{
+		JobID:             1,
+		JobName:           "test-backup",
+		Phase:             "streaming",
+		Status:            "running",
+		TapeLabel:         "TAPE-001",
+		DevicePath:        "/dev/nst0",
+		BytesWritten:      1000000000,
+		TotalBytes:        5000000000,
+		TotalFiles:        100,
+		FileCount:         20,
+		WriteSpeed:        100000000,
+		TapeCapacityBytes: 1500000000000,
+		TapeUsedBytes:     500000000000,
+		StartTime:         time.Now().Add(-1 * time.Hour),
+	})
+	defer backupSvc.RemoveTestJob(1)
+
+	s := &Server{
+		db:            db,
+		tapeService:   tapeService,
+		backupService: backupSvc,
+	}
+
+	result := s.telegramActiveCommand()
+
+	// Should contain the streaming phase icon
+	if !strings.Contains(result, "📼") {
+		t.Errorf("expected streaming icon '📼', got: %s", result)
+	}
+	// Should show speed during streaming
+	if !strings.Contains(result, "Speed:") {
+		t.Errorf("expected speed during streaming, got: %s", result)
+	}
+	// Should show files count during streaming
+	if !strings.Contains(result, "Files: 20/100") {
+		t.Errorf("expected files count, got: %s", result)
 	}
 }

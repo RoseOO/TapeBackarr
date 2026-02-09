@@ -146,6 +146,12 @@ type CompressionType string
 
 const (
 	CompressionNone CompressionType = "none"
+	// CompressionLTO indicates that compression is handled by the LTO drive hardware.
+	// Data is written uncompressed to tape; the drive performs block-level compression
+	// at full streaming speed with no host CPU involvement. Pre-compressing data
+	// (gzip/zstd) is counterproductive: it prevents hardware compression, reduces
+	// throughput, and wastes CPU cycles.
+	CompressionLTO  CompressionType = "lto"
 	CompressionGzip CompressionType = "gzip"
 	CompressionZstd CompressionType = "zstd"
 )

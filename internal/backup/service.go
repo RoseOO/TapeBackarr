@@ -170,6 +170,22 @@ func (cr *countingReader) bytesRead() int64 {
 	return atomic.LoadInt64(&cr.count)
 }
 
+// countingWriter wraps an io.Writer and counts bytes written through it.
+type countingWriter struct {
+	writer io.Writer
+	count  int64
+}
+
+func (cw *countingWriter) Write(p []byte) (int, error) {
+	n, err := cw.writer.Write(p)
+	atomic.AddInt64(&cw.count, int64(n))
+	return n, err
+}
+
+func (cw *countingWriter) bytesWritten() int64 {
+	return atomic.LoadInt64(&cw.count)
+}
+
 // Service handles backup operations
 type Service struct {
 	db            *database.DB
@@ -212,6 +228,20 @@ func (s *Service) GetActiveJobs() []*JobProgress {
 		jobs = append(jobs, j)
 	}
 	return jobs
+}
+
+// InjectTestJob adds a job directly into activeJobs for testing purposes.
+func (s *Service) InjectTestJob(jobID int64, p *JobProgress) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.activeJobs[jobID] = p
+}
+
+// RemoveTestJob removes a job from activeJobs for testing cleanup.
+func (s *Service) RemoveTestJob(jobID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.activeJobs, jobID)
 }
 
 // CancelJob cancels a running backup job
@@ -611,16 +641,16 @@ func (s *Service) CompareWithSnapshot(ctx context.Context, currentFiles []FileIn
 }
 
 // StreamToTape streams files directly to tape using tar
-func (s *Service) StreamToTape(ctx context.Context, sourcePath string, files []FileInfo, devicePath string, progressCb func(bytesWritten int64), pauseFlag *int32) error {
+func (s *Service) StreamToTape(ctx context.Context, sourcePath string, files []FileInfo, devicePath string, progressCb func(bytesWritten int64), pauseFlag *int32) (int64, error) {
 	if len(files) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	// Create a file list for tar
 	fileListPath := fmt.Sprintf("/tmp/tapebackarr-filelist-%d.txt", time.Now().UnixNano())
 	fileList, err := os.Create(fileListPath)
 	if err != nil {
-		return fmt.Errorf("failed to create file list: %w", err)
+		return 0, fmt.Errorf("failed to create file list: %w", err)
 	}
 	defer os.Remove(fileListPath)
 
@@ -653,61 +683,65 @@ func (s *Service) StreamToTape(ctx context.Context, sourcePath string, files []F
 		tarCmd.Dir = sourcePath
 		pipe, err := tarCmd.StdoutPipe()
 		if err != nil {
-			return fmt.Errorf("failed to create pipe: %w", err)
+			return 0, fmt.Errorf("failed to create pipe: %w", err)
 		}
 
 		cr := &countingReader{reader: pipe, callback: progressCb, paused: pauseFlag}
 		mbufferCmd.Stdin = cr
 
 		if err := tarCmd.Start(); err != nil {
-			return fmt.Errorf("failed to start tar: %w", err)
+			return 0, fmt.Errorf("failed to start tar: %w", err)
 		}
 		if err := mbufferCmd.Start(); err != nil {
 			tarCmd.Process.Kill()
-			return fmt.Errorf("failed to start mbuffer: %w", err)
+			return 0, fmt.Errorf("failed to start mbuffer: %w", err)
 		}
 
 		tarErr := tarCmd.Wait()
 		mbufferErr := mbufferCmd.Wait()
 
 		if ctx.Err() != nil {
-			return fmt.Errorf("backup cancelled: %w", ctx.Err())
+			return 0, fmt.Errorf("backup cancelled: %w", ctx.Err())
 		}
 		if tarErr != nil {
-			return fmt.Errorf("tar failed: %w", tarErr)
+			return 0, fmt.Errorf("tar failed: %w", tarErr)
 		}
 		if mbufferErr != nil {
-			return fmt.Errorf("mbuffer failed: %w", mbufferErr)
+			return 0, fmt.Errorf("mbuffer failed: %w", mbufferErr)
 		}
+		// For uncompressed streams the tar bytes equal tape bytes
+		return cr.bytesRead(), nil
 	} else {
-		// Direct tar to tape
+		// Direct tar to tape — no countingReader in this path.
+		// Returns 0 so finishTape falls back to totalBytes (correct for
+		// uncompressed streams where raw file size ≈ tape usage).
 		tarArgs = append(tarArgs, "-f", devicePath)
 		cmd = exec.CommandContext(ctx, "tar", tarArgs...)
 		cmd.Dir = sourcePath
 
 		output, err := cmd.CombinedOutput()
 		if ctx.Err() != nil {
-			return fmt.Errorf("backup cancelled: %w", ctx.Err())
+			return 0, fmt.Errorf("backup cancelled: %w", ctx.Err())
 		}
 		if err != nil {
-			return fmt.Errorf("tar failed: %s", string(output))
+			return 0, fmt.Errorf("tar failed: %s", string(output))
 		}
 	}
 
-	return nil
+	return 0, nil
 }
 
 // StreamToTapeEncrypted streams files directly to tape with encryption using openssl
-func (s *Service) StreamToTapeEncrypted(ctx context.Context, sourcePath string, files []FileInfo, devicePath string, encryptionKey string, progressCb func(bytesWritten int64), pauseFlag *int32) error {
+func (s *Service) StreamToTapeEncrypted(ctx context.Context, sourcePath string, files []FileInfo, devicePath string, encryptionKey string, progressCb func(bytesWritten int64), pauseFlag *int32) (int64, error) {
 	if len(files) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	// Create a file list for tar
 	fileListPath := fmt.Sprintf("/tmp/tapebackarr-filelist-%d.txt", time.Now().UnixNano())
 	fileList, err := os.Create(fileListPath)
 	if err != nil {
-		return fmt.Errorf("failed to create file list: %w", err)
+		return 0, fmt.Errorf("failed to create file list: %w", err)
 	}
 	defer os.Remove(fileListPath)
 
@@ -746,7 +780,7 @@ func (s *Service) StreamToTapeEncrypted(ctx context.Context, sourcePath string, 
 	// Set up the pipeline with counting reader for progress tracking
 	tarPipe, err := tarCmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("failed to create tar pipe: %w", err)
+		return 0, fmt.Errorf("failed to create tar pipe: %w", err)
 	}
 	cr := &countingReader{reader: tarPipe, callback: progressCb, paused: pauseFlag}
 	opensslCmd.Stdin = cr
@@ -757,22 +791,24 @@ func (s *Service) StreamToTapeEncrypted(ctx context.Context, sourcePath string, 
 
 		opensslPipe, err := opensslCmd.StdoutPipe()
 		if err != nil {
-			return fmt.Errorf("failed to create openssl pipe: %w", err)
+			return 0, fmt.Errorf("failed to create openssl pipe: %w", err)
 		}
-		mbufferCmd.Stdin = opensslPipe
+		// Count actual encrypted bytes going to tape
+		tapeCr := &countingReader{reader: opensslPipe}
+		mbufferCmd.Stdin = tapeCr
 
 		// Start the pipeline
 		if err := tarCmd.Start(); err != nil {
-			return fmt.Errorf("failed to start tar: %w", err)
+			return 0, fmt.Errorf("failed to start tar: %w", err)
 		}
 		if err := opensslCmd.Start(); err != nil {
 			tarCmd.Process.Kill()
-			return fmt.Errorf("failed to start openssl: %w", err)
+			return 0, fmt.Errorf("failed to start openssl: %w", err)
 		}
 		if err := mbufferCmd.Start(); err != nil {
 			tarCmd.Process.Kill()
 			opensslCmd.Process.Kill()
-			return fmt.Errorf("failed to start mbuffer: %w", err)
+			return 0, fmt.Errorf("failed to start mbuffer: %w", err)
 		}
 
 		// Wait for all commands
@@ -781,63 +817,64 @@ func (s *Service) StreamToTapeEncrypted(ctx context.Context, sourcePath string, 
 		mbufferErr := mbufferCmd.Wait()
 
 		if ctx.Err() != nil {
-			return fmt.Errorf("backup cancelled: %w", ctx.Err())
+			return 0, fmt.Errorf("backup cancelled: %w", ctx.Err())
 		}
 		if tarErr != nil {
-			return fmt.Errorf("tar failed: %w", tarErr)
+			return 0, fmt.Errorf("tar failed: %w", tarErr)
 		}
 		if opensslErr != nil {
-			return fmt.Errorf("openssl encryption failed: %w", opensslErr)
+			return 0, fmt.Errorf("openssl encryption failed: %w", opensslErr)
 		}
 		if mbufferErr != nil {
-			return fmt.Errorf("mbuffer failed: %w", mbufferErr)
+			return 0, fmt.Errorf("mbuffer failed: %w", mbufferErr)
 		}
+		return tapeCr.bytesRead(), nil
 	} else {
 		// Direct to tape device
 		tapeFile, err := os.OpenFile(devicePath, os.O_WRONLY, 0)
 		if err != nil {
-			return fmt.Errorf("failed to open tape device: %w", err)
+			return 0, fmt.Errorf("failed to open tape device: %w", err)
 		}
 		defer tapeFile.Close()
 
-		opensslCmd.Stdout = tapeFile
+		tapeCw := &countingWriter{writer: tapeFile}
+		opensslCmd.Stdout = tapeCw
 
 		if err := tarCmd.Start(); err != nil {
-			return fmt.Errorf("failed to start tar: %w", err)
+			return 0, fmt.Errorf("failed to start tar: %w", err)
 		}
 		if err := opensslCmd.Start(); err != nil {
 			tarCmd.Process.Kill()
-			return fmt.Errorf("failed to start openssl: %w", err)
+			return 0, fmt.Errorf("failed to start openssl: %w", err)
 		}
 
 		tarErr := tarCmd.Wait()
 		opensslErr := opensslCmd.Wait()
 
 		if ctx.Err() != nil {
-			return fmt.Errorf("backup cancelled: %w", ctx.Err())
+			return 0, fmt.Errorf("backup cancelled: %w", ctx.Err())
 		}
 		if tarErr != nil {
-			return fmt.Errorf("tar failed: %w", tarErr)
+			return 0, fmt.Errorf("tar failed: %w", tarErr)
 		}
 		if opensslErr != nil {
-			return fmt.Errorf("openssl encryption failed: %w", opensslErr)
+			return 0, fmt.Errorf("openssl encryption failed: %w", opensslErr)
 		}
+		return tapeCw.bytesWritten(), nil
 	}
-
-	return nil
 }
 
 // StreamToTapeCompressed streams files to tape with compression
-func (s *Service) StreamToTapeCompressed(ctx context.Context, sourcePath string, files []FileInfo, devicePath string, compression models.CompressionType, progressCb func(bytesWritten int64), pauseFlag *int32) error {
+func (s *Service) StreamToTapeCompressed(ctx context.Context, sourcePath string, files []FileInfo, devicePath string, compression models.CompressionType, progressCb func(bytesWritten int64), pauseFlag *int32) (int64, error) {
 	if len(files) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	// Create a file list for tar
 	fileListPath := fmt.Sprintf("/tmp/tapebackarr-filelist-%d.txt", time.Now().UnixNano())
 	fileList, err := os.Create(fileListPath)
 	if err != nil {
-		return fmt.Errorf("failed to create file list: %w", err)
+		return 0, fmt.Errorf("failed to create file list: %w", err)
 	}
 	defer os.Remove(fileListPath)
 
@@ -860,13 +897,13 @@ func (s *Service) StreamToTapeCompressed(ctx context.Context, sourcePath string,
 
 	compCmd, err := buildCompressionCmd(ctx, compression)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	// Set up pipeline: tar -> countingReader -> compression -> tape
 	tarPipe, err := tarCmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("failed to create tar pipe: %w", err)
+		return 0, fmt.Errorf("failed to create tar pipe: %w", err)
 	}
 	cr := &countingReader{reader: tarPipe, callback: progressCb, paused: pauseFlag}
 	compCmd.Stdin = cr
@@ -878,21 +915,23 @@ func (s *Service) StreamToTapeCompressed(ctx context.Context, sourcePath string,
 		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", fmt.Sprintf("%dM", s.bufferSizeMB), "-o", devicePath)
 		compPipe, err := compCmd.StdoutPipe()
 		if err != nil {
-			return fmt.Errorf("failed to create compression pipe: %w", err)
+			return 0, fmt.Errorf("failed to create compression pipe: %w", err)
 		}
-		mbufferCmd.Stdin = compPipe
+		// Count actual compressed bytes going to tape
+		tapeCr := &countingReader{reader: compPipe}
+		mbufferCmd.Stdin = tapeCr
 
 		if err := tarCmd.Start(); err != nil {
-			return fmt.Errorf("failed to start tar: %w", err)
+			return 0, fmt.Errorf("failed to start tar: %w", err)
 		}
 		if err := compCmd.Start(); err != nil {
 			tarCmd.Process.Kill()
-			return fmt.Errorf("failed to start compression: %w", err)
+			return 0, fmt.Errorf("failed to start compression: %w", err)
 		}
 		if err := mbufferCmd.Start(); err != nil {
 			tarCmd.Process.Kill()
 			compCmd.Process.Kill()
-			return fmt.Errorf("failed to start mbuffer: %w", err)
+			return 0, fmt.Errorf("failed to start mbuffer: %w", err)
 		}
 
 		tarErr := tarCmd.Wait()
@@ -900,61 +939,62 @@ func (s *Service) StreamToTapeCompressed(ctx context.Context, sourcePath string,
 		mbufErr := mbufferCmd.Wait()
 
 		if ctx.Err() != nil {
-			return fmt.Errorf("backup cancelled: %w", ctx.Err())
+			return 0, fmt.Errorf("backup cancelled: %w", ctx.Err())
 		}
 		if tarErr != nil {
-			return fmt.Errorf("tar failed: %w", tarErr)
+			return 0, fmt.Errorf("tar failed: %w", tarErr)
 		}
 		if compErr != nil {
-			return fmt.Errorf("compression failed: %w", compErr)
+			return 0, fmt.Errorf("compression failed: %w", compErr)
 		}
 		if mbufErr != nil {
-			return fmt.Errorf("mbuffer failed: %w", mbufErr)
+			return 0, fmt.Errorf("mbuffer failed: %w", mbufErr)
 		}
+		return tapeCr.bytesRead(), nil
 	} else {
 		tapeFile, err := os.OpenFile(devicePath, os.O_WRONLY, 0)
 		if err != nil {
-			return fmt.Errorf("failed to open tape device: %w", err)
+			return 0, fmt.Errorf("failed to open tape device: %w", err)
 		}
 		defer tapeFile.Close()
 
-		compCmd.Stdout = tapeFile
+		tapeCw := &countingWriter{writer: tapeFile}
+		compCmd.Stdout = tapeCw
 
 		if err := tarCmd.Start(); err != nil {
-			return fmt.Errorf("failed to start tar: %w", err)
+			return 0, fmt.Errorf("failed to start tar: %w", err)
 		}
 		if err := compCmd.Start(); err != nil {
 			tarCmd.Process.Kill()
-			return fmt.Errorf("failed to start compression: %w", err)
+			return 0, fmt.Errorf("failed to start compression: %w", err)
 		}
 
 		tarErr := tarCmd.Wait()
 		compErr := compCmd.Wait()
 
 		if ctx.Err() != nil {
-			return fmt.Errorf("backup cancelled: %w", ctx.Err())
+			return 0, fmt.Errorf("backup cancelled: %w", ctx.Err())
 		}
 		if tarErr != nil {
-			return fmt.Errorf("tar failed: %w", tarErr)
+			return 0, fmt.Errorf("tar failed: %w", tarErr)
 		}
 		if compErr != nil {
-			return fmt.Errorf("compression failed: %w", compErr)
+			return 0, fmt.Errorf("compression failed: %w", compErr)
 		}
+		return tapeCw.bytesWritten(), nil
 	}
-
-	return nil
 }
 
 // StreamToTapeCompressedEncrypted streams files to tape with both compression and encryption
-func (s *Service) StreamToTapeCompressedEncrypted(ctx context.Context, sourcePath string, files []FileInfo, devicePath string, compression models.CompressionType, encryptionKey string, progressCb func(bytesWritten int64), pauseFlag *int32) error {
+func (s *Service) StreamToTapeCompressedEncrypted(ctx context.Context, sourcePath string, files []FileInfo, devicePath string, compression models.CompressionType, encryptionKey string, progressCb func(bytesWritten int64), pauseFlag *int32) (int64, error) {
 	if len(files) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	fileListPath := fmt.Sprintf("/tmp/tapebackarr-filelist-%d.txt", time.Now().UnixNano())
 	fileList, err := os.Create(fileListPath)
 	if err != nil {
-		return fmt.Errorf("failed to create file list: %w", err)
+		return 0, fmt.Errorf("failed to create file list: %w", err)
 	}
 	defer os.Remove(fileListPath)
 
@@ -976,7 +1016,7 @@ func (s *Service) StreamToTapeCompressedEncrypted(ctx context.Context, sourcePat
 
 	compCmd, err := buildCompressionCmd(ctx, compression)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	opensslCmd := exec.CommandContext(ctx, "openssl", "enc",
@@ -987,14 +1027,14 @@ func (s *Service) StreamToTapeCompressedEncrypted(ctx context.Context, sourcePat
 	// Pipeline: tar -> countingReader -> compress -> encrypt -> tape
 	tarPipe, err := tarCmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("failed to create tar pipe: %w", err)
+		return 0, fmt.Errorf("failed to create tar pipe: %w", err)
 	}
 	cr := &countingReader{reader: tarPipe, callback: progressCb, paused: pauseFlag}
 	compCmd.Stdin = cr
 
 	compPipe, err := compCmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("failed to create compression pipe: %w", err)
+		return 0, fmt.Errorf("failed to create compression pipe: %w", err)
 	}
 	opensslCmd.Stdin = compPipe
 
@@ -1004,27 +1044,29 @@ func (s *Service) StreamToTapeCompressedEncrypted(ctx context.Context, sourcePat
 		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", fmt.Sprintf("%dM", s.bufferSizeMB), "-o", devicePath)
 		opensslPipe, err := opensslCmd.StdoutPipe()
 		if err != nil {
-			return fmt.Errorf("failed to create openssl pipe: %w", err)
+			return 0, fmt.Errorf("failed to create openssl pipe: %w", err)
 		}
-		mbufferCmd.Stdin = opensslPipe
+		// Count actual compressed+encrypted bytes going to tape
+		tapeCr := &countingReader{reader: opensslPipe}
+		mbufferCmd.Stdin = tapeCr
 
 		if err := tarCmd.Start(); err != nil {
-			return fmt.Errorf("failed to start tar: %w", err)
+			return 0, fmt.Errorf("failed to start tar: %w", err)
 		}
 		if err := compCmd.Start(); err != nil {
 			tarCmd.Process.Kill()
-			return fmt.Errorf("failed to start compression: %w", err)
+			return 0, fmt.Errorf("failed to start compression: %w", err)
 		}
 		if err := opensslCmd.Start(); err != nil {
 			tarCmd.Process.Kill()
 			compCmd.Process.Kill()
-			return fmt.Errorf("failed to start openssl: %w", err)
+			return 0, fmt.Errorf("failed to start openssl: %w", err)
 		}
 		if err := mbufferCmd.Start(); err != nil {
 			tarCmd.Process.Kill()
 			compCmd.Process.Kill()
 			opensslCmd.Process.Kill()
-			return fmt.Errorf("failed to start mbuffer: %w", err)
+			return 0, fmt.Errorf("failed to start mbuffer: %w", err)
 		}
 
 		tarErr := tarCmd.Wait()
@@ -1033,40 +1075,42 @@ func (s *Service) StreamToTapeCompressedEncrypted(ctx context.Context, sourcePat
 		mbufErr := mbufferCmd.Wait()
 
 		if ctx.Err() != nil {
-			return fmt.Errorf("backup cancelled: %w", ctx.Err())
+			return 0, fmt.Errorf("backup cancelled: %w", ctx.Err())
 		}
 		if tarErr != nil {
-			return fmt.Errorf("tar failed: %w", tarErr)
+			return 0, fmt.Errorf("tar failed: %w", tarErr)
 		}
 		if compErr != nil {
-			return fmt.Errorf("compression failed: %w", compErr)
+			return 0, fmt.Errorf("compression failed: %w", compErr)
 		}
 		if opensslErr != nil {
-			return fmt.Errorf("openssl encryption failed: %w", opensslErr)
+			return 0, fmt.Errorf("openssl encryption failed: %w", opensslErr)
 		}
 		if mbufErr != nil {
-			return fmt.Errorf("mbuffer failed: %w", mbufErr)
+			return 0, fmt.Errorf("mbuffer failed: %w", mbufErr)
 		}
+		return tapeCr.bytesRead(), nil
 	} else {
 		tapeFile, err := os.OpenFile(devicePath, os.O_WRONLY, 0)
 		if err != nil {
-			return fmt.Errorf("failed to open tape device: %w", err)
+			return 0, fmt.Errorf("failed to open tape device: %w", err)
 		}
 		defer tapeFile.Close()
 
-		opensslCmd.Stdout = tapeFile
+		tapeCw := &countingWriter{writer: tapeFile}
+		opensslCmd.Stdout = tapeCw
 
 		if err := tarCmd.Start(); err != nil {
-			return fmt.Errorf("failed to start tar: %w", err)
+			return 0, fmt.Errorf("failed to start tar: %w", err)
 		}
 		if err := compCmd.Start(); err != nil {
 			tarCmd.Process.Kill()
-			return fmt.Errorf("failed to start compression: %w", err)
+			return 0, fmt.Errorf("failed to start compression: %w", err)
 		}
 		if err := opensslCmd.Start(); err != nil {
 			tarCmd.Process.Kill()
 			compCmd.Process.Kill()
-			return fmt.Errorf("failed to start openssl: %w", err)
+			return 0, fmt.Errorf("failed to start openssl: %w", err)
 		}
 
 		tarErr := tarCmd.Wait()
@@ -1074,20 +1118,19 @@ func (s *Service) StreamToTapeCompressedEncrypted(ctx context.Context, sourcePat
 		opensslErr := opensslCmd.Wait()
 
 		if ctx.Err() != nil {
-			return fmt.Errorf("backup cancelled: %w", ctx.Err())
+			return 0, fmt.Errorf("backup cancelled: %w", ctx.Err())
 		}
 		if tarErr != nil {
-			return fmt.Errorf("tar failed: %w", tarErr)
+			return 0, fmt.Errorf("tar failed: %w", tarErr)
 		}
 		if compErr != nil {
-			return fmt.Errorf("compression failed: %w", compErr)
+			return 0, fmt.Errorf("compression failed: %w", compErr)
 		}
 		if opensslErr != nil {
-			return fmt.Errorf("openssl encryption failed: %w", opensslErr)
+			return 0, fmt.Errorf("openssl encryption failed: %w", opensslErr)
 		}
+		return tapeCw.bytesWritten(), nil
 	}
-
-	return nil
 }
 
 // GetEncryptionKey retrieves the base64 encryption key for a given key ID
@@ -1118,6 +1161,118 @@ func (s *Service) CalculateChecksum(path string) (string, error) {
 	}
 
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// computeChecksumsAsync computes SHA256 checksums for all files concurrently,
+// storing results in the provided sync.Map (path -> checksum string) AND
+// inserting catalog entries into the database as each batch of checksums
+// completes. This builds the catalog incrementally during streaming rather
+// than in one large batch after streaming finishes, preventing the "stuck in
+// cataloging" state for large file counts. The TOC file list is written to
+// tape separately at the end by finishTape.
+func (s *Service) computeChecksumsAsync(ctx context.Context, files []FileInfo, checksums *sync.Map, backupSetID int64, sourcePath string) {
+	numWorkers := runtime.NumCPU()
+	if numWorkers < 4 {
+		numWorkers = 4
+	}
+
+	type catalogEntry struct {
+		relPath  string
+		fi       FileInfo
+		checksum string
+	}
+
+	// Channel for catalog entries; writer goroutine batches them into DB transactions
+	entryCh := make(chan catalogEntry, numWorkers*2)
+
+	// Writer goroutine: batches catalog inserts for efficient DB writes
+	var writerWg sync.WaitGroup
+	writerWg.Add(1)
+	go func() {
+		defer writerWg.Done()
+		const batchSize = 500
+		batch := make([]catalogEntry, 0, batchSize)
+
+		flush := func() {
+			if len(batch) == 0 || s.db == nil {
+				batch = batch[:0]
+				return
+			}
+			tx, err := s.db.Begin()
+			if err != nil {
+				batch = batch[:0]
+				return
+			}
+			stmt, err := tx.Prepare(`
+				INSERT INTO catalog_entries (backup_set_id, file_path, file_size, file_mode, mod_time, checksum)
+				VALUES (?, ?, ?, ?, ?, ?)
+			`)
+			if err != nil {
+				tx.Rollback()
+				batch = batch[:0]
+				return
+			}
+			for _, e := range batch {
+				if _, err := stmt.Exec(backupSetID, e.relPath, e.fi.Size, e.fi.Mode, e.fi.ModTime, e.checksum); err != nil {
+					s.logger.Warn("Failed to insert catalog entry", map[string]interface{}{
+						"file":  e.relPath,
+						"error": err.Error(),
+					})
+				}
+			}
+			stmt.Close()
+			tx.Commit()
+			batch = batch[:0]
+		}
+
+		for entry := range entryCh {
+			batch = append(batch, entry)
+			if len(batch) >= batchSize {
+				flush()
+			}
+		}
+		flush() // remaining entries
+	}()
+
+	// Checksum workers
+	sem := make(chan struct{}, numWorkers)
+	var wg sync.WaitGroup
+
+	for _, f := range files {
+		if ctx.Err() != nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			break
+		case sem <- struct{}{}:
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		go func(fi FileInfo) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			checksum, err := s.CalculateChecksum(fi.Path)
+			if err == nil {
+				checksums.Store(fi.Path, checksum)
+			}
+			relPath, relErr := filepath.Rel(sourcePath, fi.Path)
+			if relErr != nil {
+				relPath = fi.Path // fall back to absolute path
+			}
+			entryCh <- catalogEntry{relPath: relPath, fi: fi, checksum: checksum}
+		}(f)
+	}
+	wg.Wait()
+	close(entryCh)
+	writerWg.Wait()
 }
 
 // CreateSnapshot creates a snapshot of the current file state
@@ -1407,7 +1562,12 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 	var encryptionKeyID *int64
 	var compressed bool
 	var compressionType models.CompressionType
-	useCompression := job.Compression != "" && job.Compression != models.CompressionNone
+	// CompressionLTO means "let the LTO drive handle compression" — no software
+	// compression is applied. The drive performs block-level compression at full
+	// streaming speed with no host CPU involvement.
+	useCompression := job.Compression != "" &&
+		job.Compression != models.CompressionNone &&
+		job.Compression != models.CompressionLTO
 	var encKey string
 
 	if job.EncryptionEnabled && job.EncryptionKeyID != nil {
@@ -1436,8 +1596,8 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 	}
 
 	// streamBatch streams a batch of files to the tape device with the configured
-	// encryption and compression settings.
-	streamBatch := func(batch []FileInfo) error {
+	// encryption and compression settings. Returns actual bytes written to tape.
+	streamBatch := func(batch []FileInfo) (int64, error) {
 		var batchBytes int64
 		for _, f := range batch {
 			batchBytes += f.Size
@@ -1457,6 +1617,13 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		return s.StreamToTape(ctx, source.Path, batch, devicePath, progressCb, &pauseFlag)
 	}
 
+	// Start concurrent checksum computation for all files. Checksums are
+	// computed in parallel with tape streaming and catalog entries are written
+	// to the database incrementally as they complete — no post-streaming
+	// cataloging bottleneck. The TOC file list is written to tape at the end.
+	fileChecksums := &sync.Map{}
+	go s.computeChecksumsAsync(ctx, files, fileChecksums, backupSetID, source.Path)
+
 	// Check if all files fit on the current tape
 	remainingCapacity := tapeCapacity - tapeUsed
 	_, overflow := s.splitFilesForTape(files, remainingCapacity)
@@ -1471,7 +1638,8 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 			"encrypted":   encrypted,
 		})
 
-		if err := streamBatch(files); err != nil {
+		actualTapeBytes, err := streamBatch(files)
+		if err != nil {
 			s.updateProgress(job.ID, "failed", "Stream failed: "+err.Error())
 			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
 			s.emitEvent("error", "backup", "Backup Failed", fmt.Sprintf("Job %s failed: %s", job.Name, err.Error()))
@@ -1481,12 +1649,15 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 
 		if err := s.finishTape(finishTapeParams{
 			ctx: ctx, job: job, source: source,
-			backupSetID: backupSetID, tapeID: tapeID,
+			backupSetID: backupSetID, initialBackupSetID: backupSetID,
+			tapeID: tapeID,
 			tapeLabel: expectedLabel, tapeUUID: expectedUUID,
 			driveSvc: driveSvc, files: files, totalBytes: totalBytes,
+			actualTapeBytes: actualTapeBytes,
 			backupType: backupType, encrypted: encrypted,
 			encryptionKeyID: encryptionKeyID, compressed: compressed,
 			compressionType: compressionType, startTime: startTime,
+			checksums: fileChecksums,
 		}); err != nil {
 			s.logger.Warn("finishTape failed", map[string]interface{}{"error": err.Error()})
 		}
@@ -1567,7 +1738,8 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 					"remaining_files": len(rest),
 				})
 
-				if err := streamBatch(batch); err != nil {
+				actualBatchBytes, err := streamBatch(batch)
+				if err != nil {
 					s.updateProgress(job.ID, "failed", "Stream failed on tape "+currentLabel+": "+err.Error())
 					s.updateBackupSetStatus(currentBackupSetID, models.BackupSetStatusFailed, err.Error())
 					s.emitEvent("error", "backup", "Backup Failed", fmt.Sprintf("Job %s failed on tape %s: %s", job.Name, currentLabel, err.Error()))
@@ -1579,14 +1751,17 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 				// Finish this tape with its per-tape TOC
 				if err := s.finishTape(finishTapeParams{
 					ctx: ctx, job: job, source: source,
-					backupSetID: currentBackupSetID, tapeID: currentTapeID,
+					backupSetID: currentBackupSetID, initialBackupSetID: backupSetID,
+					tapeID: currentTapeID,
 					tapeLabel: currentLabel, tapeUUID: currentUUID,
 					pool: "", driveSvc: currentDriveSvc,
 					files: batch, totalBytes: batchBytes,
+					actualTapeBytes: actualBatchBytes,
 					backupType: backupType, encrypted: encrypted,
 					encryptionKeyID: encryptionKeyID, compressed: compressed,
 					compressionType: compressionType, startTime: startTime,
 					spanningSetID: spanningSetID, sequenceNumber: seqNum,
+					checksums: fileChecksums,
 				}); err != nil {
 					s.logger.Warn("finishTape failed", map[string]interface{}{
 						"tape_label": currentLabel,
@@ -1757,70 +1932,67 @@ func (s *Service) updateBackupSetStatus(id int64, status models.BackupSetStatus,
 
 // finishTapeParams holds the parameters for finalizing a single tape during a backup.
 type finishTapeParams struct {
-	ctx             context.Context
-	job             *models.BackupJob
-	source          *models.BackupSource
-	backupSetID     int64
-	tapeID          int64
-	tapeLabel       string
-	tapeUUID        string
-	pool            string
-	driveSvc        *tape.Service
-	files           []FileInfo // only the files written to this specific tape
-	totalBytes      int64
-	backupType      models.BackupType
-	encrypted       bool
-	encryptionKeyID *int64
-	compressed      bool
-	compressionType models.CompressionType
-	startTime       time.Time
-	spanningSetID   int64 // 0 if not spanning
-	sequenceNumber  int   // 1-based tape index within spanning set
-	totalTapes      int   // 0 if not yet known (updated later)
+	ctx                context.Context
+	job                *models.BackupJob
+	source             *models.BackupSource
+	backupSetID        int64
+	initialBackupSetID int64 // the backupSetID used during checksum computation; for multi-tape tape 2+, catalog entries are reassigned from this ID
+	tapeID             int64
+	tapeLabel          string
+	tapeUUID           string
+	pool               string
+	driveSvc           *tape.Service
+	files              []FileInfo // only the files written to this specific tape
+	totalBytes         int64
+	actualTapeBytes    int64 // actual bytes written to tape device (post-compression); 0 means use totalBytes
+	backupType         models.BackupType
+	encrypted          bool
+	encryptionKeyID    *int64
+	compressed         bool
+	compressionType    models.CompressionType
+	startTime          time.Time
+	spanningSetID      int64 // 0 if not spanning
+	sequenceNumber     int   // 1-based tape index within spanning set
+	totalTapes         int   // 0 if not yet known (updated later)
+	checksums          *sync.Map // pre-computed file checksums (path -> string), computed concurrently during streaming
 }
 
 // finishTape writes the per-tape TOC and updates catalog/tape records for
 // the files written to this specific tape. Each tape in a multi-tape backup
 // receives a self-describing TOC containing only its own files.
+//
+// Catalog entries (file checksums) are already written to the database
+// incrementally by computeChecksumsAsync during streaming. finishTape only
+// needs to reassign entries to the correct backup_set_id for multi-tape
+// spanning (tape 2+), then write the TOC file list to tape.
 func (s *Service) finishTape(p finishTapeParams) error {
 	s.updateProgress(p.job.ID, "cataloging", "Writing file mark...")
 	if err := p.driveSvc.WriteFileMark(p.ctx); err != nil {
 		s.logger.Warn("Failed to write file mark", map[string]interface{}{"error": err.Error()})
 	}
 
-	// Catalog the files written to this tape with checksums
-	s.updateProgress(p.job.ID, "cataloging", fmt.Sprintf("Cataloging %d files on tape %s...", len(p.files), p.tapeLabel))
-	s.logger.Info("Cataloging files for tape", map[string]interface{}{
-		"tape_label": p.tapeLabel,
-		"file_count": len(p.files),
-	})
-	for i, f := range p.files {
-		relPath, _ := filepath.Rel(p.source.Path, f.Path)
-
-		s.mu.Lock()
-		if prog, ok := s.activeJobs[p.job.ID]; ok {
-			prog.FileCount = int64(i + 1)
-		}
-		s.mu.Unlock()
-
-		checksum, checksumErr := s.CalculateChecksum(f.Path)
-		if checksumErr != nil {
-			s.logger.Warn("Failed to calculate checksum", map[string]interface{}{
-				"file":  relPath,
-				"error": checksumErr.Error(),
-			})
-			checksum = ""
-		}
-
-		_, err := s.db.Exec(`
-			INSERT INTO catalog_entries (backup_set_id, file_path, file_size, file_mode, mod_time, checksum)
-			VALUES (?, ?, ?, ?, ?, ?)
-		`, p.backupSetID, relPath, f.Size, f.Mode, f.ModTime, checksum)
-		if err != nil {
-			s.logger.Warn("Failed to insert catalog entry", map[string]interface{}{
-				"file":  relPath,
-				"error": err.Error(),
-			})
+	// For multi-tape tape 2+, catalog entries were inserted with the initial
+	// backup_set_id during checksum computation. Reassign them to this tape's
+	// backup_set_id so restore knows which files are on which tape.
+	if p.initialBackupSetID != 0 && p.initialBackupSetID != p.backupSetID && len(p.files) > 0 {
+		s.updateProgress(p.job.ID, "cataloging", fmt.Sprintf("Reassigning %d catalog entries to tape %s...", len(p.files), p.tapeLabel))
+		for _, f := range p.files {
+			select {
+			case <-p.ctx.Done():
+				return p.ctx.Err()
+			default:
+			}
+			relPath, relErr := filepath.Rel(p.source.Path, f.Path)
+			if relErr != nil {
+				relPath = f.Path
+			}
+			if _, err := s.db.Exec(`UPDATE catalog_entries SET backup_set_id = ? WHERE backup_set_id = ? AND file_path = ?`,
+				p.backupSetID, p.initialBackupSetID, relPath); err != nil {
+				s.logger.Warn("Failed to reassign catalog entry", map[string]interface{}{
+					"file":  relPath,
+					"error": err.Error(),
+				})
+			}
 		}
 	}
 
@@ -1845,13 +2017,20 @@ func (s *Service) finishTape(p finishTapeParams) error {
 		Files:           make([]tape.TOCFileEntry, 0, len(p.files)),
 	}
 	for _, f := range p.files {
+		// Respect context cancellation during TOC building
+		select {
+		case <-p.ctx.Done():
+			return p.ctx.Err()
+		default:
+		}
+
 		relPath, _ := filepath.Rel(p.source.Path, f.Path)
+		// Use pre-computed checksum directly instead of querying DB per-file
 		var checksum string
-		if err := s.db.QueryRow("SELECT COALESCE(checksum, '') FROM catalog_entries WHERE backup_set_id = ? AND file_path = ?", p.backupSetID, relPath).Scan(&checksum); err != nil {
-			s.logger.Warn("Failed to look up checksum for TOC entry", map[string]interface{}{
-				"file":  relPath,
-				"error": err.Error(),
-			})
+		if p.checksums != nil {
+			if val, ok := p.checksums.Load(f.Path); ok {
+				checksum = val.(string)
+			}
 		}
 		tocBackupSet.Files = append(tocBackupSet.Files, tape.TOCFileEntry{
 			Path:     relPath,
@@ -1883,14 +2062,19 @@ func (s *Service) finishTape(p finishTapeParams) error {
 	`, endTime, models.BackupSetStatusCompleted, len(p.files), p.totalBytes,
 		p.encrypted, p.encryptionKeyID, p.compressed, p.compressionType, p.backupSetID)
 
-	// Update tape usage
+	// Update tape usage — use actual bytes written to tape (post-compression)
+	// when available, so compressed backups don't overestimate tape consumption.
+	tapeUsageDelta := p.totalBytes
+	if p.actualTapeBytes > 0 {
+		tapeUsageDelta = p.actualTapeBytes
+	}
 	s.db.Exec(`
 		UPDATE tapes SET 
 			used_bytes = used_bytes + ?, write_count = write_count + 1,
 			last_written_at = ?,
 			status = CASE WHEN status = 'blank' THEN 'active' ELSE status END
 		WHERE id = ?
-	`, p.totalBytes, endTime, p.tapeID)
+	`, tapeUsageDelta, endTime, p.tapeID)
 
 	// Track encryption key on tape if applicable
 	if p.encrypted && p.encryptionKeyID != nil {
@@ -1914,10 +2098,13 @@ func (s *Service) finishTape(p finishTapeParams) error {
 }
 
 // splitFilesForTape partitions files into a batch that fits on the current tape
-// and the remaining files for subsequent tapes. It reserves ~10% of remaining
-// capacity for tar headers, file marks, and the TOC.
+// and the remaining files for subsequent tapes. It reserves ~1% of remaining
+// capacity for tar headers, file marks, and the TOC. The overhead is small:
+// tar headers are ~1KB per file, file marks are negligible, and the TOC is a
+// small JSON document. A 1% reserve is more than sufficient and avoids wasting
+// significant tape capacity (e.g. 10% of a 1.5TB tape = 150GB unused).
 func (s *Service) splitFilesForTape(files []FileInfo, remainingCapacity int64) (thisTape []FileInfo, remaining []FileInfo) {
-	usableCapacity := (remainingCapacity * 9) / 10
+	usableCapacity := (remainingCapacity * 99) / 100
 	if usableCapacity <= 0 {
 		return nil, files
 	}
