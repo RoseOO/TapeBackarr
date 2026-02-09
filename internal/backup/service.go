@@ -145,6 +145,17 @@ func buildCompressionCmd(ctx context.Context, compression models.CompressionType
 // default 32KB, reducing syscall overhead in the streaming pipeline.
 const relayBufferSize = 1024 * 1024
 
+// pipelineDepth is the number of pre-read buffers in the concurrent relay
+// used by countingReader.WriteTo. Each buffer holds relayBufferSize bytes.
+// Total in-flight data = pipelineDepth × relayBufferSize (default: 16 × 1MB
+// = 16MB). This decouples reads from writes: a reader goroutine continuously
+// drains the source (e.g. NFS via tar) while the writer independently feeds
+// the destination (e.g. mbuffer pipe). Without this, the sequential
+// read→write loop stalls the source while writing and stalls the destination
+// while reading, reducing effective throughput below the network line rate
+// and contributing to tape shoe-shining.
+const pipelineDepth = 16
+
 // countingReader wraps an io.Reader and counts bytes read through it.
 // It uses atomic operations instead of a mutex for the byte counter to avoid
 // lock contention in the hot data path, and throttles the progress callback
@@ -152,10 +163,11 @@ const relayBufferSize = 1024 * 1024
 // time.Now() calls, and float math in the callback.
 //
 // countingReader also implements io.WriterTo so that when Go's exec package
-// uses io.Copy to relay data (e.g. when set as Cmd.Stdin), a larger buffer
-// is used instead of io.Copy's default 32KB. This is critical for tape
-// streaming performance: the larger buffer reduces syscall overhead in the
-// tar → mbuffer → tape pipeline and keeps the mbuffer fed at full speed.
+// uses io.Copy to relay data (e.g. when set as Cmd.Stdin), a concurrent
+// read-ahead pipeline transfers data through pre-allocated 1MB buffers
+// instead of the default sequential 32KB relay. This is critical for tape
+// streaming performance: the pipeline keeps the source continuously drained
+// and the mbuffer continuously fed, preventing tape shoe-shining.
 type countingReader struct {
 	reader       io.Reader
 	count        int64 // accessed atomically
@@ -195,34 +207,93 @@ func (cr *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// WriteTo implements io.WriterTo so that io.Copy (used internally by Go's
-// exec package to relay data when Cmd.Stdin is not an *os.File) transfers
-// data in 1MB chunks instead of the default 32KB. This keeps the mbuffer
-// fed faster and prevents tape shoe-shining during streaming.
+// WriteTo implements io.WriterTo with a concurrent read-ahead pipeline.
+// A background goroutine continuously reads from the source into a pool of
+// pre-allocated 1MB buffers, while the caller concurrently writes drained
+// buffers to w. This eliminates the sequential read→write bottleneck: the
+// source (NFS via tar) stays drained even while the destination (mbuffer
+// pipe) blocks on a write, and vice versa. The buffered channel provides
+// pipelineDepth × relayBufferSize (16MB default) of in-process buffering
+// that absorbs NFS latency spikes and keeps the tape streaming continuously.
 func (cr *countingReader) WriteTo(w io.Writer) (int64, error) {
-	buf := make([]byte, relayBufferSize)
+	type relayChunk struct {
+		data []byte
+		n    int
+		err  error
+	}
+
+	ch := make(chan relayChunk, pipelineDepth)
+	done := make(chan struct{})
+	pool := make(chan []byte, pipelineDepth+1)
+
+	// Pre-allocate a pool of reusable buffers to avoid GC pressure.
+	// pipelineDepth+1 total buffers: up to pipelineDepth queued in the
+	// channel, plus one actively being filled or drained.
+	for i := 0; i < pipelineDepth+1; i++ {
+		pool <- make([]byte, relayBufferSize)
+	}
+
+	// Reader goroutine: continuously reads from the source into pooled
+	// buffers and sends them on ch. io.ReadFull accumulates complete
+	// relayBufferSize chunks, coalescing small pipe reads (typically 64KB
+	// each on Linux) into larger aligned blocks for the writer.
+	go func() {
+		defer close(ch)
+		for {
+			cr.waitWhilePaused()
+			var buf []byte
+			select {
+			case buf = <-pool:
+			case <-done:
+				return
+			}
+			nr, err := io.ReadFull(cr.reader, buf)
+			if nr > 0 {
+				cr.trackBytes(nr)
+			}
+			select {
+			case ch <- relayChunk{data: buf, n: nr, err: err}:
+			case <-done:
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// Writer: drains pre-read chunks to the destination.
 	var total int64
-	for {
-		cr.waitWhilePaused()
-		nr, readErr := cr.reader.Read(buf)
-		if nr > 0 {
-			cr.trackBytes(nr)
-			nw, writeErr := w.Write(buf[:nr])
+	for c := range ch {
+		if c.n > 0 {
+			nw, writeErr := w.Write(c.data[:c.n])
 			total += int64(nw)
+			pool <- c.data // return buffer for reuse
 			if writeErr != nil {
+				close(done)
 				return total, writeErr
 			}
-			if nw != nr {
+			if nw != c.n {
+				close(done)
 				return total, io.ErrShortWrite
 			}
+		} else {
+			pool <- c.data // return unused buffer
 		}
-		if readErr != nil {
-			if readErr == io.EOF {
+		if c.err != nil {
+			// io.ReadFull returns io.ErrUnexpectedEOF when the underlying
+			// reader hits io.EOF before the buffer is completely filled.
+			// This is the normal end-of-stream for the last partial chunk
+			// (e.g. 3.5MB of data with 1MB buffers yields a final 0.5MB
+			// chunk). Real I/O errors (broken pipe, etc.) produce distinct
+			// error values that are propagated below.
+			if c.err == io.EOF || c.err == io.ErrUnexpectedEOF {
 				return total, nil
 			}
-			return total, readErr
+			return total, c.err
 		}
 	}
+	return total, nil
 }
 
 func (cr *countingReader) bytesRead() int64 {
@@ -730,7 +801,7 @@ func (s *Service) StreamToTape(ctx context.Context, sourcePath string, files []F
 		// Example: blockSize=1048576 → -b 2048 → 2048*512 = 1048576 bytes
 		// This ensures tar and mbuffer use the same block size
 		"-b", fmt.Sprintf("%d", s.blockSize/512),
-		"-C", sourcePath,   // Change to source directory
+		"-C", sourcePath, // Change to source directory
 		"-T", fileListPath, // Read files from list
 	}
 
