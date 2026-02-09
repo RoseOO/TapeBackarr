@@ -1,17 +1,17 @@
 package proxmox
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
+	"github.com/RoseOO/TapeBackarr/internal/cmdutil"
 	"github.com/RoseOO/TapeBackarr/internal/database"
 	"github.com/RoseOO/TapeBackarr/internal/logging"
 	"github.com/RoseOO/TapeBackarr/internal/tape"
@@ -258,14 +258,10 @@ func (s *RestoreService) extractFromTape(ctx context.Context, devicePath, destPa
 	}
 
 	cmd := exec.CommandContext(ctx, "tar", tarArgs...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		detail := strings.TrimSpace(string(output))
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return fmt.Errorf("tar extract failed (exit code %d): %s", exitErr.ExitCode(), detail)
-		}
-		return fmt.Errorf("tar extract failed: %s", detail)
+	var tarStderr bytes.Buffer
+	cmd.Stderr = &tarStderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("tar extract failed (%s)", cmdutil.ErrorDetail(err, &tarStderr))
 	}
 
 	return nil
@@ -336,18 +332,14 @@ func (s *RestoreService) performRestore(ctx context.Context, req *RestoreRequest
 		cmd = exec.CommandContext(ctx, "pct", args...)
 	}
 
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		detail := strings.TrimSpace(string(output))
+	var cmdStderr bytes.Buffer
+	cmd.Stderr = &cmdStderr
+	if err := cmd.Run(); err != nil {
 		cmdName := "qmrestore"
 		if guestType != GuestTypeVM {
 			cmdName = "pct restore"
 		}
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return fmt.Errorf("%s failed (exit code %d): %s", cmdName, exitErr.ExitCode(), detail)
-		}
-		return fmt.Errorf("%s failed: %s", cmdName, detail)
+		return fmt.Errorf("%s failed (%s)", cmdName, cmdutil.ErrorDetail(err, &cmdStderr))
 	}
 
 	return nil
@@ -465,14 +457,10 @@ func (s *RestoreService) StreamRestoreFromReader(ctx context.Context, r io.Reade
 	cmd := exec.CommandContext(ctx, "tar", "-x", "-C", destPath)
 	cmd.Stdin = r
 
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		detail := strings.TrimSpace(string(output))
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return fmt.Errorf("tar extract failed (exit code %d): %s", exitErr.ExitCode(), detail)
-		}
-		return fmt.Errorf("tar extract failed: %s", detail)
+	var tarStderr bytes.Buffer
+	cmd.Stderr = &tarStderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("tar extract failed (%s)", cmdutil.ErrorDetail(err, &tarStderr))
 	}
 
 	return nil
