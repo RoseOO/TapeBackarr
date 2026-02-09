@@ -27,6 +27,10 @@
     file_path: string;
     file_size: number;
     mod_time: string;
+    checksum: string;
+    block_offset: number;
+    tape_id: number;
+    tape_label: string;
   }
 
   interface TapeRequirement {
@@ -330,6 +334,8 @@
           <tr>
             <th>File Path</th>
             <th>Size</th>
+            <th>Tape</th>
+            <th>Position</th>
             <th>Modified</th>
           </tr>
         </thead>
@@ -338,6 +344,8 @@
             <tr>
               <td class="file-path-cell">{result.file_path}</td>
               <td>{formatBytes(result.file_size)}</td>
+              <td class="tape-label-cell">{result.tape_label || '—'}</td>
+              <td class="tape-position-cell">{result.block_offset != null ? formatBytes(result.block_offset) : '—'}</td>
               <td>{formatDate(result.mod_time)}</td>
             </tr>
           {/each}
@@ -504,6 +512,8 @@
                 <th style="width: 40px;"></th>
                 <th>File Path</th>
                 <th>Size</th>
+                <th>Tape</th>
+                <th>Position</th>
                 <th>Modified</th>
               </tr>
             </thead>
@@ -519,12 +529,14 @@
                   </td>
                   <td class="file-path-cell">{entry.file_path}</td>
                   <td>{formatBytes(entry.file_size)}</td>
+                  <td class="tape-label-cell">{entry.tape_label || '—'}</td>
+                  <td class="tape-position-cell">{entry.block_offset != null ? formatBytes(entry.block_offset) : '—'}</td>
                   <td>{formatDate(entry.mod_time)}</td>
                 </tr>
               {/each}
               {#if catalogEntries.length === 0}
                 <tr>
-                  <td colspan="4" class="no-data">No files in this backup set.</td>
+                  <td colspan="6" class="no-data">No files in this backup set.</td>
                 </tr>
               {/if}
             </tbody>
@@ -818,6 +830,17 @@
     font-family: monospace;
     font-size: 0.8rem;
     word-break: break-all;
+  }
+
+  .tape-label-cell {
+    font-size: 0.8rem;
+    white-space: nowrap;
+  }
+
+  .tape-position-cell {
+    font-family: monospace;
+    font-size: 0.8rem;
+    white-space: nowrap;
   }
 
   /* Restore Layout */

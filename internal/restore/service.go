@@ -763,6 +763,16 @@ func calculateChecksum(path string) (string, error) {
 // A limit of 0 means no limit (return all matching entries). offset is the number
 // of rows to skip and is only applied when limit > 0.
 func (s *Service) BrowseCatalog(ctx context.Context, backupSetID int64, pathPrefix string, limit, offset int) ([]models.CatalogEntry, error) {
+	// Look up the tape info for this backup set once (all entries share the same tape)
+	var tapeID int64
+	var tapeLabel string
+	_ = s.db.QueryRow(`
+		SELECT COALESCE(bs.tape_id, 0), COALESCE(t.label, '')
+		FROM backup_sets bs
+		LEFT JOIN tapes t ON bs.tape_id = t.id
+		WHERE bs.id = ?
+	`, backupSetID).Scan(&tapeID, &tapeLabel)
+
 	query := `
 		SELECT id, backup_set_id, file_path, file_size,
 		       COALESCE(file_mode, 0), COALESCE(mod_time, ''),
@@ -805,6 +815,8 @@ func (s *Service) BrowseCatalog(ctx context.Context, backupSetID int64, pathPref
 				e.ModTime = t
 			}
 		}
+		e.TapeID = tapeID
+		e.TapeLabel = tapeLabel
 		entries = append(entries, e)
 	}
 
