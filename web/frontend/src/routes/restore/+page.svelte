@@ -164,6 +164,10 @@
     selectedFiles = [];
   }
 
+  function handleOverlayClick() {
+    if (restoreStep !== 'running') showRestoreModal = false;
+  }
+
   function formatBytes(bytes: number): string {
     if (bytes === 0) return '0 B';
     const k = 1024;
@@ -511,7 +515,7 @@
 
 <!-- Restore Modal -->
 {#if showRestoreModal && selectedSet}
-  <div class="modal-overlay" on:click={() => { if (restoreStep !== 'running') showRestoreModal = false; }}>
+  <div class="modal-overlay" on:click={handleOverlayClick}>
     <div class="modal restore-modal" on:click|stopPropagation={() => {}}>
       <!-- Modal Header with Steps -->
       <div class="modal-header">

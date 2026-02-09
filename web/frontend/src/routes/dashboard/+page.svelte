@@ -323,7 +323,7 @@
             <span class="summary-value">{formatRelativeTime(stats.last_backup_time)}</span>
           </div>
           <div class="summary-item">
-            <span class="summary-label">First Backup</span>
+            <span class="summary-label">Oldest Backup</span>
             <span class="summary-value">{formatRelativeTime(stats.oldest_backup)}</span>
           </div>
           <div class="summary-item">

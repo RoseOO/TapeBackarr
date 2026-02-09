@@ -945,8 +945,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	s.db.QueryRow("SELECT COUNT(*) FROM backup_sets WHERE status = 'completed'").Scan(&stats.TotalBackupSets)
 
 	var lastBackup, oldestBackup *string
-	s.db.QueryRow("SELECT end_time FROM backup_sets WHERE status = 'completed' ORDER BY end_time DESC LIMIT 1").Scan(&lastBackup)
-	s.db.QueryRow("SELECT start_time FROM backup_sets WHERE status = 'completed' ORDER BY start_time ASC LIMIT 1").Scan(&oldestBackup)
+	s.db.QueryRow("SELECT MAX(end_time), MIN(start_time) FROM backup_sets WHERE status = 'completed'").Scan(&lastBackup, &oldestBackup)
 	stats.LastBackupTime = lastBackup
 	stats.OldestBackup = oldestBackup
 
