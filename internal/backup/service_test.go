@@ -207,6 +207,59 @@ func TestScanSourceIncludePatterns(t *testing.T) {
 	}
 }
 
+func TestScanSourceExcludeDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a regular directory with a file
+	os.MkdirAll(filepath.Join(tmpDir, "documents"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "documents", "report.txt"), []byte("report"), 0644)
+
+	// Create #recycle directory (Synology NAS recycle bin) with files
+	os.MkdirAll(filepath.Join(tmpDir, "#recycle"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "#recycle", "deleted.txt"), []byte("deleted"), 0644)
+
+	// Create @eaDir directory (Synology metadata) with files
+	os.MkdirAll(filepath.Join(tmpDir, "@eaDir"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "@eaDir", "metadata.db"), []byte("meta"), 0644)
+
+	// Create a top-level file
+	os.WriteFile(filepath.Join(tmpDir, "keep.txt"), []byte("keep"), 0644)
+
+	svc := &Service{}
+	excludeJSON, _ := json.Marshal([]string{"#recycle", "@eaDir"})
+	source := &models.BackupSource{
+		Path:            tmpDir,
+		ExcludePatterns: string(excludeJSON),
+	}
+
+	files, err := svc.ScanSource(context.Background(), source)
+	if err != nil {
+		t.Fatalf("ScanSource failed: %v", err)
+	}
+
+	// Should only include keep.txt and documents/report.txt (not files in #recycle or @eaDir)
+	if len(files) != 2 {
+		t.Fatalf("expected 2 files, got %d", len(files))
+	}
+
+	names := make(map[string]bool)
+	for _, f := range files {
+		names[filepath.Base(f.Path)] = true
+	}
+	if !names["keep.txt"] {
+		t.Error("expected keep.txt to be included")
+	}
+	if !names["report.txt"] {
+		t.Error("expected report.txt to be included")
+	}
+	if names["deleted.txt"] {
+		t.Error("expected deleted.txt to be excluded")
+	}
+	if names["metadata.db"] {
+		t.Error("expected metadata.db to be excluded")
+	}
+}
+
 func TestScanSourceDeepNesting(t *testing.T) {
 	tmpDir := t.TempDir()
 
