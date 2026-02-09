@@ -118,6 +118,10 @@ type EventCallback func(eventType, category, title, message string)
 // It allows the caller to send notifications (e.g. Telegram) with the exact next tape label.
 type TapeChangeCallback func(ctx context.Context, jobName, currentTape, reason, nextTape string)
 
+// WrongTapeCallback is called when the wrong tape (or no tape) is found in the drive
+// during backup tape verification. It notifies the operator to insert the correct tape.
+type WrongTapeCallback func(ctx context.Context, expectedLabel, actualLabel string)
+
 // buildCompressionCmd returns the exec.Cmd for the given compression type.
 // For gzip it uses pigz (parallel gzip) with -1 (fastest) when available,
 // falling back to gzip -1. For zstd it uses automatic multi-threading.
@@ -204,6 +208,7 @@ type Service struct {
 	resumeFiles        map[int64][]string // files already processed for resume
 	EventCallback      EventCallback
 	TapeChangeCallback TapeChangeCallback
+	WrongTapeCallback  WrongTapeCallback
 }
 
 // NewService creates a new backup service
@@ -1524,30 +1529,105 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		return nil, fmt.Errorf("failed to look up tape info: %w", err)
 	}
 
-	// Read the physical tape label
-	physicalLabel, readErr := driveSvc.ReadTapeLabel(ctx)
-	if readErr != nil {
-		s.updateProgress(job.ID, "failed", "Failed to read tape label: "+readErr.Error())
-		s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "failed to read tape label")
-		return nil, fmt.Errorf("failed to read tape label: %w", readErr)
-	}
-	if physicalLabel == nil || physicalLabel.Label != expectedLabel || physicalLabel.UUID != expectedUUID {
+	// Read and verify the physical tape label, retrying until the correct tape is inserted.
+	// Instead of failing immediately when the tape is missing or wrong, we notify the
+	// operator and wait for them to insert the correct tape.
+	const tapeRetryInterval = 10 * time.Second
+	notifiedUser := false
+	for {
+		// Check if a tape is loaded in the drive
+		tapeLoaded, loadErr := driveSvc.IsTapeLoaded(ctx)
+		if loadErr != nil {
+			s.logger.Warn("Error checking tape status, will retry", map[string]interface{}{
+				"error": loadErr.Error(), "tape": expectedLabel,
+			})
+		}
+
+		if loadErr != nil || !tapeLoaded {
+			// No tape in drive — notify operator and wait
+			waitMsg := fmt.Sprintf("No tape found in drive %s. Please insert tape %q to continue backup job %q.",
+				devicePath, expectedLabel, job.Name)
+			s.updateProgress(job.ID, "waiting", waitMsg)
+			if !notifiedUser {
+				s.emitEvent("warning", "backup", "Tape Required",
+					fmt.Sprintf("Job %s: no tape in drive. Please insert tape %s.", job.Name, expectedLabel))
+				if s.WrongTapeCallback != nil {
+					s.WrongTapeCallback(ctx, expectedLabel, "no tape loaded")
+				}
+				notifiedUser = true
+			}
+			select {
+			case <-ctx.Done():
+				s.updateProgress(job.ID, "failed", "Backup cancelled while waiting for tape")
+				s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "cancelled waiting for tape")
+				return nil, ctx.Err()
+			case <-time.After(tapeRetryInterval):
+				continue
+			}
+		}
+
+		// Tape is loaded — try to read the label
+		physicalLabel, readErr := driveSvc.ReadTapeLabel(ctx)
+		if readErr != nil {
+			s.logger.Warn("Failed to read tape label, will retry", map[string]interface{}{
+				"error": readErr.Error(), "tape": expectedLabel,
+			})
+			waitMsg := fmt.Sprintf("Cannot read tape label in drive %s (error: %s). Please check tape %q is correctly inserted.",
+				devicePath, readErr.Error(), expectedLabel)
+			s.updateProgress(job.ID, "waiting", waitMsg)
+			if !notifiedUser {
+				s.emitEvent("warning", "backup", "Tape Read Error",
+					fmt.Sprintf("Job %s: cannot read tape label. Please check tape %s.", job.Name, expectedLabel))
+				if s.WrongTapeCallback != nil {
+					s.WrongTapeCallback(ctx, expectedLabel, "unreadable")
+				}
+				notifiedUser = true
+			}
+			select {
+			case <-ctx.Done():
+				s.updateProgress(job.ID, "failed", "Backup cancelled while waiting for tape")
+				s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "cancelled waiting for tape")
+				return nil, ctx.Err()
+			case <-time.After(tapeRetryInterval):
+				continue
+			}
+		}
+
+		// Check if the label matches
+		if physicalLabel != nil && physicalLabel.Label == expectedLabel && physicalLabel.UUID == expectedUUID {
+			// Correct tape found — break out of retry loop
+			break
+		}
+
+		// Wrong tape or unlabeled tape — notify and retry
 		actualLabel := "unlabeled"
-		actualUUID := ""
 		if physicalLabel != nil {
 			actualLabel = physicalLabel.Label
-			actualUUID = physicalLabel.UUID
 		}
-		var errMsg string
+		var waitMsg string
 		if physicalLabel != nil && physicalLabel.Label == expectedLabel {
-			errMsg = fmt.Sprintf("tape UUID mismatch: expected %q but drive has %q (label %q) - please insert the correct tape", expectedUUID, actualUUID, actualLabel)
+			waitMsg = fmt.Sprintf("Tape UUID mismatch: expected %q but drive has %q (label %q). Please insert the correct tape %q.",
+				expectedUUID, physicalLabel.UUID, actualLabel, expectedLabel)
 		} else {
-			errMsg = fmt.Sprintf("tape label mismatch: expected %q but drive has %q - please insert the correct tape", expectedLabel, actualLabel)
+			waitMsg = fmt.Sprintf("Wrong tape in drive: expected %q but found %q. Please insert the correct tape.",
+				expectedLabel, actualLabel)
 		}
-		s.updateProgress(job.ID, "failed", errMsg)
-		s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, errMsg)
-		s.emitEvent("error", "backup", "Wrong Tape Inserted", fmt.Sprintf("Job %s failed: %s", job.Name, errMsg))
-		return nil, fmt.Errorf("%s", errMsg)
+		s.updateProgress(job.ID, "waiting", waitMsg)
+		s.emitEvent("warning", "backup", "Wrong Tape Inserted",
+			fmt.Sprintf("Job %s: %s", job.Name, waitMsg))
+		if s.WrongTapeCallback != nil {
+			s.WrongTapeCallback(ctx, expectedLabel, actualLabel)
+		}
+		notifiedUser = true
+
+		select {
+		case <-ctx.Done():
+			s.updateProgress(job.ID, "failed", "Backup cancelled while waiting for correct tape")
+			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "cancelled waiting for correct tape")
+			return nil, ctx.Err()
+		case <-time.After(tapeRetryInterval):
+			continue
+		}
 	}
 
 	s.updateProgress(job.ID, "positioning", "Tape label verified, positioning past label...")

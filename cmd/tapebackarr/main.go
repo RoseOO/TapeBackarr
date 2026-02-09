@@ -107,6 +107,9 @@ func main() {
 	backupService.TapeChangeCallback = func(ctx context.Context, jobName, currentTape, reason, nextTape string) {
 		telegramService.NotifyTapeChangeRequired(ctx, jobName, currentTape, reason, nextTape)
 	}
+	backupService.WrongTapeCallback = func(ctx context.Context, expectedLabel, actualLabel string) {
+		telegramService.NotifyWrongTapeInserted(ctx, expectedLabel, actualLabel)
+	}
 
 	// Create restore service
 	restoreService := restore.NewService(db, tapeService, logger, cfg.Tape.BlockSize)
