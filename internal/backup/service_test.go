@@ -1390,3 +1390,55 @@ func TestTapeChangeCallbackField(t *testing.T) {
 		t.Errorf("expected nextTape 'TAPE-002', got %q", calledWith.nextTape)
 	}
 }
+
+func TestWrongTapeCallbackField(t *testing.T) {
+	// Verify the WrongTapeCallback field works correctly on the Service struct
+	svc := &Service{}
+
+	// Nil callback should not panic
+	if svc.WrongTapeCallback != nil {
+		t.Error("expected WrongTapeCallback to be nil by default")
+	}
+
+	// Set callback and verify it's called with correct arguments
+	var calledWith struct {
+		expectedLabel, actualLabel string
+	}
+	svc.WrongTapeCallback = func(ctx context.Context, expectedLabel, actualLabel string) {
+		calledWith.expectedLabel = expectedLabel
+		calledWith.actualLabel = actualLabel
+	}
+
+	ctx := context.Background()
+	svc.WrongTapeCallback(ctx, "TAPE-001", "TAPE-999")
+
+	if calledWith.expectedLabel != "TAPE-001" {
+		t.Errorf("expected expectedLabel 'TAPE-001', got %q", calledWith.expectedLabel)
+	}
+	if calledWith.actualLabel != "TAPE-999" {
+		t.Errorf("expected actualLabel 'TAPE-999', got %q", calledWith.actualLabel)
+	}
+}
+
+func TestWrongTapeCallbackNoTapeLoaded(t *testing.T) {
+	// Verify the WrongTapeCallback is called with "no tape loaded" when there is no tape
+	svc := &Service{}
+
+	var calledWith struct {
+		expectedLabel, actualLabel string
+	}
+	svc.WrongTapeCallback = func(ctx context.Context, expectedLabel, actualLabel string) {
+		calledWith.expectedLabel = expectedLabel
+		calledWith.actualLabel = actualLabel
+	}
+
+	ctx := context.Background()
+	svc.WrongTapeCallback(ctx, "TAPE-001", "no tape loaded")
+
+	if calledWith.expectedLabel != "TAPE-001" {
+		t.Errorf("expected expectedLabel 'TAPE-001', got %q", calledWith.expectedLabel)
+	}
+	if calledWith.actualLabel != "no tape loaded" {
+		t.Errorf("expected actualLabel 'no tape loaded', got %q", calledWith.actualLabel)
+	}
+}

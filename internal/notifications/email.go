@@ -341,3 +341,18 @@ func (s *EmailService) NotifyDriveError(ctx context.Context, devicePath string, 
 		},
 	})
 }
+
+// NotifyWrongTapeInserted sends a wrong tape notification via email
+func (s *EmailService) NotifyWrongTapeInserted(ctx context.Context, expectedLabel string, actualLabel string) error {
+	return s.Send(ctx, &Notification{
+		Type:      NotifyWrongTape,
+		Title:     "Wrong Tape Inserted",
+		Message:   fmt.Sprintf("The inserted tape does not match the expected tape. Expected: %s, Actual: %s. Please insert the correct tape.", expectedLabel, actualLabel),
+		Priority:  "high",
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"Expected": expectedLabel,
+			"Actual":   actualLabel,
+		},
+	})
+}
