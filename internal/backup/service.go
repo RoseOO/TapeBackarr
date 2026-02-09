@@ -214,7 +214,7 @@ type Service struct {
 // NewService creates a new backup service
 func NewService(db *database.DB, tapeService *tape.Service, logger *logging.Logger, blockSize int, bufferSizeMB int) *Service {
 	if bufferSizeMB <= 0 {
-		bufferSizeMB = 512
+		bufferSizeMB = 1024
 	}
 	return &Service{
 		db:           db,
