@@ -252,6 +252,22 @@ func (s *Service) ScanSource(ctx context.Context, source *models.BackupSource) (
 		dirs     = make(chan string, numWorkers*4)
 	)
 
+	// shouldExcludeDir checks if a directory path matches any exclude pattern
+	shouldExcludeDir := func(path string) bool {
+		relPath, _ := filepath.Rel(source.Path, path)
+		baseName := filepath.Base(path)
+
+		for _, pattern := range excludePatterns {
+			if matched, _ := filepath.Match(pattern, relPath); matched {
+				return true
+			}
+			if matched, _ := filepath.Match(pattern, baseName); matched {
+				return true
+			}
+		}
+		return false
+	}
+
 	// matchFile checks if a file path matches the include/exclude patterns
 	matchFile := func(path string) bool {
 		relPath, _ := filepath.Rel(source.Path, path)
@@ -310,6 +326,9 @@ func (s *Service) ScanSource(ctx context.Context, source *models.BackupSource) (
 			path := filepath.Join(dirPath, entry.Name())
 
 			if entry.IsDir() {
+				if shouldExcludeDir(path) {
+					continue
+				}
 				dirWg.Add(1)
 				select {
 				case dirs <- path:
