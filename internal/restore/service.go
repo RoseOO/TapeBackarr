@@ -766,12 +766,16 @@ func (s *Service) BrowseCatalog(ctx context.Context, backupSetID int64, pathPref
 	// Look up the tape info for this backup set once (all entries share the same tape)
 	var tapeID int64
 	var tapeLabel string
-	_ = s.db.QueryRow(`
+	if err := s.db.QueryRow(`
 		SELECT COALESCE(bs.tape_id, 0), COALESCE(t.label, '')
 		FROM backup_sets bs
 		LEFT JOIN tapes t ON bs.tape_id = t.id
 		WHERE bs.id = ?
-	`, backupSetID).Scan(&tapeID, &tapeLabel)
+	`, backupSetID).Scan(&tapeID, &tapeLabel); err != nil && s.logger != nil {
+		s.logger.Warn("Could not look up tape info for backup set", map[string]interface{}{
+			"backup_set_id": backupSetID, "error": err.Error(),
+		})
+	}
 
 	query := `
 		SELECT id, backup_set_id, file_path, file_size,

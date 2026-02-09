@@ -2245,8 +2245,10 @@ func (s *Service) finishTape(p finishTapeParams) error {
 
 	// Compute and save per-file block_offset in catalog entries. Files are
 	// written sequentially as a tar stream, so the offset of each file is the
-	// cumulative size of all preceding files (plus ~1KB tar header overhead per
-	// file). This allows the restore page to show where each file lives on tape.
+	// cumulative size of all preceding files (plus tar header overhead per file).
+	// This allows the restore page to show where each file lives on tape.
+	// Tar header overhead: 512-byte header + up to 512 bytes padding = ~1KB per file.
+	const tarHeaderOverhead = 1024
 	var cumulativeOffset int64
 	for _, f := range p.files {
 		relPath, relErr := filepath.Rel(p.source.Path, f.Path)
@@ -2259,8 +2261,7 @@ func (s *Service) finishTape(p finishTapeParams) error {
 				"file": relPath, "error": err.Error(),
 			})
 		}
-		// Each file occupies its size plus ~1KB tar header (rounded to 512-byte blocks)
-		cumulativeOffset += f.Size + 1024
+		cumulativeOffset += f.Size + tarHeaderOverhead
 	}
 
 	// Update tape usage — use actual bytes written to tape (post-compression)
