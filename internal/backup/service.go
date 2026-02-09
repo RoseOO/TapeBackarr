@@ -61,13 +61,17 @@ type JobProgress struct {
 // EventCallback is called when backup progress events occur (for SSE/console)
 type EventCallback func(eventType, category, title, message string)
 
-// countingReader wraps an io.Reader and counts bytes read through it
+// countingReader wraps an io.Reader and counts bytes read through it.
+// It uses atomic operations instead of a mutex for the byte counter to avoid
+// lock contention in the hot data path, and throttles the progress callback
+// to fire at most once per second to reduce overhead from mutex acquisition,
+// time.Now() calls, and float math in the callback.
 type countingReader struct {
-	reader   io.Reader
-	count    int64
-	mu       sync.Mutex
-	callback func(bytesRead int64)
-	paused   *int32 // atomic: 0=running, 1=paused
+	reader       io.Reader
+	count        int64 // accessed atomically
+	lastCallback int64 // unix nanoseconds of last callback, accessed atomically
+	callback     func(bytesRead int64)
+	paused       *int32 // atomic: 0=running, 1=paused
 }
 
 func (cr *countingReader) Read(p []byte) (int, error) {
@@ -77,21 +81,23 @@ func (cr *countingReader) Read(p []byte) (int, error) {
 	}
 	n, err := cr.reader.Read(p)
 	if n > 0 {
-		cr.mu.Lock()
-		cr.count += int64(n)
-		total := cr.count
-		cr.mu.Unlock()
+		total := atomic.AddInt64(&cr.count, int64(n))
 		if cr.callback != nil {
-			cr.callback(total)
+			now := time.Now().UnixNano()
+			last := atomic.LoadInt64(&cr.lastCallback)
+			// Throttle callback to at most once per second to reduce overhead
+			if now-last >= int64(time.Second) {
+				if atomic.CompareAndSwapInt64(&cr.lastCallback, last, now) {
+					cr.callback(total)
+				}
+			}
 		}
 	}
 	return n, err
 }
 
 func (cr *countingReader) bytesRead() int64 {
-	cr.mu.Lock()
-	defer cr.mu.Unlock()
-	return cr.count
+	return atomic.LoadInt64(&cr.count)
 }
 
 // Service handles backup operations
@@ -100,6 +106,7 @@ type Service struct {
 	tapeService   *tape.Service
 	logger        *logging.Logger
 	blockSize     int
+	bufferSizeMB  int
 	mu            sync.Mutex
 	activeJobs    map[int64]*JobProgress
 	cancelFuncs   map[int64]context.CancelFunc
@@ -109,16 +116,20 @@ type Service struct {
 }
 
 // NewService creates a new backup service
-func NewService(db *database.DB, tapeService *tape.Service, logger *logging.Logger, blockSize int) *Service {
+func NewService(db *database.DB, tapeService *tape.Service, logger *logging.Logger, blockSize int, bufferSizeMB int) *Service {
+	if bufferSizeMB <= 0 {
+		bufferSizeMB = 512
+	}
 	return &Service{
-		db:          db,
-		tapeService: tapeService,
-		logger:      logger,
-		blockSize:   blockSize,
-		activeJobs:  make(map[int64]*JobProgress),
-		cancelFuncs: make(map[int64]context.CancelFunc),
-		pauseFlags:  make(map[int64]*int32),
-		resumeFiles: make(map[int64][]string),
+		db:           db,
+		tapeService:  tapeService,
+		logger:       logger,
+		blockSize:    blockSize,
+		bufferSizeMB: bufferSizeMB,
+		activeJobs:   make(map[int64]*JobProgress),
+		cancelFuncs:  make(map[int64]context.CancelFunc),
+		pauseFlags:   make(map[int64]*int32),
+		resumeFiles:  make(map[int64][]string),
 	}
 }
 
@@ -460,7 +471,7 @@ func (s *Service) StreamToTape(ctx context.Context, sourcePath string, files []F
 	if mbufferErr == nil {
 		// Use mbuffer for better streaming performance
 		tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
-		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", "256M", "-o", devicePath)
+		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", fmt.Sprintf("%dM", s.bufferSizeMB), "-o", devicePath)
 
 		// Pipe tar output through counting reader to mbuffer
 		tarCmd.Dir = sourcePath
@@ -566,7 +577,7 @@ func (s *Service) StreamToTapeEncrypted(ctx context.Context, sourcePath string, 
 
 	if mbufferErr == nil {
 		// Use mbuffer for buffering before writing to tape
-		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", "256M", "-o", devicePath)
+		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", fmt.Sprintf("%dM", s.bufferSizeMB), "-o", devicePath)
 
 		opensslPipe, err := opensslCmd.StdoutPipe()
 		if err != nil {
@@ -672,12 +683,19 @@ func (s *Service) StreamToTapeCompressed(ctx context.Context, sourcePath string,
 	tarCmd.Dir = sourcePath
 
 	// Determine compression command
+	// Use pigz (parallel gzip) when available for multi-core throughput,
+	// otherwise fall back to gzip -1 (fastest) to avoid CPU bottleneck.
+	// Use zstd -T0 for automatic multi-threading.
 	var compCmd *exec.Cmd
 	switch compression {
 	case models.CompressionGzip:
-		compCmd = exec.CommandContext(ctx, "gzip", "-c")
+		if _, err := exec.LookPath("pigz"); err == nil {
+			compCmd = exec.CommandContext(ctx, "pigz", "-c")
+		} else {
+			compCmd = exec.CommandContext(ctx, "gzip", "-1", "-c")
+		}
 	case models.CompressionZstd:
-		compCmd = exec.CommandContext(ctx, "zstd", "-c", "--no-progress")
+		compCmd = exec.CommandContext(ctx, "zstd", "-T0", "-c", "--no-progress")
 	default:
 		return fmt.Errorf("unsupported compression type: %s", compression)
 	}
@@ -694,7 +712,7 @@ func (s *Service) StreamToTapeCompressed(ctx context.Context, sourcePath string,
 	_, mbufferErr := exec.LookPath("mbuffer")
 
 	if mbufferErr == nil {
-		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", "256M", "-o", devicePath)
+		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", fmt.Sprintf("%dM", s.bufferSizeMB), "-o", devicePath)
 		compPipe, err := compCmd.StdoutPipe()
 		if err != nil {
 			return fmt.Errorf("failed to create compression pipe: %w", err)
@@ -796,9 +814,13 @@ func (s *Service) StreamToTapeCompressedEncrypted(ctx context.Context, sourcePat
 	var compCmd *exec.Cmd
 	switch compression {
 	case models.CompressionGzip:
-		compCmd = exec.CommandContext(ctx, "gzip", "-c")
+		if _, err := exec.LookPath("pigz"); err == nil {
+			compCmd = exec.CommandContext(ctx, "pigz", "-c")
+		} else {
+			compCmd = exec.CommandContext(ctx, "gzip", "-1", "-c")
+		}
 	case models.CompressionZstd:
-		compCmd = exec.CommandContext(ctx, "zstd", "-c", "--no-progress")
+		compCmd = exec.CommandContext(ctx, "zstd", "-T0", "-c", "--no-progress")
 	default:
 		return fmt.Errorf("unsupported compression type: %s", compression)
 	}
@@ -825,7 +847,7 @@ func (s *Service) StreamToTapeCompressedEncrypted(ctx context.Context, sourcePat
 	_, mbufferErr := exec.LookPath("mbuffer")
 
 	if mbufferErr == nil {
-		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", "256M", "-o", devicePath)
+		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", fmt.Sprintf("%dM", s.bufferSizeMB), "-o", devicePath)
 		opensslPipe, err := opensslCmd.StdoutPipe()
 		if err != nil {
 			return fmt.Errorf("failed to create openssl pipe: %w", err)

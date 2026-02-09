@@ -138,8 +138,8 @@ if [ ! -f "$CONFIG_DIR/config.json" ]; then
         "enabled": true
       }
     ],
-    "buffer_size_mb": 256,
-    "block_size": 65536,
+    "buffer_size_mb": 512,
+    "block_size": 262144,
     "write_retries": 3,
     "verify_after_write": true
   },
