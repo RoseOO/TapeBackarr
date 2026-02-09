@@ -100,7 +100,8 @@
 Additional tables not shown: database_backups, restore_operations, api_keys,
 proxmox_nodes, proxmox_guests, proxmox_backups, proxmox_restores,
 proxmox_backup_jobs, proxmox_job_executions, tape_spanning_sets,
-tape_spanning_members, tape_change_requests (see definitions below).
+tape_spanning_members, tape_change_requests, tape_libraries,
+tape_library_slots, drive_statistics, drive_alerts (see definitions below).
 ```
 
 ## Table Definitions
@@ -583,10 +584,11 @@ Represents a backup that spans multiple tapes (defined in Go models).
 ```sql
 CREATE TABLE tape_spanning_sets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    backup_set_id INTEGER NOT NULL REFERENCES backup_sets(id),
-    total_tapes INTEGER NOT NULL,
+    job_id INTEGER NOT NULL REFERENCES backup_jobs(id),
+    total_tapes INTEGER DEFAULT 0,
     total_bytes INTEGER DEFAULT 0,
-    status TEXT NOT NULL CHECK (status IN ('in_progress', 'completed', 'failed')),
+    total_files INTEGER DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'in_progress' CHECK (status IN ('in_progress', 'completed', 'failed')),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -600,14 +602,16 @@ CREATE TABLE tape_spanning_members (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     spanning_set_id INTEGER NOT NULL REFERENCES tape_spanning_sets(id),
     tape_id INTEGER NOT NULL REFERENCES tapes(id),
+    backup_set_id INTEGER NOT NULL REFERENCES backup_sets(id),
     sequence_number INTEGER NOT NULL,
-    start_block INTEGER,
-    end_block INTEGER,
     bytes_written INTEGER DEFAULT 0,
-    files_start_index INTEGER,
-    files_end_index INTEGER,
+    files_start_index INTEGER DEFAULT 0,
+    files_end_index INTEGER DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE INDEX idx_spanning_members_set ON tape_spanning_members(spanning_set_id);
+CREATE INDEX idx_spanning_members_tape ON tape_spanning_members(tape_id);
 ```
 
 ### TapeChangeRequests
@@ -627,6 +631,93 @@ CREATE TABLE tape_change_requests (
 );
 ```
 
+### TapeLibraries
+Tape library (autochanger) support for automated tape handling via SCSI medium changers.
+
+```sql
+CREATE TABLE tape_libraries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    device_path TEXT NOT NULL,  -- SCSI generic device e.g. /dev/sg3
+    vendor TEXT DEFAULT '',
+    model TEXT DEFAULT '',
+    serial_number TEXT DEFAULT '',
+    num_slots INTEGER DEFAULT 0,
+    num_drives INTEGER DEFAULT 0,
+    num_import_export INTEGER DEFAULT 0,  -- mail slots / import-export elements
+    barcode_reader BOOLEAN DEFAULT 0,
+    enabled BOOLEAN DEFAULT 1,
+    last_inventory_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### TapeLibrarySlots
+Tracks the contents of each slot in a tape library.
+
+```sql
+CREATE TABLE tape_library_slots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    library_id INTEGER NOT NULL REFERENCES tape_libraries(id) ON DELETE CASCADE,
+    slot_number INTEGER NOT NULL,
+    slot_type TEXT NOT NULL DEFAULT 'storage' CHECK (slot_type IN ('storage', 'import_export', 'drive')),
+    tape_id INTEGER REFERENCES tapes(id),
+    barcode TEXT DEFAULT '',
+    is_empty BOOLEAN DEFAULT 1,
+    drive_id INTEGER REFERENCES tape_drives(id),  -- only for drive slots
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(library_id, slot_number)
+);
+
+CREATE INDEX idx_library_slots_library ON tape_library_slots(library_id);
+CREATE INDEX idx_library_slots_tape ON tape_library_slots(tape_id);
+```
+
+**Note:** The `tape_drives` table also includes `library_id` and `library_drive_number` columns to link drives to their parent library.
+
+### DriveStatistics
+Tracks usage metrics and health indicators for tape drives.
+
+```sql
+CREATE TABLE drive_statistics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    drive_id INTEGER NOT NULL UNIQUE REFERENCES tape_drives(id) ON DELETE CASCADE,
+    total_bytes_read INTEGER DEFAULT 0,
+    total_bytes_written INTEGER DEFAULT 0,
+    read_errors INTEGER DEFAULT 0,
+    write_errors INTEGER DEFAULT 0,
+    total_load_count INTEGER DEFAULT 0,
+    cleaning_required BOOLEAN DEFAULT 0,
+    last_cleaned_at DATETIME,
+    power_on_hours INTEGER DEFAULT 0,
+    tape_motion_hours REAL DEFAULT 0,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_drive_statistics_drive ON drive_statistics(drive_id);
+```
+
+### DriveAlerts
+Monitoring alerts for drive health and maintenance.
+
+```sql
+CREATE TABLE drive_alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    drive_id INTEGER NOT NULL REFERENCES tape_drives(id) ON DELETE CASCADE,
+    severity TEXT NOT NULL DEFAULT 'info' CHECK (severity IN ('info', 'warning', 'critical')),
+    category TEXT NOT NULL DEFAULT '',
+    message TEXT NOT NULL DEFAULT '',
+    resolved BOOLEAN DEFAULT 0,
+    resolved_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_drive_alerts_drive ON drive_alerts(drive_id);
+CREATE INDEX idx_drive_alerts_unresolved ON drive_alerts(drive_id, resolved);
+```
+
 ## Key Relationships
 
 1. **Tapes ↔ TapePools**: Many-to-one (tapes belong to pools)
@@ -642,10 +733,16 @@ CREATE TABLE tape_change_requests (
 11. **ProxmoxBackups ↔ Tapes**: Many-to-one (Proxmox backups stored on tapes)
 12. **ProxmoxRestores ↔ ProxmoxBackups**: Many-to-one (restores reference a backup)
 13. **ProxmoxJobExecutions ↔ ProxmoxBackupJobs**: Many-to-one (jobs produce executions)
-14. **TapeSpanningSets ↔ BackupSets**: Many-to-one (spanning sets reference a backup set)
+14. **TapeSpanningSets ↔ BackupJobs**: Many-to-one (spanning sets reference a backup job)
 15. **TapeSpanningMembers ↔ TapeSpanningSets**: Many-to-one (members belong to a spanning set)
 16. **TapeSpanningMembers ↔ Tapes**: Many-to-one (each member references a tape)
-17. **TapeChangeRequests ↔ JobExecutions**: Many-to-one (requests arise during executions)
+17. **TapeSpanningMembers ↔ BackupSets**: Many-to-one (each member references a backup set)
+18. **TapeChangeRequests ↔ JobExecutions**: Many-to-one (requests arise during executions)
+19. **TapeLibraries ↔ TapeLibrarySlots**: One-to-many (libraries have slots)
+20. **TapeLibrarySlots ↔ Tapes**: Many-to-one optional (slots may contain tapes)
+21. **TapeDrives ↔ TapeLibraries**: Many-to-one optional (drives may belong to a library)
+22. **DriveStatistics ↔ TapeDrives**: One-to-one (each drive has statistics)
+23. **DriveAlerts ↔ TapeDrives**: One-to-many (drives can have alerts)
 
 ## Query Patterns
 

@@ -52,6 +52,10 @@
 │  │  │ mt commands  │  │ sg_* utils   │  │ tar streamer │                    │ │
 │  │  │ (tape ctl)   │  │ (SCSI)       │  │ (data write) │                    │ │
 │  │  └──────────────┘  └──────────────┘  └──────────────┘                    │ │
+│  │  ┌──────────────┐                                                        │ │
+│  │  │ mtx commands │                                                        │ │
+│  │  │ (library ctl)│                                                        │ │
+│  │  └──────────────┘                                                        │ │
 │  │                           │                                               │ │
 │  │                           ▼                                               │ │
 │  │                    /dev/st0, /dev/nst0                                    │ │
@@ -166,10 +170,11 @@ searching, but the on-tape TOC ensures disaster recovery is possible without the
 - **mt commands**: Tape positioning, rewinding, ejecting
 - **sg_* utilities**: SCSI generic access for advanced operations
 - **tar streaming**: Direct streaming writes/reads
+- **mtx commands**: Tape library (autochanger) control — load, unload, transfer, inventory
 
 ### 5. Data Layer
 - **Database**: SQLite for portability and simplicity
-- **Tables**: Tapes, BackupSets, CatalogEntries, Jobs, Users, AuditLogs
+- **Tables**: Tapes, BackupSets, CatalogEntries, Jobs, Users, AuditLogs, TapeLibraries, DriveStatistics, DriveAlerts
 
 ## Technology Choices
 
@@ -179,7 +184,7 @@ searching, but the on-tape TOC ensures disaster recovery is possible without the
 | Database | SQLite | No external dependencies, suitable for metadata-only workload |
 | Web UI | SvelteKit | Fast, server-rendered option with minimal complexity |
 | Process Control | systemd | Native Debian integration, reliable service management |
-| Tape Tools | mt, tar, sg_* | Standard Linux utilities, well-tested |
+| Tape Tools | mt, tar, sg_*, mtx | Standard Linux utilities, well-tested |
 | Encryption | AES-256-GCM | Industry-standard authenticated encryption |
 | Notifications | Telegram API, SMTP | Real-time operator alerts via multiple channels |
 

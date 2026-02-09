@@ -283,6 +283,88 @@ Authorization: Bearer <token>
 
 **Note:** Cannot delete tapes that have associated backup sets.
 
+### Batch Label Tapes
+
+```http
+POST /api/v1/tapes/batch-label
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "drive_id": 1,
+  "prefix": "WEEKLY-",
+  "start_number": 1,
+  "count": 10,
+  "digits": 3,
+  "pool_id": 2
+}
+```
+
+Starts a batch tape labelling operation. Tapes are labelled sequentially (e.g., WEEKLY-001 through WEEKLY-010). The operator is expected to insert and eject tapes one at a time.
+
+**Response:**
+```json
+{
+  "status": "started",
+  "message": "Batch labelling started: WEEKLY-001 through WEEKLY-010"
+}
+```
+
+### Batch Label Status
+
+```http
+GET /api/v1/tapes/batch-label/status
+Authorization: Bearer <token>
+```
+
+Returns the current status of a batch label operation.
+
+**Response:**
+```json
+{
+  "running": true,
+  "progress": 3,
+  "total": 10,
+  "current": "WEEKLY-004",
+  "message": "Labelling tape WEEKLY-004...",
+  "completed": 3,
+  "failed": 0
+}
+```
+
+### Cancel Batch Label
+
+```http
+POST /api/v1/tapes/batch-label/cancel
+Authorization: Bearer <token>
+```
+
+Cancels a running batch label operation.
+
+### Batch Update Tapes
+
+```http
+POST /api/v1/tapes/batch-update
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "tape_ids": [1, 2, 3],
+  "status": "retired",
+  "pool_id": 5
+}
+```
+
+Updates the status and/or pool for multiple tapes at once. At least one of `status` or `pool_id` must be provided. Lifecycle safeguards are applied (e.g., exported tapes cannot be changed, active tapes cannot be set to blank).
+
+**Response:**
+```json
+{
+  "updated": 3,
+  "skipped": 0
+}
+```
+
 ---
 
 ## Tape Pools
@@ -521,6 +603,33 @@ Authorization: Bearer <token>
 
 Returns a list of currently running or queued jobs.
 
+### Get Resumable Jobs
+
+```http
+GET /api/v1/jobs/resumable
+Authorization: Bearer <token>
+```
+
+Returns a list of paused or failed job executions that can be resumed.
+
+**Response:**
+```json
+[
+  {
+    "id": 10,
+    "job_id": 1,
+    "job_name": "Daily-FileServer",
+    "status": "paused",
+    "files_processed": 500,
+    "bytes_processed": 1000000000,
+    "error_message": "",
+    "can_resume": true,
+    "created_at": "2024-01-15T02:00:00Z",
+    "updated_at": "2024-01-15T02:15:00Z"
+  }
+]
+```
+
 ### Cancel Job
 
 ```http
@@ -547,6 +656,33 @@ Authorization: Bearer <token>
 ```
 
 Resumes a paused job.
+
+### Retry Job
+
+```http
+POST /api/v1/jobs/{id}/retry
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "tape_id": 3,
+  "use_pool": true,
+  "from_scratch": false
+}
+```
+
+Retries a failed or paused backup job. If `from_scratch` is false (default), the job will attempt to resume from where it left off using saved resume state. If `use_pool` is true or `tape_id` is 0, a tape will be selected from the job's pool.
+
+**Response:**
+```json
+{
+  "backup_set_id": 158,
+  "status": "running",
+  "message": "Backup job retried",
+  "tape_label": "WEEKLY-003",
+  "resume": true
+}
+```
 
 ### Recommend Tape for Job
 
@@ -642,6 +778,22 @@ Returns the list of files included in the backup set.
     }
   ],
   "total": 1500
+}
+```
+
+### Delete Backup Set
+
+```http
+DELETE /api/v1/backup-sets/{id}
+Authorization: Bearer <token>
+```
+
+Deletes a backup set and its associated catalog entries. Only backup sets with status `failed` or `completed` can be deleted.
+
+**Response:**
+```json
+{
+  "status": "deleted"
 }
 ```
 
@@ -967,6 +1119,90 @@ Content-Type: application/json
 
 Labels multiple tapes sequentially using the specified drive.
 
+### Get Drive Statistics
+
+```http
+GET /api/v1/drives/{id}/statistics
+Authorization: Bearer <token>
+```
+
+Returns usage statistics for the drive, including bytes read/written, error counts, load counts, power-on hours, and temperature.
+
+**Response:**
+```json
+{
+  "drive_id": 1,
+  "total_bytes_read": 5000000000000,
+  "total_bytes_written": 8000000000000,
+  "read_errors": 0,
+  "write_errors": 2,
+  "total_load_count": 150,
+  "cleaning_required": false,
+  "power_on_hours": 12000,
+  "tape_motion_hours": 8500.5,
+  "temperature_c": 35,
+  "read_compression_pct": 2.1,
+  "write_compression_pct": 2.3
+}
+```
+
+### Get Drive Alerts
+
+```http
+GET /api/v1/drives/{id}/alerts
+Authorization: Bearer <token>
+```
+
+Returns recent alerts for the drive (up to 50, newest first).
+
+**Response:**
+```json
+[
+  {
+    "id": 1,
+    "drive_id": 1,
+    "severity": "warning",
+    "category": "cleaning",
+    "message": "Drive cleaning recommended",
+    "resolved": false,
+    "resolved_at": null,
+    "created_at": "2024-01-15T10:00:00Z"
+  }
+]
+```
+
+### Clean Drive
+
+```http
+POST /api/v1/drives/{id}/clean
+Authorization: Bearer <token>
+```
+
+Initiates a drive cleaning cycle. A cleaning tape should be loaded in the drive. Resolves any pending cleaning-related alerts.
+
+**Response:**
+```json
+{
+  "status": "cleaned"
+}
+```
+
+### Retension Tape
+
+```http
+POST /api/v1/drives/{id}/retension
+Authorization: Bearer <token>
+```
+
+Runs a tape retension pass on the tape currently loaded in the drive. This can help with read errors caused by loose tape packing.
+
+**Response:**
+```json
+{
+  "status": "retensioned"
+}
+```
+
 ---
 
 ## Database Backup
@@ -1076,6 +1312,26 @@ Authorization: Bearer <token>
       "id": "recovery",
       "title": "Manual Recovery",
       "description": "Recover data without TapeBackarr"
+    },
+    {
+      "id": "architecture",
+      "title": "Architecture",
+      "description": "System design and data flows"
+    },
+    {
+      "id": "database",
+      "title": "Database Schema",
+      "description": "Database table definitions"
+    },
+    {
+      "id": "installation",
+      "title": "Installation Guide",
+      "description": "Installation instructions for all deployment methods"
+    },
+    {
+      "id": "proxmox",
+      "title": "Proxmox Guide",
+      "description": "Backup and restore Proxmox VMs and LXCs"
     }
   ]
 }
@@ -1436,6 +1692,194 @@ Content-Type: application/json
 DELETE /api/v1/api-keys/{id}
 Authorization: Bearer <token>
 ```
+
+---
+
+## Tape Libraries (Autochangers)
+
+Manage tape libraries (autochangers) for automated tape handling.
+
+### List Libraries
+
+```http
+GET /api/v1/libraries
+Authorization: Bearer <token>
+```
+
+**Response:**
+```json
+[
+  {
+    "id": 1,
+    "name": "Primary Autochanger",
+    "device_path": "/dev/sg3",
+    "vendor": "IBM",
+    "model": "TS3200",
+    "serial_number": "ABC123",
+    "num_slots": 24,
+    "num_drives": 2,
+    "num_import_export": 4,
+    "barcode_reader": true,
+    "enabled": true,
+    "last_inventory_at": "2024-01-15T10:00:00Z",
+    "created_at": "2024-01-01T00:00:00Z"
+  }
+]
+```
+
+### Create Library
+
+```http
+POST /api/v1/libraries
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "name": "Primary Autochanger",
+  "device_path": "/dev/sg3",
+  "vendor": "IBM",
+  "model": "TS3200",
+  "serial_number": "ABC123"
+}
+```
+
+### Scan for Libraries
+
+```http
+GET /api/v1/libraries/scan
+Authorization: Bearer <token>
+```
+
+Scans the system for SCSI medium changer devices using `lsscsi`.
+
+**Response:**
+```json
+[
+  {
+    "device_path": "/dev/sg3",
+    "type": "medium_changer",
+    "vendor": "IBM",
+    "model": "TS3200"
+  }
+]
+```
+
+### Get Library
+
+```http
+GET /api/v1/libraries/{id}
+Authorization: Bearer <token>
+```
+
+### Update Library
+
+```http
+PUT /api/v1/libraries/{id}
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "name": "Updated Name",
+  "enabled": true
+}
+```
+
+### Delete Library
+
+```http
+DELETE /api/v1/libraries/{id}
+Authorization: Bearer <token>
+```
+
+Also cleans up associated slot records and unlinks drives.
+
+### Run Inventory
+
+```http
+POST /api/v1/libraries/{id}/inventory
+Authorization: Bearer <token>
+```
+
+Runs `mtx status` to inventory the library. Discovers all slots, barcodes, and which drives are loaded. Updates the slot database accordingly.
+
+### List Library Slots
+
+```http
+GET /api/v1/libraries/{id}/slots
+Authorization: Bearer <token>
+```
+
+**Response:**
+```json
+{
+  "slots": [
+    {
+      "id": 1,
+      "library_id": 1,
+      "slot_number": 1,
+      "slot_type": "storage",
+      "tape_id": 5,
+      "barcode": "WEEKLY-001",
+      "is_empty": false
+    },
+    {
+      "id": 2,
+      "library_id": 1,
+      "slot_number": 2,
+      "slot_type": "drive",
+      "tape_id": null,
+      "barcode": "",
+      "is_empty": true,
+      "drive_id": 1
+    }
+  ]
+}
+```
+
+### Load Tape
+
+```http
+POST /api/v1/libraries/{id}/load
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "slot_number": 5,
+  "drive_number": 0
+}
+```
+
+Loads a tape from the specified slot into the specified drive using `mtx load`.
+
+### Unload Tape
+
+```http
+POST /api/v1/libraries/{id}/unload
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "slot_number": 5,
+  "drive_number": 0
+}
+```
+
+Unloads a tape from the specified drive back to the specified slot using `mtx unload`.
+
+### Transfer Tape
+
+```http
+POST /api/v1/libraries/{id}/transfer
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "source_slot": 5,
+  "dest_slot": 10
+}
+```
+
+Transfers a tape between two slots using `mtx transfer`.
 
 ---
 

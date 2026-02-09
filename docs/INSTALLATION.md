@@ -31,7 +31,7 @@ sudo ./deploy/install.sh
 ```
 
 The installer will:
-- Install system dependencies (mt-st, tar, mbuffer)
+- Install system dependencies (mt-st, tar, mbuffer, mtx)
 - Create directories and set permissions
 - Install the binary to `/opt/tapebackarr`
 - Generate a secure JWT secret
@@ -52,7 +52,7 @@ The installer will:
 
 ```bash
 sudo apt update
-sudo apt install -y mt-st tar mbuffer sg3-utils lsscsi
+sudo apt install -y mt-st tar mbuffer sg3-utils lsscsi mtx
 ```
 
 ### Step 2: Build from Source

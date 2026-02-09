@@ -18,6 +18,8 @@ TapeBackarr is a disk-light, tape-first backup system designed to run on Debian 
 - **Encryption**: AES-256 encryption for sensitive backups
 - **Database Backup**: Backup the TapeBackarr database itself to tape for disaster recovery
 - **Multi-Drive Support**: Manage and select from multiple tape drives
+- **Tape Library Support**: Autochanger (tape library) control via SCSI medium changers — automated load, unload, transfer, and inventory
+- **Drive Health Monitoring**: Drive statistics, alerts, cleaning, and retension support
 - **Proxmox VE Integration**: Backup and restore VMs and LXC containers directly to tape
 
 ### Tape Management
@@ -319,6 +321,10 @@ Default credentials:
 | `/api/v1/tapes/{id}/import` | POST | Import tape |
 | `/api/v1/tapes/{id}/read-label` | GET | Read tape label |
 | `/api/v1/tapes/lto-types` | GET | List LTO types |
+| `/api/v1/tapes/batch-label` | POST | Batch label tapes |
+| `/api/v1/tapes/batch-label/status` | GET | Batch label status |
+| `/api/v1/tapes/batch-label/cancel` | POST | Cancel batch label |
+| `/api/v1/tapes/batch-update` | POST | Batch update tapes |
 | `/api/v1/pools` | GET/POST | List/create pools |
 | `/api/v1/pools/{id}` | GET/PUT/DELETE | Manage pool |
 | `/api/v1/drives` | GET/POST | List/create drives |
@@ -332,18 +338,25 @@ Default credentials:
 | `/api/v1/drives/{id}/detect-tape` | GET | Detect tape in drive |
 | `/api/v1/drives/{id}/scan-for-db-backup` | GET | Scan tape for database backup |
 | `/api/v1/drives/{id}/batch-label` | POST | Batch label tapes |
+| `/api/v1/drives/{id}/statistics` | GET | Drive statistics |
+| `/api/v1/drives/{id}/alerts` | GET | Drive alerts |
+| `/api/v1/drives/{id}/clean` | POST | Clean drive |
+| `/api/v1/drives/{id}/retension` | POST | Retension tape |
 | `/api/v1/sources` | GET/POST | List/create sources |
 | `/api/v1/sources/{id}` | GET/PUT/DELETE | Manage source |
 | `/api/v1/jobs` | GET/POST | List/create jobs |
 | `/api/v1/jobs/active` | GET | List active jobs |
+| `/api/v1/jobs/resumable` | GET | List resumable jobs |
 | `/api/v1/jobs/{id}` | GET/PUT/DELETE | Manage job |
 | `/api/v1/jobs/{id}/run` | POST | Run backup job |
 | `/api/v1/jobs/{id}/cancel` | POST | Cancel running job |
 | `/api/v1/jobs/{id}/pause` | POST | Pause running job |
 | `/api/v1/jobs/{id}/resume` | POST | Resume paused job |
+| `/api/v1/jobs/{id}/retry` | POST | Retry failed job |
 | `/api/v1/jobs/{id}/recommend-tape` | GET | Get tape recommendation |
 | `/api/v1/backup-sets` | GET | List backup sets |
 | `/api/v1/backup-sets/{id}` | GET | Get backup set details |
+| `/api/v1/backup-sets/{id}` | DELETE | Delete backup set |
 | `/api/v1/backup-sets/{id}/files` | GET | List backup set files |
 | `/api/v1/catalog/search` | GET | Search catalog |
 | `/api/v1/catalog/browse/{backupSetId}` | GET | Browse catalog |
@@ -383,6 +396,14 @@ Default credentials:
 | `/api/v1/proxmox/jobs` | GET/POST | List/create Proxmox backup jobs |
 | `/api/v1/proxmox/jobs/{id}` | GET/PUT/DELETE | Manage Proxmox job |
 | `/api/v1/proxmox/jobs/{id}/run` | POST | Run Proxmox job manually |
+| `/api/v1/libraries` | GET/POST | List/create tape libraries |
+| `/api/v1/libraries/scan` | GET | Scan for autochangers |
+| `/api/v1/libraries/{id}` | GET/PUT/DELETE | Manage tape library |
+| `/api/v1/libraries/{id}/inventory` | POST | Run library inventory |
+| `/api/v1/libraries/{id}/slots` | GET | List library slots |
+| `/api/v1/libraries/{id}/load` | POST | Load tape into drive |
+| `/api/v1/libraries/{id}/unload` | POST | Unload tape from drive |
+| `/api/v1/libraries/{id}/transfer` | POST | Transfer tape between slots |
 
 ### CLI Commands Used Internally
 
@@ -430,6 +451,10 @@ tar -xv -b 128 -f /dev/nst0 -C /restore/path
 - **tape_spanning_sets**: Multi-tape backup sets
 - **tape_spanning_members**: Individual tapes in spanning sets
 - **tape_change_requests**: Pending tape change requests
+- **tape_libraries**: Tape library (autochanger) tracking
+- **tape_library_slots**: Tape library slot contents
+- **drive_statistics**: Drive usage metrics and health data
+- **drive_alerts**: Drive health monitoring alerts
 - **proxmox_nodes**: Proxmox VE node tracking
 - **proxmox_guests**: VM and LXC container tracking
 - **proxmox_backups**: Proxmox backup records

@@ -167,7 +167,7 @@ dd if=/dev/nst0 bs=512 count=1 2>/dev/null
 
 Output example:
 ```
-TAPEBACKARR|WEEKLY-001|1705334400
+TAPEBACKARR|WEEKLY-001|a1b2c3d4-e5f6-7890-abcd-ef1234567890|WEEKLY|1705334400||none
 ```
 
 ### 5. Skip to File Mark
@@ -765,10 +765,20 @@ To read the label:
 
 ```bash
 mt -f /dev/nst0 rewind
-dd if=/dev/nst0 bs=65536 count=1 2>/dev/null | strings
+dd if=/dev/nst0 bs=512 count=1 2>/dev/null
 ```
 
-Look for `compression_type` in the JSON output. Values are: `none`, `gzip`, or `zstd`.
+The label is a pipe-delimited string: `TAPEBACKARR|label|uuid|pool|timestamp|encryption_fingerprint|compression_type`. The last field indicates the compression type. Values are: `none`, `gzip`, or `zstd`.
+
+Alternatively, read the TOC (file #2) for structured JSON metadata:
+
+```bash
+mt -f /dev/nst0 rewind
+mt -f /dev/nst0 fsf 2
+dd if=/dev/nst0 bs=64k 2>/dev/null | tr -d '\0' | python3 -m json.tool
+```
+
+The `compressed` and `compression_type` fields in each backup set entry indicate whether compression was used.
 
 ## Recovering Database Backups from Tape
 
@@ -781,7 +791,7 @@ If you have lost your TapeBackarr database but have a database backup on tape, y
 mt -f /dev/nst0 rewind
 
 # Read the label to identify the tape
-dd if=/dev/nst0 bs=65536 count=1 2>/dev/null | strings
+dd if=/dev/nst0 bs=512 count=1 2>/dev/null
 
 # Skip to the data section (past label)
 mt -f /dev/nst0 fsf 1
