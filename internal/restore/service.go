@@ -345,24 +345,23 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 			return nil, fmt.Errorf("failed to start tar: %w", err)
 		}
 
-		opensslErr := opensslCmd.Wait()
-		decompErr := decompCmd.Wait()
+		// Wait for downstream (tar) first. When tar finishes a selective
+		// restore it closes its stdin, which may cause upstream processes
+		// (decompressor / openssl) to receive SIGPIPE and exit non-zero.
+		// That is expected – only treat upstream errors as failures when
+		// tar itself also failed.
 		tarErr := tarCmd.Wait()
+		decompErr := decompCmd.Wait()
+		opensslErr := opensslCmd.Wait()
 
-		if opensslErr != nil {
-			errMsg := fmt.Sprintf("decryption failed: %v", opensslErr)
-			result.Errors = append(result.Errors, errMsg)
-			s.logger.Error("Restore failed", map[string]interface{}{"error": errMsg})
-			return result, fmt.Errorf("decryption failed: %w", opensslErr)
-		}
-		if decompErr != nil {
-			errMsg := fmt.Sprintf("decompression failed: %v", decompErr)
-			result.Errors = append(result.Errors, errMsg)
-			s.logger.Error("Restore failed", map[string]interface{}{"error": errMsg})
-			return result, fmt.Errorf("decompression failed: %w", decompErr)
-		}
 		if tarErr != nil {
 			errMsg := fmt.Sprintf("tar extract failed: %v", tarErr)
+			if decompErr != nil {
+				errMsg += fmt.Sprintf(" (decompression: %v)", decompErr)
+			}
+			if opensslErr != nil {
+				errMsg += fmt.Sprintf(" (decryption: %v)", opensslErr)
+			}
 			result.Errors = append(result.Errors, errMsg)
 			s.logger.Error("Restore failed", map[string]interface{}{"error": errMsg})
 			return result, fmt.Errorf("restore failed: %w", tarErr)
@@ -396,17 +395,16 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 			return nil, fmt.Errorf("failed to start tar: %w", err)
 		}
 
-		opensslErr := opensslCmd.Wait()
+		// Wait for tar (downstream) first – see encrypted+compressed
+		// pipeline comment above for rationale.
 		tarErr := tarCmd.Wait()
+		opensslErr := opensslCmd.Wait()
 
-		if opensslErr != nil {
-			errMsg := fmt.Sprintf("decryption failed: %v", opensslErr)
-			result.Errors = append(result.Errors, errMsg)
-			s.logger.Error("Restore failed", map[string]interface{}{"error": errMsg})
-			return result, fmt.Errorf("decryption failed: %w", opensslErr)
-		}
 		if tarErr != nil {
 			errMsg := fmt.Sprintf("tar extract failed: %v", tarErr)
+			if opensslErr != nil {
+				errMsg += fmt.Sprintf(" (decryption: %v)", opensslErr)
+			}
 			result.Errors = append(result.Errors, errMsg)
 			s.logger.Error("Restore failed", map[string]interface{}{"error": errMsg})
 			return result, fmt.Errorf("restore failed: %w", tarErr)
@@ -445,17 +443,16 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 			return nil, fmt.Errorf("failed to start tar: %w", err)
 		}
 
-		decompErr := decompCmd.Wait()
+		// Wait for tar (downstream) first – see encrypted+compressed
+		// pipeline comment above for rationale.
 		tarErr := tarCmd.Wait()
+		decompErr := decompCmd.Wait()
 
-		if decompErr != nil {
-			errMsg := fmt.Sprintf("decompression failed: %v", decompErr)
-			result.Errors = append(result.Errors, errMsg)
-			s.logger.Error("Restore failed", map[string]interface{}{"error": errMsg})
-			return result, fmt.Errorf("decompression failed: %w", decompErr)
-		}
 		if tarErr != nil {
 			errMsg := fmt.Sprintf("tar extract failed: %v", tarErr)
+			if decompErr != nil {
+				errMsg += fmt.Sprintf(" (decompression: %v)", decompErr)
+			}
 			result.Errors = append(result.Errors, errMsg)
 			s.logger.Error("Restore failed", map[string]interface{}{"error": errMsg})
 			return result, fmt.Errorf("restore failed: %w", tarErr)
@@ -615,8 +612,10 @@ func calculateChecksum(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// BrowseCatalog returns files in a backup set, optionally filtered by path prefix
-func (s *Service) BrowseCatalog(ctx context.Context, backupSetID int64, pathPrefix string, limit int) ([]models.CatalogEntry, error) {
+// BrowseCatalog returns files in a backup set, optionally filtered by path prefix.
+// A limit of 0 means no limit (return all matching entries). offset is the number
+// of rows to skip and is only applied when limit > 0.
+func (s *Service) BrowseCatalog(ctx context.Context, backupSetID int64, pathPrefix string, limit, offset int) ([]models.CatalogEntry, error) {
 	query := `
 		SELECT id, backup_set_id, file_path, file_size,
 		       COALESCE(file_mode, 0), COALESCE(mod_time, ''),
@@ -631,8 +630,15 @@ func (s *Service) BrowseCatalog(ctx context.Context, backupSetID int64, pathPref
 		args = append(args, pathPrefix+"%")
 	}
 
-	query += " ORDER BY file_path LIMIT ?"
-	args = append(args, limit)
+	query += " ORDER BY file_path"
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+		if offset > 0 {
+			query += " OFFSET ?"
+			args = append(args, offset)
+		}
+	}
 
 	rows, err := s.db.Query(query, args...)
 	if err != nil {

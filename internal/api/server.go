@@ -3447,10 +3447,22 @@ func (s *Server) handleListBackupFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	prefix := r.URL.Query().Get("prefix")
-	limit := 100
+
+	limit := 0 // default: no limit – return all catalog entries
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	offset := 0
+	if o := r.URL.Query().Get("offset"); o != "" {
+		if parsed, err := strconv.Atoi(o); err == nil && parsed > 0 {
+			offset = parsed
+		}
+	}
 
 	ctx := r.Context()
-	entries, err := s.restoreService.BrowseCatalog(ctx, id, prefix, limit)
+	entries, err := s.restoreService.BrowseCatalog(ctx, id, prefix, limit, offset)
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -3568,8 +3580,21 @@ func (s *Server) handleBrowseCatalog(w http.ResponseWriter, r *http.Request) {
 
 	prefix := r.URL.Query().Get("prefix")
 
+	limit := 0 // default: no limit – return all catalog entries
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	offset := 0
+	if o := r.URL.Query().Get("offset"); o != "" {
+		if parsed, err := strconv.Atoi(o); err == nil && parsed > 0 {
+			offset = parsed
+		}
+	}
+
 	ctx := r.Context()
-	entries, err := s.restoreService.BrowseCatalog(ctx, backupSetID, prefix, 100)
+	entries, err := s.restoreService.BrowseCatalog(ctx, backupSetID, prefix, limit, offset)
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
 		return
