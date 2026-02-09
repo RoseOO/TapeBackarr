@@ -1335,7 +1335,12 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		relPath, _ := filepath.Rel(source.Path, f.Path)
 		// Look up checksum from the catalog entry we just inserted
 		var checksum string
-		_ = s.db.QueryRow("SELECT COALESCE(checksum, '') FROM catalog_entries WHERE backup_set_id = ? AND file_path = ?", backupSetID, relPath).Scan(&checksum)
+		if err := s.db.QueryRow("SELECT COALESCE(checksum, '') FROM catalog_entries WHERE backup_set_id = ? AND file_path = ?", backupSetID, relPath).Scan(&checksum); err != nil {
+			s.logger.Warn("Failed to look up checksum for TOC entry", map[string]interface{}{
+				"file":  relPath,
+				"error": err.Error(),
+			})
+		}
 		tocBackupSet.Files = append(tocBackupSet.Files, tape.TOCFileEntry{
 			Path:     relPath,
 			Size:     f.Size,
