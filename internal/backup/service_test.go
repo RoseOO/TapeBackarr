@@ -543,6 +543,44 @@ func TestEventCallback(t *testing.T) {
 	}
 }
 
+func TestBackupFailureEmitsErrorEvent(t *testing.T) {
+	svc := NewService(nil, nil, nil, 65536)
+
+	var receivedEvents []string
+	svc.EventCallback = func(eventType, category, title, message string) {
+		receivedEvents = append(receivedEvents, eventType+":"+title+":"+message)
+	}
+
+	// Register a job
+	svc.mu.Lock()
+	svc.activeJobs[1] = &JobProgress{
+		JobID:   1,
+		JobName: "test-job",
+		Phase:   "initializing",
+		Status:  "running",
+	}
+	svc.mu.Unlock()
+
+	// Failed phase should emit error event
+	svc.updateProgress(1, "failed", "Failed to create backup set: some db error")
+
+	if len(receivedEvents) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(receivedEvents))
+	}
+	if receivedEvents[0] != "error:Backup: failed:Failed to create backup set: some db error" {
+		t.Errorf("unexpected event: %s", receivedEvents[0])
+	}
+
+	// Direct emitEvent for backup failure should also work
+	svc.emitEvent("error", "backup", "Backup Failed", "Job test-job failed: some error")
+	if len(receivedEvents) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(receivedEvents))
+	}
+	if receivedEvents[1] != "error:Backup Failed:Job test-job failed: some error" {
+		t.Errorf("unexpected event: %s", receivedEvents[1])
+	}
+}
+
 func TestCountingReader(t *testing.T) {
 	data := []byte("hello world test data for counting")
 	reader := bytes.NewReader(data)
