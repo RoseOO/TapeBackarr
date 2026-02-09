@@ -324,7 +324,7 @@ export async function getRestorePlan(backupSetId: number, filePaths?: string[], 
   });
 }
 
-export async function runRestore(data: { backup_set_id: number; file_paths?: string[]; dest_path: string; verify?: boolean; overwrite?: boolean }) {
+export async function runRestore(data: { backup_set_id: number; file_paths?: string[]; dest_path: string; verify?: boolean; overwrite?: boolean; drive_id?: number }) {
   return fetchApi('/restore/run', {
     method: 'POST',
     body: JSON.stringify(data),
