@@ -23,8 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Drive scanning and auto-detection
 - Tape inspection (view contents from web UI)
 - Batch tape labeling from drives
+- Batch tape labeling from tapes route with prefix/numbering support
+- Batch tape status/pool update endpoint
 - Scan tape for database backups
 - Job control: cancel, pause, resume running backup jobs
+- Job retry with optional resume from checkpoint
+- Resumable jobs listing endpoint
+- Backup set deletion endpoint
 - Active jobs listing endpoint
 - Tape recommendation for backup jobs
 - Backup set file listing
@@ -33,6 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tape pool reuse rules and allocation policies
 - Tape encryption key fingerprint tracking on tape records
 - Drive vendor field for hardware identification
+- Drive statistics tracking (bytes read/written, errors, load count, temperature)
+- Drive health alerts with severity levels and resolution tracking
+- Drive cleaning and retension operations
+- Tape library (autochanger) support: create, scan, inventory, load, unload, transfer
+- Tape library slot tracking with barcode matching
+- Per-tape Table of Contents (TOC) written as JSON after backup data for self-describing tapes
+- Multi-tape spanning with per-tape TOC and spanning set metadata
 - CONTRIBUTING.md guidelines
 - SECURITY.md policy
 - CHANGELOG.md version history
