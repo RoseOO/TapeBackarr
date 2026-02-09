@@ -289,6 +289,7 @@ func (s *Server) setupRoutes() {
 		r.Route("/api/v1/restore", func(r chi.Router) {
 			r.Post("/plan", s.handleRestorePlan)
 			r.Post("/run", s.handleRunRestore)
+			r.Post("/raw-read", s.handleRawReadTape)
 		})
 
 		// Logs
@@ -3737,6 +3738,37 @@ func (s *Server) handleRunRestore(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	result, err := s.restoreService.Restore(ctx, &req)
 	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleRawReadTape(w http.ResponseWriter, r *http.Request) {
+	var req restore.RawReadRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.DriveID == 0 {
+		s.respondError(w, http.StatusBadRequest, "drive_id is required")
+		return
+	}
+	if req.DestPath == "" {
+		s.respondError(w, http.StatusBadRequest, "dest_path is required")
+		return
+	}
+
+	ctx := r.Context()
+	result, err := s.restoreService.RawReadTape(ctx, &req)
+	if err != nil {
+		// If we have a partial result with some files, return it with the error info
+		if result != nil && result.FilesFound > 0 {
+			s.respondJSON(w, http.StatusOK, result)
+			return
+		}
 		s.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

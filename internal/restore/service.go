@@ -964,3 +964,222 @@ func (s *Service) GetFolderContents(ctx context.Context, backupSetID int64, fold
 
 	return files, subfolders, nil
 }
+
+// RawReadRequest represents a request to read a tape without a known backup set.
+// This allows reading unknown tapes or tapes not tracked in the database.
+type RawReadRequest struct {
+	DriveID   int64  `json:"drive_id"`
+	DestPath  string `json:"dest_path"`
+	Overwrite bool   `json:"overwrite"`
+}
+
+// RawReadResult contains detailed information about what was read from the tape.
+type RawReadResult struct {
+	HasHeader     bool            `json:"has_header"`
+	TapeLabel     string          `json:"tape_label,omitempty"`
+	TapeUUID      string          `json:"tape_uuid,omitempty"`
+	TapePool      string          `json:"tape_pool,omitempty"`
+	LabelTime     int64           `json:"label_time,omitempty"`
+	Encryption    string          `json:"encryption,omitempty"`
+	Compression   string          `json:"compression,omitempty"`
+	FilesFound    int64           `json:"files_found"`
+	BytesRestored int64           `json:"bytes_restored"`
+	StartTime     time.Time       `json:"start_time"`
+	EndTime       time.Time       `json:"end_time"`
+	Errors        []string        `json:"errors,omitempty"`
+	LogMessages   []string        `json:"log_messages"`
+	FileList      []RawReadFile   `json:"file_list,omitempty"`
+}
+
+// RawReadFile describes a single file discovered and restored from a raw tape read.
+type RawReadFile struct {
+	Path string `json:"path"`
+	Size int64  `json:"size"`
+}
+
+// resolveDriveDevicePathByID looks up the device path for a specific drive ID.
+func (s *Service) resolveDriveDevicePathByID(driveID int64) (string, error) {
+	var devicePath string
+	err := s.db.QueryRow(
+		"SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1",
+		driveID,
+	).Scan(&devicePath)
+	if err != nil {
+		return "", fmt.Errorf("drive not found or not enabled: %w", err)
+	}
+	return devicePath, nil
+}
+
+// RawReadTape reads a tape in full without requiring it to be tracked in the database.
+// It attempts to detect a TapeBackarr header and uses it if present; otherwise it
+// reads the tape from the beginning as raw tar data. This supports reading unknown
+// tapes or tapes whose metadata is no longer in the database.
+func (s *Service) RawReadTape(ctx context.Context, req *RawReadRequest) (*RawReadResult, error) {
+	result := &RawReadResult{
+		StartTime:   time.Now(),
+		LogMessages: []string{},
+	}
+
+	addLog := func(msg string) {
+		result.LogMessages = append(result.LogMessages, fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), msg))
+		if s.logger != nil {
+			s.logger.Info(msg, nil)
+		}
+	}
+
+	// --- Step 1: Resolve drive device path ---
+	devicePath, err := s.resolveDriveDevicePathByID(req.DriveID)
+	if err != nil {
+		return nil, err
+	}
+	addLog(fmt.Sprintf("Using tape drive: %s", devicePath))
+
+	// Create a drive-specific tape service
+	driveSvc := tape.NewServiceForDevice(devicePath, s.blockSize)
+
+	// --- Step 2: Wait for tape to be ready ---
+	addLog("Waiting for tape to be ready...")
+	if err := driveSvc.WaitForTape(ctx, tapeReadyTimeout); err != nil {
+		return nil, fmt.Errorf("tape not ready: %w", err)
+	}
+	addLog("Tape drive is online and ready")
+
+	// --- Step 3: Try to read TapeBackarr header ---
+	addLog("Attempting to read TapeBackarr header from tape...")
+	label, labelErr := driveSvc.ReadTapeLabel(ctx)
+	if labelErr != nil {
+		addLog(fmt.Sprintf("Could not read tape header: %s (will try reading as raw data)", labelErr.Error()))
+	} else if label != nil && label.Label != "" {
+		result.HasHeader = true
+		result.TapeLabel = label.Label
+		result.TapeUUID = label.UUID
+		result.TapePool = label.Pool
+		result.LabelTime = label.Timestamp
+		result.Encryption = label.EncryptionKeyFingerprint
+		result.Compression = label.CompressionType
+
+		addLog(fmt.Sprintf("TapeBackarr header found! Label: %s, UUID: %s, Pool: %s",
+			label.Label, label.UUID, label.Pool))
+		if label.Timestamp > 0 {
+			ts := time.Unix(label.Timestamp, 0)
+			addLog(fmt.Sprintf("Tape was written at: %s", ts.Format("2006-01-02 15:04:05 MST")))
+		}
+		if label.EncryptionKeyFingerprint != "" {
+			addLog(fmt.Sprintf("Encryption fingerprint: %s", label.EncryptionKeyFingerprint))
+		}
+		if label.CompressionType != "" {
+			addLog(fmt.Sprintf("Compression type: %s", label.CompressionType))
+		}
+	} else {
+		addLog("No TapeBackarr header detected - tape may be from another system or blank")
+	}
+
+	// --- Step 4: Ensure destination directory exists ---
+	if err := os.MkdirAll(req.DestPath, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create destination directory: %w", err)
+	}
+	addLog(fmt.Sprintf("Destination directory: %s", req.DestPath))
+
+	// --- Step 5: Position tape for reading ---
+	if result.HasHeader {
+		// Tape has our header at file 0 - seek past it to file 1 where data lives
+		addLog("Positioning tape past header to data section (file 1)...")
+		if err := driveSvc.SeekToFileNumber(ctx, 1); err != nil {
+			addLog(fmt.Sprintf("Failed to seek to file 1: %s, rewinding to start", err.Error()))
+			if rwErr := driveSvc.Rewind(ctx); rwErr != nil {
+				return nil, fmt.Errorf("failed to rewind tape: %w", rwErr)
+			}
+		}
+	} else {
+		// No header - rewind and read from beginning
+		addLog("Rewinding tape to beginning for full read...")
+		if err := driveSvc.Rewind(ctx); err != nil {
+			return nil, fmt.Errorf("failed to rewind tape: %w", err)
+		}
+	}
+
+	// --- Step 6: Extract data from tape using verbose tar ---
+	addLog("Starting data extraction from tape...")
+
+	tarArgs := []string{
+		"-x",  // Extract
+		"-v",  // Verbose - list each file as it's extracted
+		"-f", devicePath,
+		"-C", req.DestPath,
+	}
+	if s.blockSize > 0 {
+		tarArgs = append(tarArgs, "-b", fmt.Sprintf("%d", s.blockSize/512))
+	}
+	if req.Overwrite {
+		tarArgs = append(tarArgs, "--overwrite")
+	} else {
+		tarArgs = append(tarArgs, "--keep-old-files")
+	}
+
+	cmd := exec.CommandContext(ctx, "tar", tarArgs...)
+	var tarStdout, tarStderr bytes.Buffer
+	cmd.Stdout = &tarStdout
+	cmd.Stderr = &tarStderr
+
+	tarErr := cmd.Run()
+
+	// Parse verbose output to get the list of extracted files
+	if tarStdout.Len() > 0 {
+		for _, line := range strings.Split(strings.TrimSpace(tarStdout.String()), "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" {
+				result.FileList = append(result.FileList, RawReadFile{Path: line})
+				addLog(fmt.Sprintf("Extracted: %s", line))
+			}
+		}
+	}
+
+	if tarErr != nil {
+		errMsg := fmt.Sprintf("tar extract encountered an issue: %s", cmdutil.ErrorDetail(tarErr, &tarStderr))
+		addLog(errMsg)
+		result.Errors = append(result.Errors, errMsg)
+		// If no files were extracted at all, return the error
+		if len(result.FileList) == 0 {
+			addLog("No files could be extracted - the tape may be encrypted, compressed, or not in tar format")
+			result.EndTime = time.Now()
+			return result, fmt.Errorf("failed to read tape: %s", errMsg)
+		}
+		// Some files were extracted before the error - continue with partial results
+		addLog("Partial extraction completed - some files were recovered before the error")
+	}
+
+	// --- Step 7: Walk destination to count files and bytes ---
+	addLog("Scanning extracted files...")
+	filepath.Walk(req.DestPath, func(path string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			result.FilesFound++
+			result.BytesRestored += info.Size()
+		}
+		return nil
+	})
+
+	// Update file sizes in the file list
+	for i := range result.FileList {
+		fullPath := filepath.Join(req.DestPath, result.FileList[i].Path)
+		if info, err := os.Stat(fullPath); err == nil {
+			result.FileList[i].Size = info.Size()
+		}
+	}
+
+	result.EndTime = time.Now()
+	duration := result.EndTime.Sub(result.StartTime)
+	addLog(fmt.Sprintf("Raw read completed: %d files, %d bytes in %s",
+		result.FilesFound, result.BytesRestored, duration.Round(time.Millisecond)))
+
+	// Log audit entry
+	details := fmt.Sprintf("Raw tape read: %d files to %s", result.FilesFound, req.DestPath)
+	if result.HasHeader {
+		details = fmt.Sprintf("Raw tape read (label=%s): %d files to %s", result.TapeLabel, result.FilesFound, req.DestPath)
+	}
+	s.db.Exec(`
+		INSERT INTO audit_logs (action, resource_type, resource_id, details)
+		VALUES (?, ?, ?, ?)
+	`, "raw_read", "tape_drive", req.DriveID, details)
+
+	return result, nil
+}

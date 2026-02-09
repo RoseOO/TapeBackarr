@@ -82,6 +82,57 @@
     overwrite: false,
   };
 
+  // Raw Read Tape state
+  interface RawReadFile {
+    path: string;
+    size: number;
+  }
+  interface RawReadResult {
+    has_header: boolean;
+    tape_label?: string;
+    tape_uuid?: string;
+    tape_pool?: string;
+    label_time?: number;
+    encryption?: string;
+    compression?: string;
+    files_found: number;
+    bytes_restored: number;
+    start_time: string;
+    end_time: string;
+    errors?: string[];
+    log_messages: string[];
+    file_list?: RawReadFile[];
+  }
+  let showRawRead = false;
+  let rawReadRunning = false;
+  let rawReadResult: RawReadResult | null = null;
+  let rawReadError = '';
+  let rawReadDriveId: number | null = null;
+  let rawReadDestPath = '/restore/raw-read';
+  let rawReadOverwrite = false;
+
+  async function handleRawReadTape() {
+    if (rawReadDriveId === null) {
+      rawReadError = 'Please select a tape drive';
+      return;
+    }
+    rawReadRunning = true;
+    rawReadError = '';
+    rawReadResult = null;
+    try {
+      const result = await api.rawReadTape({
+        drive_id: rawReadDriveId,
+        dest_path: rawReadDestPath,
+        overwrite: rawReadOverwrite,
+      });
+      rawReadResult = result as RawReadResult;
+    } catch (e) {
+      rawReadError = e instanceof Error ? e.message : 'Raw tape read failed';
+    } finally {
+      rawReadRunning = false;
+    }
+  }
+
   onMount(async () => {
     await Promise.all([loadBackupSets(), loadDrives()]);
   });
@@ -92,6 +143,9 @@
       drives = (Array.isArray(result) ? result : []).filter((d: TapeDrive) => d.enabled);
       if (drives.length > 0 && selectedDriveId === null) {
         selectedDriveId = drives[0].id;
+      }
+      if (drives.length > 0 && rawReadDriveId === null) {
+        rawReadDriveId = drives[0].id;
       }
     } catch (e) {
       // Drives are optional; don't block restore if they fail to load
@@ -352,6 +406,139 @@
         </tbody>
       </table>
     </div>
+  {/if}
+</div>
+
+<!-- Raw Read Tape Section -->
+<div class="card raw-read-section">
+  <div class="raw-read-header" on:click={() => showRawRead = !showRawRead} role="button" tabindex="0" on:keydown={(e) => e.key === 'Enter' && (showRawRead = !showRawRead)}>
+    <h2>📼 Raw Read Tape</h2>
+    <span class="raw-read-toggle">{showRawRead ? '▲' : '▼'}</span>
+  </div>
+  <p class="raw-read-hint">Read a tape directly without requiring it to be in the database. Supports unknown tapes and tapes from other systems.</p>
+
+  {#if showRawRead}
+    <div class="raw-read-form">
+      <div class="form-row">
+        <label for="raw-drive">Tape Drive</label>
+        <select id="raw-drive" bind:value={rawReadDriveId}>
+          {#each drives as drive}
+            <option value={drive.id}>{drive.display_name || drive.device_path} ({drive.status})</option>
+          {/each}
+        </select>
+      </div>
+      <div class="form-row">
+        <label for="raw-dest">Destination Path</label>
+        <input id="raw-dest" type="text" bind:value={rawReadDestPath} placeholder="/restore/raw-read" />
+      </div>
+      <div class="form-row form-checkbox">
+        <label>
+          <input type="checkbox" bind:checked={rawReadOverwrite} />
+          Overwrite existing files
+        </label>
+      </div>
+      <button class="btn btn-primary" on:click={handleRawReadTape} disabled={rawReadRunning || drives.length === 0}>
+        {#if rawReadRunning}
+          🔄 Reading tape...
+        {:else}
+          📼 Read Tape
+        {/if}
+      </button>
+      {#if drives.length === 0}
+        <p class="raw-read-warning">No tape drives available. Please configure a tape drive first.</p>
+      {/if}
+    </div>
+
+    {#if rawReadError}
+      <div class="raw-read-error">
+        <span class="error-icon">⚠️</span>
+        <p>{rawReadError}</p>
+      </div>
+    {/if}
+
+    {#if rawReadRunning}
+      <div class="raw-read-progress">
+        <div class="running-bar"><div class="running-bar-fill"></div></div>
+        <p>Reading tape — this may take a while depending on tape size...</p>
+      </div>
+    {/if}
+
+    {#if rawReadResult}
+      <div class="raw-read-results">
+        <h3>📊 Read Results</h3>
+
+        <!-- Tape Header Info -->
+        <div class="raw-read-info">
+          {#if rawReadResult.has_header}
+            <div class="info-badge info-badge-success">✅ TapeBackarr Header Detected</div>
+            <div class="info-grid">
+              <div class="info-item"><strong>Label:</strong> {rawReadResult.tape_label}</div>
+              <div class="info-item"><strong>UUID:</strong> {rawReadResult.tape_uuid}</div>
+              {#if rawReadResult.tape_pool}<div class="info-item"><strong>Pool:</strong> {rawReadResult.tape_pool}</div>{/if}
+              {#if rawReadResult.label_time}<div class="info-item"><strong>Written:</strong> {new Date(rawReadResult.label_time * 1000).toLocaleString()}</div>{/if}
+              {#if rawReadResult.encryption}<div class="info-item"><strong>Encryption:</strong> {rawReadResult.encryption}</div>{/if}
+              {#if rawReadResult.compression}<div class="info-item"><strong>Compression:</strong> {rawReadResult.compression}</div>{/if}
+            </div>
+          {:else}
+            <div class="info-badge info-badge-warning">ℹ️ No TapeBackarr Header — Unknown or Foreign Tape</div>
+          {/if}
+        </div>
+
+        <!-- Stats -->
+        <div class="raw-read-stats">
+          <div class="stat-item"><strong>{rawReadResult.files_found}</strong> <span>files restored</span></div>
+          <div class="stat-item"><strong>{formatBytes(rawReadResult.bytes_restored)}</strong> <span>total size</span></div>
+          <div class="stat-item"><strong>{((new Date(rawReadResult.end_time).getTime() - new Date(rawReadResult.start_time).getTime()) / 1000).toFixed(1)}s</strong> <span>duration</span></div>
+        </div>
+
+        <!-- Errors if any -->
+        {#if rawReadResult.errors && rawReadResult.errors.length > 0}
+          <div class="raw-read-errors-list">
+            <h4>⚠️ Warnings</h4>
+            {#each rawReadResult.errors as err}
+              <p class="raw-read-error-item">{err}</p>
+            {/each}
+          </div>
+        {/if}
+
+        <!-- File List -->
+        {#if rawReadResult.file_list && rawReadResult.file_list.length > 0}
+          <div class="raw-read-files">
+            <h4>📁 Extracted Files ({rawReadResult.file_list.length})</h4>
+            <div class="raw-read-file-list">
+              <table>
+                <thead>
+                  <tr>
+                    <th>File Path</th>
+                    <th>Size</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each rawReadResult.file_list as file}
+                    <tr>
+                      <td class="file-path-cell">{file.path}</td>
+                      <td>{formatBytes(file.size)}</td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        {/if}
+
+        <!-- Log Messages -->
+        {#if rawReadResult.log_messages && rawReadResult.log_messages.length > 0}
+          <div class="raw-read-log">
+            <h4>📋 Activity Log</h4>
+            <div class="log-output">
+              {#each rawReadResult.log_messages as msg}
+                <div class="log-line">{msg}</div>
+              {/each}
+            </div>
+          </div>
+        {/if}
+      </div>
+    {/if}
   {/if}
 </div>
 
@@ -1479,5 +1666,215 @@
     .filter-bar {
       flex-direction: column;
     }
+  }
+
+  /* Raw Read Tape Section */
+  .raw-read-section {
+    margin-bottom: 1.5rem;
+  }
+
+  .raw-read-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .raw-read-header h2 {
+    margin: 0;
+    font-size: 1rem;
+  }
+
+  .raw-read-toggle {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+  }
+
+  .raw-read-hint {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    margin: 0.25rem 0 0.75rem;
+  }
+
+  .raw-read-form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+  }
+
+  .raw-read-form .form-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .raw-read-form .form-row label {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+
+  .raw-read-form .form-checkbox label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: normal;
+    color: var(--text-primary);
+  }
+
+  .raw-read-warning {
+    font-size: 0.8rem;
+    color: var(--badge-danger-text);
+    margin: 0.25rem 0 0;
+  }
+
+  .raw-read-error {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: var(--badge-danger-bg);
+    color: var(--badge-danger-text);
+    padding: 0.75rem;
+    border-radius: 6px;
+    margin: 0.75rem 0;
+  }
+
+  .raw-read-error p {
+    margin: 0;
+    font-size: 0.85rem;
+  }
+
+  .raw-read-progress {
+    text-align: center;
+    padding: 1rem 0;
+  }
+
+  .raw-read-progress p {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    margin: 0.5rem 0 0;
+  }
+
+  .raw-read-results h3 {
+    margin: 1rem 0 0.75rem;
+    font-size: 1rem;
+  }
+
+  .raw-read-info {
+    margin-bottom: 1rem;
+  }
+
+  .info-badge {
+    display: inline-block;
+    padding: 0.35rem 0.75rem;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+  }
+
+  .info-badge-success {
+    background: var(--badge-success-bg);
+    color: var(--badge-success-text);
+  }
+
+  .info-badge-warning {
+    background: var(--badge-warning-bg);
+    color: var(--badge-warning-text);
+  }
+
+  .info-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+  }
+
+  .info-item {
+    font-size: 0.85rem;
+    color: var(--text-primary);
+    padding: 0.35rem 0;
+  }
+
+  .info-item strong {
+    color: var(--text-secondary);
+  }
+
+  .raw-read-stats {
+    display: flex;
+    gap: 1.5rem;
+    margin-bottom: 1rem;
+    flex-wrap: wrap;
+  }
+
+  .stat-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.15rem;
+  }
+
+  .stat-item strong {
+    font-size: 1.25rem;
+    color: var(--accent-primary);
+  }
+
+  .stat-item span {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+  }
+
+  .raw-read-errors-list {
+    background: var(--badge-danger-bg);
+    border-radius: 6px;
+    padding: 0.75rem;
+    margin-bottom: 1rem;
+  }
+
+  .raw-read-errors-list h4 {
+    margin: 0 0 0.5rem;
+    font-size: 0.85rem;
+  }
+
+  .raw-read-error-item {
+    font-size: 0.8rem;
+    margin: 0.25rem 0;
+    word-break: break-word;
+  }
+
+  .raw-read-files h4, .raw-read-log h4 {
+    margin: 0 0 0.5rem;
+    font-size: 0.9rem;
+  }
+
+  .raw-read-file-list {
+    max-height: 300px;
+    overflow-y: auto;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    margin-bottom: 1rem;
+  }
+
+  .raw-read-file-list table {
+    width: 100%;
+  }
+
+  .log-output {
+    background: var(--code-bg);
+    border-radius: 6px;
+    padding: 0.75rem;
+    max-height: 250px;
+    overflow-y: auto;
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    font-size: 0.75rem;
+    line-height: 1.5;
+  }
+
+  .log-line {
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+    word-break: break-all;
   }
 </style>

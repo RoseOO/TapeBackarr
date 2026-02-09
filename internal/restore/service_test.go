@@ -684,3 +684,112 @@ func TestStartBlockReadFromDB(t *testing.T) {
 		t.Errorf("expected start_block 42, got %d", startBlock)
 	}
 }
+
+func TestRawReadRequestFields(t *testing.T) {
+	req := RawReadRequest{
+		DriveID:   1,
+		DestPath:  "/restore/raw",
+		Overwrite: true,
+	}
+
+	if req.DriveID != 1 {
+		t.Errorf("expected DriveID 1, got %d", req.DriveID)
+	}
+	if req.DestPath != "/restore/raw" {
+		t.Errorf("expected DestPath '/restore/raw', got '%s'", req.DestPath)
+	}
+	if !req.Overwrite {
+		t.Error("expected Overwrite true")
+	}
+}
+
+func TestRawReadResultFields(t *testing.T) {
+	result := RawReadResult{
+		HasHeader:     true,
+		TapeLabel:     "TAPE-001",
+		TapeUUID:      "test-uuid",
+		TapePool:      "pool1",
+		FilesFound:    10,
+		BytesRestored: 50000,
+		LogMessages:   []string{"msg1", "msg2"},
+		FileList: []RawReadFile{
+			{Path: "file1.txt", Size: 1000},
+			{Path: "file2.txt", Size: 2000},
+		},
+	}
+
+	if !result.HasHeader {
+		t.Error("expected HasHeader true")
+	}
+	if result.TapeLabel != "TAPE-001" {
+		t.Errorf("expected TapeLabel 'TAPE-001', got '%s'", result.TapeLabel)
+	}
+	if result.TapeUUID != "test-uuid" {
+		t.Errorf("expected TapeUUID 'test-uuid', got '%s'", result.TapeUUID)
+	}
+	if result.FilesFound != 10 {
+		t.Errorf("expected FilesFound 10, got %d", result.FilesFound)
+	}
+	if len(result.LogMessages) != 2 {
+		t.Errorf("expected 2 log messages, got %d", len(result.LogMessages))
+	}
+	if len(result.FileList) != 2 {
+		t.Errorf("expected 2 files, got %d", len(result.FileList))
+	}
+	if result.FileList[0].Path != "file1.txt" {
+		t.Errorf("expected first file 'file1.txt', got '%s'", result.FileList[0].Path)
+	}
+}
+
+func TestResolveDriveDevicePathByIDFound(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	// Insert an enabled tape drive
+	_, err := db.Exec(`INSERT INTO tape_drives (device_path, display_name, status, enabled) VALUES (?, ?, ?, ?)`,
+		"/dev/nst0", "Drive 0", "ready", 1)
+	if err != nil {
+		t.Fatalf("failed to insert tape drive: %v", err)
+	}
+
+	svc := &Service{db: db, blockSize: 65536}
+
+	devicePath, err := svc.resolveDriveDevicePathByID(1)
+	if err != nil {
+		t.Fatalf("resolveDriveDevicePathByID failed: %v", err)
+	}
+	if devicePath != "/dev/nst0" {
+		t.Errorf("expected /dev/nst0, got %s", devicePath)
+	}
+}
+
+func TestResolveDriveDevicePathByIDNotFound(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	svc := &Service{db: db, blockSize: 65536}
+
+	_, err := svc.resolveDriveDevicePathByID(9999)
+	if err == nil {
+		t.Error("expected error for non-existent drive")
+	}
+}
+
+func TestResolveDriveDevicePathByIDDisabled(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	// Insert a disabled tape drive
+	_, err := db.Exec(`INSERT INTO tape_drives (device_path, display_name, status, enabled) VALUES (?, ?, ?, ?)`,
+		"/dev/nst0", "Drive 0", "ready", 0)
+	if err != nil {
+		t.Fatalf("failed to insert tape drive: %v", err)
+	}
+
+	svc := &Service{db: db, blockSize: 65536}
+
+	_, err = svc.resolveDriveDevicePathByID(1)
+	if err == nil {
+		t.Error("expected error for disabled drive")
+	}
+}

@@ -331,6 +331,13 @@ export async function runRestore(data: { backup_set_id: number; file_paths?: str
   });
 }
 
+export async function rawReadTape(data: { drive_id: number; dest_path: string; overwrite?: boolean }) {
+  return fetchApi('/restore/raw-read', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
 // Logs
 export async function getAuditLogs(limit: number = 100, offset: number = 0) {
   return fetchApi(`/logs/audit?limit=${limit}&offset=${offset}`);
