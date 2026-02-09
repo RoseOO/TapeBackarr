@@ -29,16 +29,102 @@ mt -f /dev/nst0 status
 
 ## Understanding TapeBackarr Tape Format
 
-TapeBackarr writes data to tape in the following format:
+TapeBackarr writes data to tape in a self-describing format:
 
 ```
-[Label Block] [EOF] [Backup Set 1] [EOF] [Backup Set 2] [EOF] ... [EOD]
+[Label Block] [FM] [Backup Data] [FM] [TOC] [FM] [EOD]
+  File #0            File #1           File #2
 ```
 
-- **Label Block**: First 512 bytes contain `TAPEBACKARR|label|timestamp`
-- **EOF**: File mark separator between backup sets
-- **Backup Set**: Standard tar archive of files
+- **Label Block** (File #0): First 512 bytes contain `TAPEBACKARR|label|uuid|pool|timestamp|encryption_fingerprint|compression_type`
+- **FM**: File mark separator between sections
+- **Backup Data** (File #1): Standard tar archive of files (optionally encrypted/compressed)
+- **TOC** (File #2): JSON Table of Contents listing every file in the backup set, including paths, sizes, timestamps, and checksums. This makes the tape self-describing even without access to the TapeBackarr database. Written in 64KB blocks, padded with null bytes.
 - **EOD**: End of Data marker
+
+---
+
+## Reading the Table of Contents (TOC)
+
+The TOC is a JSON document stored at file #2 on the tape. It contains the complete
+file catalog for the backup, allowing you to see what is on the tape without the
+TapeBackarr database and without reading the entire tar archive.
+
+### Quick TOC Read
+
+```bash
+# Rewind and skip to TOC (file #2)
+mt -f /dev/nst0 rewind
+mt -f /dev/nst0 fsf 2
+
+# Read the TOC — strip null padding with tr
+dd if=/dev/nst0 bs=64k 2>/dev/null | tr -d '\0'
+```
+
+### Pretty-Print the TOC
+
+```bash
+mt -f /dev/nst0 rewind
+mt -f /dev/nst0 fsf 2
+dd if=/dev/nst0 bs=64k 2>/dev/null | tr -d '\0' | python3 -m json.tool
+```
+
+### TOC Structure
+
+The TOC is a JSON object with this structure:
+
+```json
+{
+  "magic": "TAPEBACKARR_TOC",
+  "version": 1,
+  "tape_label": "WEEKLY-001",
+  "tape_uuid": "abc-def-123",
+  "pool": "weekly",
+  "created_at": "2026-02-08T10:00:00Z",
+  "backup_sets": [
+    {
+      "file_number": 1,
+      "job_name": "nightly-full",
+      "backup_type": "full",
+      "start_time": "2026-02-08T02:00:00Z",
+      "end_time": "2026-02-08T04:30:00Z",
+      "file_count": 1500,
+      "total_bytes": 52428800,
+      "encrypted": false,
+      "compressed": false,
+      "files": [
+        {
+          "path": "documents/report.pdf",
+          "size": 5000,
+          "mod_time": "2026-02-07T15:00:00Z",
+          "checksum": "dffd6021bb2bd5b0af676290809ec3a53191dd81c7f70a4b28688a362182986f"
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Using the TOC for File Recovery
+
+```bash
+# 1. Read the TOC to find your file
+mt -f /dev/nst0 rewind
+mt -f /dev/nst0 fsf 2
+dd if=/dev/nst0 bs=64k 2>/dev/null | tr -d '\0' | python3 -c "
+import json, sys
+toc = json.load(sys.stdin)
+for bs in toc['backup_sets']:
+    for f in bs['files']:
+        if 'report' in f['path'].lower():
+            print(f'  {f[\"path\"]} ({f[\"size\"]} bytes)')
+"
+
+# 2. Once you know the file is there, extract it from the backup data (file #1)
+mt -f /dev/nst0 rewind
+mt -f /dev/nst0 fsf 1
+tar -xvf /dev/nst0 documents/report.pdf
+```
 
 ---
 

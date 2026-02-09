@@ -1314,6 +1314,46 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		}
 	}
 
+	// Write Table of Contents (TOC) to tape so the tape is self-describing.
+	// The TOC is written as file #2 (after label at #0 and backup data at #1).
+	s.updateProgress(job.ID, "cataloging", "Writing Table of Contents to tape...")
+	tocData := tape.NewTapeTOC(expectedLabel, expectedUUID, "")
+	tocBackupSet := tape.TOCBackupSet{
+		FileNumber:      1,
+		JobName:         job.Name,
+		BackupType:      string(backupType),
+		StartTime:       startTime,
+		EndTime:         time.Now(),
+		FileCount:       int64(len(files)),
+		TotalBytes:      totalBytes,
+		Encrypted:       encrypted,
+		Compressed:      compressed,
+		CompressionType: string(compressionType),
+		Files:           make([]tape.TOCFileEntry, 0, len(files)),
+	}
+	for _, f := range files {
+		relPath, _ := filepath.Rel(source.Path, f.Path)
+		// Look up checksum from the catalog entry we just inserted
+		var checksum string
+		_ = s.db.QueryRow("SELECT COALESCE(checksum, '') FROM catalog_entries WHERE backup_set_id = ? AND file_path = ?", backupSetID, relPath).Scan(&checksum)
+		tocBackupSet.Files = append(tocBackupSet.Files, tape.TOCFileEntry{
+			Path:     relPath,
+			Size:     f.Size,
+			Mode:     f.Mode,
+			ModTime:  f.ModTime.Format(time.RFC3339),
+			Checksum: checksum,
+		})
+	}
+	tocData.BackupSets = append(tocData.BackupSets, tocBackupSet)
+	if err := driveSvc.WriteTOC(ctx, tocData); err != nil {
+		s.logger.Warn("Failed to write TOC to tape", map[string]interface{}{"error": err.Error()})
+	} else {
+		s.logger.Info("TOC written to tape", map[string]interface{}{
+			"file_count": len(files),
+			"tape_label": expectedLabel,
+		})
+	}
+
 	// Save snapshot for future incremental backups
 	snapshotData, _ := s.CreateSnapshot(files)
 	s.db.Exec(`
