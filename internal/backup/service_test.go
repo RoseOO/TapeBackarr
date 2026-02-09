@@ -9,6 +9,7 @@ import (
 	"sort"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/RoseOO/TapeBackarr/internal/models"
 )
@@ -915,5 +916,132 @@ func TestBuildCompressionCmdNone(t *testing.T) {
 	_, err := buildCompressionCmd(ctx, models.CompressionNone)
 	if err == nil {
 		t.Error("expected error for CompressionNone")
+	}
+}
+
+func TestScanSourceProgressCallback(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a directory tree
+	os.MkdirAll(filepath.Join(tmpDir, "dir1"), 0755)
+	os.MkdirAll(filepath.Join(tmpDir, "dir2"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "a.txt"), []byte("hello"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "dir1", "b.txt"), []byte("world!"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "dir2", "c.txt"), []byte("test"), 0644)
+
+	svc := &Service{}
+	source := &models.BackupSource{Path: tmpDir}
+
+	var lastFiles, lastDirs, lastBytes int64
+	cb := func(filesFound, dirsScanned, bytesFound int64) {
+		lastFiles = filesFound
+		lastDirs = dirsScanned
+		lastBytes = bytesFound
+	}
+
+	files, err := svc.ScanSource(context.Background(), source, cb)
+	if err != nil {
+		t.Fatalf("ScanSource failed: %v", err)
+	}
+
+	if len(files) != 3 {
+		t.Fatalf("expected 3 files, got %d", len(files))
+	}
+
+	// Final callback should report all files and dirs
+	if lastFiles != 3 {
+		t.Errorf("expected final callback with 3 files, got %d", lastFiles)
+	}
+	// root + dir1 + dir2 = 3 dirs scanned
+	if lastDirs != 3 {
+		t.Errorf("expected 3 dirs scanned, got %d", lastDirs)
+	}
+	// 5 + 6 + 4 = 15 bytes
+	if lastBytes != 15 {
+		t.Errorf("expected 15 bytes, got %d", lastBytes)
+	}
+}
+
+func TestScanSourceNoCallbackStillWorks(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, "file.txt"), []byte("data"), 0644)
+
+	svc := &Service{}
+	source := &models.BackupSource{Path: tmpDir}
+
+	// No callback — should work without panicking
+	files, err := svc.ScanSource(context.Background(), source)
+	if err != nil {
+		t.Fatalf("ScanSource failed: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(files))
+	}
+}
+
+func TestSpeedTracker(t *testing.T) {
+	st := newSpeedTracker(60 * time.Second)
+	base := time.Now()
+
+	// Single sample — not enough for speed
+	st.Record(base, 0)
+	if st.Speed() != 0 {
+		t.Errorf("expected 0 speed with 1 sample, got %f", st.Speed())
+	}
+
+	// Two samples 10 seconds apart, 10 MB transferred
+	st.Record(base.Add(10*time.Second), 10_000_000)
+	speed := st.Speed()
+	expected := 1_000_000.0 // 10 MB / 10 sec = 1 MB/s
+	if speed < expected*0.9 || speed > expected*1.1 {
+		t.Errorf("expected speed ~%f, got %f", expected, speed)
+	}
+
+	// Add more samples
+	st.Record(base.Add(20*time.Second), 30_000_000)
+	speed = st.Speed()
+	expected = 1_500_000.0 // 30 MB / 20 sec
+	if speed < expected*0.9 || speed > expected*1.1 {
+		t.Errorf("expected speed ~%f, got %f", expected, speed)
+	}
+}
+
+func TestSpeedTrackerWindowExpiry(t *testing.T) {
+	st := newSpeedTracker(10 * time.Second) // short window for testing
+	base := time.Now()
+
+	st.Record(base, 0)
+	st.Record(base.Add(5*time.Second), 5_000_000)
+	// Speed should be 1 MB/s
+	speed := st.Speed()
+	if speed < 900_000 || speed > 1_100_000 {
+		t.Errorf("expected speed ~1MB/s, got %f", speed)
+	}
+
+	// Add sample way past the window — old ones get pruned
+	st.Record(base.Add(20*time.Second), 100_000_000)
+	// Now window only contains samples from t+5 and t+20 => 95MB / 15s
+	speed = st.Speed()
+	expected := 95_000_000.0 / 15.0
+	if speed < expected*0.9 || speed > expected*1.1 {
+		t.Errorf("expected speed ~%f, got %f", expected, speed)
+	}
+}
+
+func TestScanProgressFieldsInJobProgress(t *testing.T) {
+	p := JobProgress{
+		ScanFilesFound:  42,
+		ScanDirsScanned: 10,
+		ScanBytesFound:  123456,
+	}
+
+	if p.ScanFilesFound != 42 {
+		t.Errorf("expected ScanFilesFound 42, got %d", p.ScanFilesFound)
+	}
+	if p.ScanDirsScanned != 10 {
+		t.Errorf("expected ScanDirsScanned 10, got %d", p.ScanDirsScanned)
+	}
+	if p.ScanBytesFound != 123456 {
+		t.Errorf("expected ScanBytesFound 123456, got %d", p.ScanBytesFound)
 	}
 }

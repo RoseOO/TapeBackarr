@@ -56,6 +56,59 @@ type JobProgress struct {
 	StartTime                     time.Time `json:"start_time"`
 	UpdatedAt                     time.Time `json:"updated_at"`
 	LogLines                      []string  `json:"log_lines"`
+	// Scan progress fields (populated during the "scanning" phase)
+	ScanFilesFound int64 `json:"scan_files_found"`
+	ScanDirsScanned int64 `json:"scan_dirs_scanned"`
+	ScanBytesFound int64 `json:"scan_bytes_found"`
+}
+
+// ScanProgressFunc is a callback invoked periodically during ScanSource
+// to report scanning progress (files found, dirs scanned, bytes found).
+type ScanProgressFunc func(filesFound, dirsScanned, bytesFound int64)
+
+// speedSample is a timestamped byte counter snapshot.
+type speedSample struct {
+	time  time.Time
+	bytes int64
+}
+
+// speedTracker computes a rolling-window average write speed.
+type speedTracker struct {
+	window  time.Duration
+	samples []speedSample
+}
+
+func newSpeedTracker(window time.Duration) *speedTracker {
+	return &speedTracker{window: window}
+}
+
+// Record adds a sample and discards entries older than the window.
+func (st *speedTracker) Record(now time.Time, bytes int64) {
+	st.samples = append(st.samples, speedSample{time: now, bytes: bytes})
+	cutoff := now.Add(-st.window)
+	i := 0
+	for i < len(st.samples) && st.samples[i].time.Before(cutoff) {
+		i++
+	}
+	// Keep the most recent pre-cutoff sample as a baseline for the delta.
+	if i > 0 {
+		st.samples = st.samples[i-1:]
+	}
+}
+
+// Speed returns the average bytes/sec over the window.  Returns 0 when
+// fewer than two samples exist or the time span is too short.
+func (st *speedTracker) Speed() float64 {
+	if len(st.samples) < 2 {
+		return 0
+	}
+	first := st.samples[0]
+	last := st.samples[len(st.samples)-1]
+	dt := last.time.Sub(first.time).Seconds()
+	if dt < 1 {
+		return 0
+	}
+	return float64(last.bytes-first.bytes) / dt
 }
 
 // EventCallback is called when backup progress events occur (for SSE/console)
@@ -234,15 +287,6 @@ func (s *Service) updateProgress(jobID int64, phase, message string) {
 		if len(p.LogLines) > 100 {
 			p.LogLines = p.LogLines[len(p.LogLines)-100:]
 		}
-		// Update write speed and ETA
-		elapsed := time.Since(p.StartTime).Seconds()
-		if elapsed > 30 && p.BytesWritten > 0 {
-			p.WriteSpeed = float64(p.BytesWritten) / elapsed
-			remainingBytes := p.TotalBytes - p.BytesWritten
-			if p.WriteSpeed > 0 && remainingBytes > 0 {
-				p.EstimatedSecondsRemaining = float64(remainingBytes) / p.WriteSpeed
-			}
-		}
 	}
 	s.mu.Unlock()
 
@@ -256,8 +300,9 @@ func (s *Service) updateProgress(jobID int64, phase, message string) {
 	s.emitEvent(eventType, "backup", fmt.Sprintf("Backup: %s", phase), message)
 }
 
-// ScanSource scans a backup source and returns file information using concurrent directory traversal
-func (s *Service) ScanSource(ctx context.Context, source *models.BackupSource) ([]FileInfo, error) {
+// ScanSource scans a backup source and returns file information using concurrent directory traversal.
+// An optional progressCb is invoked periodically to report scanning progress.
+func (s *Service) ScanSource(ctx context.Context, source *models.BackupSource, progressCb ...ScanProgressFunc) ([]FileInfo, error) {
 	// Parse include/exclude patterns
 	var includePatterns, excludePatterns []string
 	if source.IncludePatterns != "" {
@@ -267,9 +312,12 @@ func (s *Service) ScanSource(ctx context.Context, source *models.BackupSource) (
 		json.Unmarshal([]byte(source.ExcludePatterns), &excludePatterns)
 	}
 
-	numWorkers := runtime.NumCPU()
-	if numWorkers < 4 {
-		numWorkers = 4
+	// Use more workers than CPUs: on NAS paths the bottleneck is network
+	// latency (each stat blocks ~1-5 ms), so extra goroutines keep many
+	// I/O requests in flight at the same time.
+	numWorkers := runtime.NumCPU() * 2
+	if numWorkers < 8 {
+		numWorkers = 8
 	}
 
 	var (
@@ -279,6 +327,30 @@ func (s *Service) ScanSource(ctx context.Context, source *models.BackupSource) (
 		workerWg sync.WaitGroup
 		dirs     = make(chan string, numWorkers*4)
 	)
+
+	// Atomic counters for scan progress
+	var filesFound int64
+	var dirsScanned int64
+	var bytesFound int64
+	var lastProgressCb int64 // unix nanos, throttle to once per second
+
+	// emitProgress fires the optional progress callback at most once per second.
+	var cb ScanProgressFunc
+	if len(progressCb) > 0 {
+		cb = progressCb[0]
+	}
+	emitProgress := func() {
+		if cb == nil {
+			return
+		}
+		now := time.Now().UnixNano()
+		last := atomic.LoadInt64(&lastProgressCb)
+		if now-last >= int64(time.Second) {
+			if atomic.CompareAndSwapInt64(&lastProgressCb, last, now) {
+				cb(atomic.LoadInt64(&filesFound), atomic.LoadInt64(&dirsScanned), atomic.LoadInt64(&bytesFound))
+			}
+		}
+	}
 
 	// shouldExcludeDir checks if a directory path matches any exclude pattern
 	shouldExcludeDir := func(path string) bool {
@@ -327,6 +399,18 @@ func (s *Service) ScanSource(ctx context.Context, source *models.BackupSource) (
 		return true
 	}
 
+	// readDir reads directory entries without sorting (avoids O(n log n)
+	// overhead of os.ReadDir on directories with many files).
+	readDir := func(dirPath string) ([]os.DirEntry, error) {
+		f, err := os.Open(dirPath)
+		if err != nil {
+			return nil, err
+		}
+		entries, err := f.ReadDir(-1)
+		f.Close()
+		return entries, err
+	}
+
 	// processDir reads a single directory and enqueues subdirectories for workers
 	var processDir func(string)
 	processDir = func(dirPath string) {
@@ -338,7 +422,7 @@ func (s *Service) ScanSource(ctx context.Context, source *models.BackupSource) (
 		default:
 		}
 
-		entries, err := os.ReadDir(dirPath)
+		entries, err := readDir(dirPath)
 		if err != nil {
 			if s.logger != nil {
 				s.logger.Warn("Error accessing path", map[string]interface{}{
@@ -348,6 +432,8 @@ func (s *Service) ScanSource(ctx context.Context, source *models.BackupSource) (
 			}
 			return
 		}
+
+		atomic.AddInt64(&dirsScanned, 1)
 
 		var localFiles []FileInfo
 		for _, entry := range entries {
@@ -386,9 +472,18 @@ func (s *Service) ScanSource(ctx context.Context, source *models.BackupSource) (
 		}
 
 		if len(localFiles) > 0 {
+			var batchBytes int64
+			for _, f := range localFiles {
+				batchBytes += f.Size
+			}
+			atomic.AddInt64(&filesFound, int64(len(localFiles)))
+			atomic.AddInt64(&bytesFound, batchBytes)
+
 			filesMu.Lock()
 			files = append(files, localFiles...)
 			filesMu.Unlock()
+
+			emitProgress()
 		}
 	}
 
@@ -414,6 +509,11 @@ func (s *Service) ScanSource(ctx context.Context, source *models.BackupSource) (
 	}
 
 	workerWg.Wait()
+
+	// Emit final progress callback so the caller sees the completed totals.
+	if cb != nil {
+		cb(atomic.LoadInt64(&filesFound), atomic.LoadInt64(&dirsScanned), atomic.LoadInt64(&bytesFound))
+	}
 
 	return files, ctx.Err()
 }
@@ -1045,7 +1145,19 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 	// Scan source
 	s.updateProgress(job.ID, "scanning", fmt.Sprintf("Scanning source: %s", source.Path))
 	s.logger.Info("Scanning source", map[string]interface{}{"path": source.Path})
-	files, err := s.ScanSource(ctx, source)
+
+	scanCb := ScanProgressFunc(func(filesFound, dirsScanned, bytesFound int64) {
+		s.mu.Lock()
+		if p, ok := s.activeJobs[job.ID]; ok {
+			p.ScanFilesFound = filesFound
+			p.ScanDirsScanned = dirsScanned
+			p.ScanBytesFound = bytesFound
+			p.UpdatedAt = time.Now()
+		}
+		s.mu.Unlock()
+	})
+
+	files, err := s.ScanSource(ctx, source, scanCb)
 	if err != nil {
 		s.updateProgress(job.ID, "failed", fmt.Sprintf("Failed to scan source: %s", err.Error()))
 		s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
@@ -1140,8 +1252,10 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 	}
 	s.mu.Unlock()
 
-	// Progress callback for real-time byte tracking
+	// Progress callback for real-time byte tracking (1-minute rolling average)
+	tracker := newSpeedTracker(60 * time.Second)
 	progressCb := func(bytesWritten int64) {
+		now := time.Now()
 		s.mu.Lock()
 		if p, ok := s.activeJobs[job.ID]; ok {
 			p.BytesWritten = bytesWritten
@@ -1154,26 +1268,27 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 				}
 				p.FileCount = estimatedFiles
 			}
-			elapsed := time.Since(p.StartTime).Seconds()
-			if elapsed > 30 {
-				p.WriteSpeed = float64(bytesWritten) / elapsed
+			tracker.Record(now, bytesWritten)
+			speed := tracker.Speed()
+			if speed > 0 {
+				p.WriteSpeed = speed
 				remainingBytes := p.TotalBytes - bytesWritten
-				if p.WriteSpeed > 0 && remainingBytes > 0 {
-					p.EstimatedSecondsRemaining = float64(remainingBytes) / p.WriteSpeed
+				if remainingBytes > 0 {
+					p.EstimatedSecondsRemaining = float64(remainingBytes) / speed
 				} else {
 					p.EstimatedSecondsRemaining = 0
 				}
 				// Calculate per-tape ETA
-				if p.TapeCapacityBytes > 0 && p.WriteSpeed > 0 {
+				if p.TapeCapacityBytes > 0 {
 					tapeRemaining := p.TapeCapacityBytes - p.TapeUsedBytes - bytesWritten
 					if tapeRemaining > 0 {
-						p.TapeEstimatedSecondsRemaining = float64(tapeRemaining) / p.WriteSpeed
+						p.TapeEstimatedSecondsRemaining = float64(tapeRemaining) / speed
 					} else {
 						p.TapeEstimatedSecondsRemaining = 0
 					}
 				}
 			}
-			p.UpdatedAt = time.Now()
+			p.UpdatedAt = now
 		}
 		s.mu.Unlock()
 	}

@@ -24,6 +24,9 @@
     compression: string;
     start_time: string;
     updated_at: string;
+    scan_files_found: number;
+    scan_dirs_scanned: number;
+    scan_bytes_found: number;
   }
 
   let activeJobs: ActiveJob[] = [];
@@ -123,7 +126,7 @@
                 · Tape ETA: {formatETA(job.tape_estimated_seconds_remaining)}
               {/if}
             {:else if job.phase === 'scanning'}
-              Scanning...
+              {job.scan_files_found || 0} files · {job.scan_dirs_scanned || 0} dirs · {formatBytes(job.scan_bytes_found || 0)}
             {:else if job.phase === 'cataloging'}
               Files: {job.file_count}/{job.total_files}
             {:else}
