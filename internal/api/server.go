@@ -2017,8 +2017,10 @@ func (s *Server) handleDriveStatistics(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	_, err = s.db.Exec(`
 		INSERT INTO drive_statistics (drive_id, total_bytes_read, total_bytes_written, read_errors, write_errors,
-			total_load_count, cleaning_required, power_on_hours, tape_motion_hours, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			total_load_count, cleaning_required, power_on_hours, tape_motion_hours,
+			temperature_c, lifetime_power_cycles, read_compression_pct, write_compression_pct, tape_alert_flags,
+			updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(drive_id) DO UPDATE SET
 			total_bytes_read = excluded.total_bytes_read,
 			total_bytes_written = excluded.total_bytes_written,
@@ -2028,10 +2030,17 @@ func (s *Server) handleDriveStatistics(w http.ResponseWriter, r *http.Request) {
 			cleaning_required = excluded.cleaning_required,
 			power_on_hours = excluded.power_on_hours,
 			tape_motion_hours = excluded.tape_motion_hours,
+			temperature_c = excluded.temperature_c,
+			lifetime_power_cycles = excluded.lifetime_power_cycles,
+			read_compression_pct = excluded.read_compression_pct,
+			write_compression_pct = excluded.write_compression_pct,
+			tape_alert_flags = excluded.tape_alert_flags,
 			updated_at = excluded.updated_at
 	`, driveID, liveStats.TotalBytesRead, liveStats.TotalBytesWritten,
 		liveStats.ReadErrors, liveStats.WriteErrors, liveStats.TotalLoadCount,
-		liveStats.CleaningRequired, liveStats.PowerOnHours, liveStats.TapeMotionHours, now)
+		liveStats.CleaningRequired, liveStats.PowerOnHours, liveStats.TapeMotionHours,
+		liveStats.TemperatureC, liveStats.LifetimePowerCycles,
+		liveStats.ReadCompressionPct, liveStats.WriteCompressionPct, liveStats.TapeAlertFlags, now)
 	if err != nil {
 		// Non-fatal: still return live stats
 		if s.logger != nil {
@@ -2049,23 +2058,36 @@ func (s *Server) handleDriveStatistics(w http.ResponseWriter, r *http.Request) {
 	if liveStats.ReadErrors > 0 {
 		s.createDriveAlertIfNew(driveID, "warning", "errors", fmt.Sprintf("Drive has %d read errors", liveStats.ReadErrors))
 	}
+	if liveStats.TemperatureC > 60 {
+		s.createDriveAlertIfNew(driveID, "critical", "temperature", fmt.Sprintf("Drive temperature is critically high: %d°C", liveStats.TemperatureC))
+	} else if liveStats.TemperatureC > 50 {
+		s.createDriveAlertIfNew(driveID, "warning", "temperature", fmt.Sprintf("Drive temperature is elevated: %d°C", liveStats.TemperatureC))
+	}
+	if liveStats.TapeAlertFlags != "" {
+		s.createDriveAlertIfNew(driveID, "critical", "tape_alert", fmt.Sprintf("Active tape alerts: %s", liveStats.TapeAlertFlags))
+	}
 
 	// Return the live data along with last_cleaned_at from DB
 	var lastCleanedAt *time.Time
 	_ = s.db.QueryRow("SELECT last_cleaned_at FROM drive_statistics WHERE drive_id = ?", driveID).Scan(&lastCleanedAt)
 
 	result := map[string]interface{}{
-		"drive_id":            driveID,
-		"total_bytes_read":    liveStats.TotalBytesRead,
-		"total_bytes_written": liveStats.TotalBytesWritten,
-		"read_errors":         liveStats.ReadErrors,
-		"write_errors":        liveStats.WriteErrors,
-		"total_load_count":    liveStats.TotalLoadCount,
-		"cleaning_required":   liveStats.CleaningRequired,
-		"last_cleaned_at":     lastCleanedAt,
-		"power_on_hours":      liveStats.PowerOnHours,
-		"tape_motion_hours":   liveStats.TapeMotionHours,
-		"updated_at":          now,
+		"drive_id":               driveID,
+		"total_bytes_read":       liveStats.TotalBytesRead,
+		"total_bytes_written":    liveStats.TotalBytesWritten,
+		"read_errors":            liveStats.ReadErrors,
+		"write_errors":           liveStats.WriteErrors,
+		"total_load_count":       liveStats.TotalLoadCount,
+		"cleaning_required":      liveStats.CleaningRequired,
+		"last_cleaned_at":        lastCleanedAt,
+		"power_on_hours":         liveStats.PowerOnHours,
+		"tape_motion_hours":      liveStats.TapeMotionHours,
+		"temperature_c":          liveStats.TemperatureC,
+		"lifetime_power_cycles":  liveStats.LifetimePowerCycles,
+		"read_compression_pct":   liveStats.ReadCompressionPct,
+		"write_compression_pct":  liveStats.WriteCompressionPct,
+		"tape_alert_flags":       liveStats.TapeAlertFlags,
+		"updated_at":             now,
 	}
 	s.respondJSON(w, http.StatusOK, result)
 }
