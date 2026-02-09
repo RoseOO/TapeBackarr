@@ -1312,6 +1312,26 @@ Authorization: Bearer <token>
       "id": "recovery",
       "title": "Manual Recovery",
       "description": "Recover data without TapeBackarr"
+    },
+    {
+      "id": "architecture",
+      "title": "Architecture",
+      "description": "System design and data flows"
+    },
+    {
+      "id": "database",
+      "title": "Database Schema",
+      "description": "Database table definitions"
+    },
+    {
+      "id": "installation",
+      "title": "Installation Guide",
+      "description": "Installation instructions for all deployment methods"
+    },
+    {
+      "id": "proxmox",
+      "title": "Proxmox Guide",
+      "description": "Backup and restore Proxmox VMs and LXCs"
     }
   ]
 }

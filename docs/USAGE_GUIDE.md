@@ -740,6 +740,8 @@ TapeBackarr includes comprehensive documentation accessible directly from the we
 | Manual Recovery | Recover data without TapeBackarr |
 | Architecture | System design and data flows |
 | Database Schema | Database table definitions |
+| Installation Guide | Installation instructions for all deployment methods |
+| Proxmox Guide | Backup and restore Proxmox VMs and LXCs |
 
 ### Manual Recovery Guide
 
