@@ -411,7 +411,7 @@
 
 <!-- Raw Read Tape Section -->
 <div class="card raw-read-section">
-  <div class="raw-read-header" on:click={() => showRawRead = !showRawRead} role="button" tabindex="0" on:keydown={(e) => e.key === 'Enter' && (showRawRead = !showRawRead)}>
+  <div class="raw-read-header" on:click={() => showRawRead = !showRawRead} role="button" tabindex="0" on:keydown={(e) => (e.key === 'Enter' || e.key === ' ') && (showRawRead = !showRawRead)}>
     <h2>📼 Raw Read Tape</h2>
     <span class="raw-read-toggle">{showRawRead ? '▲' : '▼'}</span>
   </div>

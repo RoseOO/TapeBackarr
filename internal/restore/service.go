@@ -1150,13 +1150,15 @@ func (s *Service) RawReadTape(ctx context.Context, req *RawReadRequest) (*RawRea
 
 	// --- Step 7: Walk destination to count files and bytes ---
 	addLog("Scanning extracted files...")
-	filepath.Walk(req.DestPath, func(path string, info os.FileInfo, err error) error {
+	if walkErr := filepath.Walk(req.DestPath, func(path string, info os.FileInfo, err error) error {
 		if err == nil && !info.IsDir() {
 			result.FilesFound++
 			result.BytesRestored += info.Size()
 		}
 		return nil
-	})
+	}); walkErr != nil {
+		addLog(fmt.Sprintf("Warning: error scanning files: %s", walkErr.Error()))
+	}
 
 	// Update file sizes in the file list
 	for i := range result.FileList {
