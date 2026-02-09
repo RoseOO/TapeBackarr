@@ -1362,9 +1362,28 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 	}
 	s.mu.Unlock()
 
-	// Mark drive as busy
-	s.db.Exec("UPDATE tape_drives SET status = 'busy' WHERE current_tape_id = ?", tapeID)
-	defer s.db.Exec("UPDATE tape_drives SET status = 'ready' WHERE current_tape_id = ?", tapeID)
+	// Mark drive as busy - get drive IDs first so we can reliably reset status later
+	// Using current_tape_id to find drives is fragile because current_tape_id can be
+	// cleared or changed during/after backup operations
+	var driveIDs []int64
+	driveRows, driveErr := s.db.Query("SELECT id FROM tape_drives WHERE current_tape_id = ?", tapeID)
+	if driveErr == nil {
+		for driveRows.Next() {
+			var driveID int64
+			if err := driveRows.Scan(&driveID); err == nil {
+				driveIDs = append(driveIDs, driveID)
+			}
+		}
+		driveRows.Close()
+	}
+	for _, driveID := range driveIDs {
+		s.db.Exec("UPDATE tape_drives SET status = 'busy' WHERE id = ?", driveID)
+	}
+	defer func() {
+		for _, driveID := range driveIDs {
+			s.db.Exec("UPDATE tape_drives SET status = 'ready' WHERE id = ?", driveID)
+		}
+	}()
 
 	// Scan source
 	s.updateProgress(job.ID, "scanning", fmt.Sprintf("Scanning source: %s", source.Path))
