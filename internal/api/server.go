@@ -744,20 +744,30 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // Dashboard handlers
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	type PoolStorageStats struct {
+		ID                 int64  `json:"id"`
+		Name               string `json:"name"`
+		TapeCount          int    `json:"tape_count"`
+		TotalCapacityBytes int64  `json:"total_capacity_bytes"`
+		TotalUsedBytes     int64  `json:"total_used_bytes"`
+		TotalFreeBytes     int64  `json:"total_free_bytes"`
+	}
+
 	var stats struct {
-		TotalTapes            int    `json:"total_tapes"`
-		ActiveTapes           int    `json:"active_tapes"`
-		TotalJobs             int    `json:"total_jobs"`
-		RunningJobs           int    `json:"running_jobs"`
-		RecentBackups         int    `json:"recent_backups"`
-		DriveStatus           string `json:"drive_status"`
-		TotalDataBytes        int64  `json:"total_data_bytes"`
-		LoadedTape            string `json:"loaded_tape"`
-		LoadedTapeUUID        string `json:"loaded_tape_uuid"`
-		LoadedTapePool        string `json:"loaded_tape_pool"`
-		LoadedTapeEncrypted   bool   `json:"loaded_tape_encrypted"`
-		LoadedTapeEncKeyFP    string `json:"loaded_tape_enc_key_fingerprint"`
-		LoadedTapeCompression string `json:"loaded_tape_compression"`
+		TotalTapes            int                `json:"total_tapes"`
+		ActiveTapes           int                `json:"active_tapes"`
+		TotalJobs             int                `json:"total_jobs"`
+		RunningJobs           int                `json:"running_jobs"`
+		RecentBackups         int                `json:"recent_backups"`
+		DriveStatus           string             `json:"drive_status"`
+		TotalDataBytes        int64              `json:"total_data_bytes"`
+		LoadedTape            string             `json:"loaded_tape"`
+		LoadedTapeUUID        string             `json:"loaded_tape_uuid"`
+		LoadedTapePool        string             `json:"loaded_tape_pool"`
+		LoadedTapeEncrypted   bool               `json:"loaded_tape_encrypted"`
+		LoadedTapeEncKeyFP    string             `json:"loaded_tape_enc_key_fingerprint"`
+		LoadedTapeCompression string             `json:"loaded_tape_compression"`
+		PoolStorage           []PoolStorageStats `json:"pool_storage"`
 	}
 
 	s.db.QueryRow("SELECT COUNT(*) FROM tapes").Scan(&stats.TotalTapes)
@@ -766,6 +776,29 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	s.db.QueryRow("SELECT COUNT(*) FROM backup_sets WHERE status = 'running'").Scan(&stats.RunningJobs)
 	s.db.QueryRow("SELECT COUNT(*) FROM backup_sets WHERE start_time > datetime('now', '-24 hours')").Scan(&stats.RecentBackups)
 	s.db.QueryRow("SELECT COALESCE(SUM(total_bytes), 0) FROM backup_sets WHERE status = 'completed'").Scan(&stats.TotalDataBytes)
+
+	// Get per-pool storage stats
+	stats.PoolStorage = make([]PoolStorageStats, 0)
+	poolRows, err := s.db.Query(`
+		SELECT tp.id, tp.name,
+		       COUNT(t.id) as tape_count,
+		       COALESCE(SUM(t.capacity_bytes), 0) as total_capacity_bytes,
+		       COALESCE(SUM(t.used_bytes), 0) as total_used_bytes
+		FROM tape_pools tp
+		LEFT JOIN tapes t ON t.pool_id = tp.id
+		GROUP BY tp.id
+		ORDER BY tp.name
+	`)
+	if err == nil {
+		defer poolRows.Close()
+		for poolRows.Next() {
+			var ps PoolStorageStats
+			if err := poolRows.Scan(&ps.ID, &ps.Name, &ps.TapeCount, &ps.TotalCapacityBytes, &ps.TotalUsedBytes); err == nil {
+				ps.TotalFreeBytes = ps.TotalCapacityBytes - ps.TotalUsedBytes
+				stats.PoolStorage = append(stats.PoolStorage, ps)
+			}
+		}
+	}
 
 	// Get drive status and loaded tape label
 	ctx := r.Context()

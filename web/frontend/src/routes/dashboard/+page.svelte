@@ -3,6 +3,15 @@
   import * as api from '$lib/api/client';
   import { dataVersion } from '$lib/stores/livedata';
 
+  interface PoolStorageStats {
+    id: number;
+    name: string;
+    tape_count: number;
+    total_capacity_bytes: number;
+    total_used_bytes: number;
+    total_free_bytes: number;
+  }
+
   interface DashboardStats {
     total_tapes: number;
     active_tapes: number;
@@ -17,6 +26,7 @@
     loaded_tape_encrypted: boolean;
     loaded_tape_enc_key_fingerprint: string;
     loaded_tape_compression: string;
+    pool_storage: PoolStorageStats[];
   }
 
   interface ActiveJob {
@@ -131,6 +141,17 @@
       default: return '⏳';
     }
   }
+
+  function getPoolUsagePercent(pool: PoolStorageStats): number {
+    if (pool.total_capacity_bytes <= 0) return 0;
+    return Math.min(100, (pool.total_used_bytes / pool.total_capacity_bytes) * 100);
+  }
+
+  function getUsageColor(percent: number): string {
+    if (percent >= 90) return 'var(--accent-danger, #dc3545)';
+    if (percent >= 75) return 'var(--accent-warning, #f39c12)';
+    return 'var(--accent-success, #16c784)';
+  }
 </script>
 
 <div class="page-header">
@@ -234,6 +255,41 @@
       </div>
     </div>
   </div>
+
+  {#if stats.pool_storage && stats.pool_storage.length > 0}
+    <div class="pool-storage-section">
+      <h2>Media Pool Storage</h2>
+      <div class="pool-storage-grid">
+        {#each stats.pool_storage as pool}
+          <div class="pool-storage-card">
+            <div class="pool-storage-header">
+              <span class="pool-name">📼 {pool.name}</span>
+              <span class="pool-tape-count">{pool.tape_count} tape{pool.tape_count !== 1 ? 's' : ''}</span>
+            </div>
+            {#if pool.total_capacity_bytes > 0}
+              {@const usagePercent = getPoolUsagePercent(pool)}
+              <div class="pool-storage-bar-container">
+                <div class="pool-storage-bar">
+                  <div
+                    class="pool-storage-fill"
+                    style="width: {usagePercent}%; background: {getUsageColor(usagePercent)}"
+                  ></div>
+                </div>
+                <span class="pool-storage-percent">{usagePercent.toFixed(1)}%</span>
+              </div>
+              <div class="pool-storage-details">
+                <span>Used: {formatBytes(pool.total_used_bytes)}</span>
+                <span>Free: {formatBytes(pool.total_free_bytes)}</span>
+                <span>Total: {formatBytes(pool.total_capacity_bytes)}</span>
+              </div>
+            {:else}
+              <div class="pool-no-capacity">No capacity data — assign tapes to this pool</div>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    </div>
+  {/if}
 
   {#if activeJobs.length > 0}
     <div class="active-operations">
@@ -511,5 +567,88 @@
     font-family: monospace;
     width: 4em;
     text-align: right;
+  }
+
+  .pool-storage-section {
+    margin-top: 1.5rem;
+  }
+
+  .pool-storage-section h2 {
+    margin: 0 0 1rem;
+    font-size: 1rem;
+    color: var(--text-primary);
+  }
+
+  .pool-storage-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1rem;
+  }
+
+  .pool-storage-card {
+    background: var(--bg-card);
+    border-radius: 12px;
+    padding: 1rem;
+    box-shadow: var(--shadow);
+  }
+
+  .pool-storage-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.75rem;
+  }
+
+  .pool-name {
+    font-weight: 600;
+    color: var(--text-primary);
+    font-size: 0.95rem;
+  }
+
+  .pool-tape-count {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+  }
+
+  .pool-storage-bar-container {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .pool-storage-bar {
+    flex: 1;
+    height: 10px;
+    background: var(--bg-input, #333);
+    border-radius: 5px;
+    overflow: hidden;
+  }
+
+  .pool-storage-fill {
+    height: 100%;
+    border-radius: 5px;
+    transition: width 0.5s ease;
+  }
+
+  .pool-storage-percent {
+    font-size: 0.8rem;
+    font-family: monospace;
+    color: var(--text-secondary);
+    width: 4em;
+    text-align: right;
+  }
+
+  .pool-storage-details {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+  }
+
+  .pool-no-capacity {
+    font-size: 0.85rem;
+    color: var(--text-muted, #888);
+    font-style: italic;
   }
 </style>
