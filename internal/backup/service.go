@@ -1957,15 +1957,56 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 				return nil, fmt.Errorf("failed to look up new tape: %w", err)
 			}
 
-			// Find the drive with the new tape loaded
-			if err := s.db.QueryRow("SELECT device_path FROM tape_drives WHERE current_tape_id = ?", currentTapeID).Scan(&devicePath); err != nil {
+			// Find the drive with the new tape by scanning all enabled drives and
+			// reading physical labels, same as the initial tape discovery.
+			foundSpanDrive := false
+
+			// Fast path: try current_tape_id lookup first
+			if err := s.db.QueryRow("SELECT device_path FROM tape_drives WHERE current_tape_id = ? AND COALESCE(enabled, 1) = 1", currentTapeID).Scan(&devicePath); err == nil {
+				probeSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+				physLabel, readErr := probeSvc.ReadTapeLabel(ctx)
+				if readErr == nil && physLabel != nil && physLabel.Label == currentLabel && physLabel.UUID == currentUUID {
+					foundSpanDrive = true
+				}
+			}
+
+			// If fast path failed, scan all enabled drives
+			if !foundSpanDrive {
+				driveRows, driveErr := s.db.Query("SELECT device_path FROM tape_drives WHERE COALESCE(enabled, 1) = 1")
+				if driveErr == nil {
+					for driveRows.Next() {
+						var dp string
+						if err := driveRows.Scan(&dp); err != nil {
+							continue
+						}
+						probeSvc := tape.NewServiceForDevice(dp, s.tapeService.GetBlockSize())
+						loaded, loadErr := probeSvc.IsTapeLoaded(ctx)
+						if loadErr != nil || !loaded {
+							continue
+						}
+						physLabel, readErr := probeSvc.ReadTapeLabel(ctx)
+						if readErr != nil || physLabel == nil {
+							continue
+						}
+						if physLabel.Label == currentLabel && physLabel.UUID == currentUUID {
+							devicePath = dp
+							foundSpanDrive = true
+							s.db.Exec("UPDATE tape_drives SET current_tape_id = ? WHERE device_path = ?", currentTapeID, dp)
+							break
+						}
+					}
+					driveRows.Close()
+				}
+			}
+
+			if !foundSpanDrive {
 				s.updateProgress(job.ID, "failed", "No drive found with new tape "+currentLabel)
 				s.db.Exec("UPDATE tape_spanning_sets SET status = 'failed' WHERE id = ?", spanningSetID)
-				return nil, fmt.Errorf("no drive found with new tape %s: %w", currentLabel, err)
+				return nil, fmt.Errorf("no drive found with new tape %s after scanning all drives", currentLabel)
 			}
 			currentDriveSvc = tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
 
-			// Verify and position the new tape
+			// Final label verification before write — strict check, no fallback
 			physLabel, readErr := currentDriveSvc.ReadTapeLabel(ctx)
 			if readErr != nil || physLabel == nil || physLabel.Label != currentLabel || physLabel.UUID != currentUUID {
 				errMsg := fmt.Sprintf("new tape label verification failed for %s", currentLabel)
