@@ -1239,6 +1239,9 @@ func (s *Service) computeChecksumsAsync(ctx context.Context, files []FileInfo, c
 	var wg sync.WaitGroup
 
 	for _, f := range files {
+		if ctx.Err() != nil {
+			break
+		}
 		select {
 		case <-ctx.Done():
 			break
@@ -1260,7 +1263,10 @@ func (s *Service) computeChecksumsAsync(ctx context.Context, files []FileInfo, c
 			if err == nil {
 				checksums.Store(fi.Path, checksum)
 			}
-			relPath, _ := filepath.Rel(sourcePath, fi.Path)
+			relPath, relErr := filepath.Rel(sourcePath, fi.Path)
+			if relErr != nil {
+				relPath = fi.Path // fall back to absolute path
+			}
 			entryCh <- catalogEntry{relPath: relPath, fi: fi, checksum: checksum}
 		}(f)
 	}
@@ -1976,9 +1982,17 @@ func (s *Service) finishTape(p finishTapeParams) error {
 				return p.ctx.Err()
 			default:
 			}
-			relPath, _ := filepath.Rel(p.source.Path, f.Path)
-			s.db.Exec(`UPDATE catalog_entries SET backup_set_id = ? WHERE backup_set_id = ? AND file_path = ?`,
-				p.backupSetID, p.initialBackupSetID, relPath)
+			relPath, relErr := filepath.Rel(p.source.Path, f.Path)
+			if relErr != nil {
+				relPath = f.Path
+			}
+			if _, err := s.db.Exec(`UPDATE catalog_entries SET backup_set_id = ? WHERE backup_set_id = ? AND file_path = ?`,
+				p.backupSetID, p.initialBackupSetID, relPath); err != nil {
+				s.logger.Warn("Failed to reassign catalog entry", map[string]interface{}{
+					"file":  relPath,
+					"error": err.Error(),
+				})
+			}
 		}
 	}
 

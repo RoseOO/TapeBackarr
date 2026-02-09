@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/RoseOO/TapeBackarr/internal/database"
 	"github.com/RoseOO/TapeBackarr/internal/models"
 )
 
@@ -1173,5 +1174,182 @@ func TestCountingWriter(t *testing.T) {
 	// Verify data was actually written to underlying writer
 	if buf.String() != "hello world more data" {
 		t.Errorf("expected 'hello world more data', got '%s'", buf.String())
+	}
+}
+
+func TestSplitFilesForTape(t *testing.T) {
+	svc := &Service{}
+
+	// Create files of known sizes
+	files := []FileInfo{
+		{Path: "/data/file1.dat", Size: 100_000_000},   // 100 MB
+		{Path: "/data/file2.dat", Size: 200_000_000},   // 200 MB
+		{Path: "/data/file3.dat", Size: 300_000_000},   // 300 MB
+		{Path: "/data/file4.dat", Size: 400_000_000},   // 400 MB
+		{Path: "/data/file5.dat", Size: 500_000_000},   // 500 MB
+	}
+
+	// Total: 1.5 GB. Tape capacity: 1.5 TB (plenty of room).
+	// All files should fit on one tape.
+	thisTape, remaining := svc.splitFilesForTape(files, 1_500_000_000_000)
+	if len(thisTape) != 5 {
+		t.Errorf("expected all 5 files on tape, got %d", len(thisTape))
+	}
+	if remaining != nil {
+		t.Errorf("expected no remaining files, got %d", len(remaining))
+	}
+
+	// Tape capacity: 1 GB. With 1% overhead reserve, usable = 990 MB.
+	// file1 (100M+1K) + file2 (200M+1K) + file3 (300M+1K) = 600M+3K => fits
+	// + file4 (400M+1K) = 1000M+4K => exceeds 990M
+	thisTape, remaining = svc.splitFilesForTape(files, 1_000_000_000)
+	if len(thisTape) != 3 {
+		t.Errorf("expected 3 files on tape with 1GB capacity, got %d", len(thisTape))
+	}
+	if len(remaining) != 2 {
+		t.Errorf("expected 2 remaining files, got %d", len(remaining))
+	}
+}
+
+func TestSplitFilesForTapeMaximizeUsage(t *testing.T) {
+	// Verify the 1% overhead reserve is much tighter than the old 10%.
+	// A 1.5 TB tape should allow ~1.485 TB of file data, not just ~1.35 TB.
+	svc := &Service{}
+
+	tapeCapacity := int64(1_500_000_000_000) // 1.5 TB
+	usableExpected := (tapeCapacity * 99) / 100 // 1.485 TB
+
+	// Create one large file that fits in 99% but not 90%
+	files := []FileInfo{
+		{Path: "/data/bigfile.dat", Size: usableExpected - 2048}, // just under 99% usable
+	}
+	thisTape, remaining := svc.splitFilesForTape(files, tapeCapacity)
+	if len(thisTape) != 1 {
+		t.Error("file should fit with 1% overhead reserve")
+	}
+	if remaining != nil {
+		t.Errorf("expected no remaining, got %d", len(remaining))
+	}
+
+	// With the old 10% reserve, this file would NOT fit:
+	// usable_old = 1.35 TB, file = 1.485 TB - 2KB > 1.35 TB
+	oldUsable := (tapeCapacity * 9) / 10
+	if files[0].Size+1024 <= oldUsable {
+		t.Error("test setup issue: file should exceed old 10% overhead reserve")
+	}
+}
+
+func TestCompressionLTOTreatedAsNoCompression(t *testing.T) {
+	// Verify that CompressionLTO is treated the same as CompressionNone
+	// for the useCompression check (no software compression applied).
+	lto := models.CompressionLTO
+	none := models.CompressionNone
+
+	// Both should result in useCompression == false
+	useLTO := lto != "" && lto != models.CompressionNone && lto != models.CompressionLTO
+	useNone := none != "" && none != models.CompressionNone && none != models.CompressionLTO
+
+	if useLTO {
+		t.Error("CompressionLTO should not trigger software compression")
+	}
+	if useNone {
+		t.Error("CompressionNone should not trigger software compression")
+	}
+
+	// gzip and zstd should trigger software compression
+	useGzip := models.CompressionGzip != "" && models.CompressionGzip != models.CompressionNone && models.CompressionGzip != models.CompressionLTO
+	useZstd := models.CompressionZstd != "" && models.CompressionZstd != models.CompressionNone && models.CompressionZstd != models.CompressionLTO
+
+	if !useGzip {
+		t.Error("CompressionGzip should trigger software compression")
+	}
+	if !useZstd {
+		t.Error("CompressionZstd should trigger software compression")
+	}
+}
+
+func TestComputeChecksumsAsyncWritesCatalogToDB(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a real database
+	dbPath := filepath.Join(tmpDir, "test.db")
+	db, err := database.New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("failed to migrate database: %v", err)
+	}
+
+	// Insert prerequisite records for foreign keys
+	_, err = db.Exec("INSERT INTO tape_pools (name) VALUES ('test-pool')")
+	if err != nil {
+		t.Fatalf("failed to insert pool: %v", err)
+	}
+	_, err = db.Exec("INSERT INTO tapes (uuid, barcode, label, pool_id, status, capacity_bytes, used_bytes) VALUES ('uuid1', 'T001', 'T001', 1, 'active', 1500000000000, 0)")
+	if err != nil {
+		t.Fatalf("failed to insert tape: %v", err)
+	}
+	_, err = db.Exec("INSERT INTO backup_sources (name, source_type, path) VALUES ('test-src', 'local', ?)", tmpDir)
+	if err != nil {
+		t.Fatalf("failed to insert source: %v", err)
+	}
+	_, err = db.Exec("INSERT INTO backup_jobs (name, source_id, pool_id, backup_type, schedule_cron, retention_days) VALUES ('test-job', 1, 1, 'full', '', 30)")
+	if err != nil {
+		t.Fatalf("failed to insert job: %v", err)
+	}
+	result, err := db.Exec("INSERT INTO backup_sets (job_id, tape_id, backup_type, start_time, status) VALUES (1, 1, 'full', CURRENT_TIMESTAMP, 'running')")
+	if err != nil {
+		t.Fatalf("failed to insert backup set: %v", err)
+	}
+	backupSetID, _ := result.LastInsertId()
+
+	// Create test files
+	sourceDir := filepath.Join(tmpDir, "source")
+	os.MkdirAll(sourceDir, 0755)
+	file1 := filepath.Join(sourceDir, "a.txt")
+	file2 := filepath.Join(sourceDir, "b.txt")
+	os.WriteFile(file1, []byte("hello"), 0644)
+	os.WriteFile(file2, []byte("world"), 0644)
+
+	files := []FileInfo{
+		{Path: file1, Size: 5, Mode: 0644, ModTime: time.Now()},
+		{Path: file2, Size: 5, Mode: 0644, ModTime: time.Now()},
+	}
+
+	svc := &Service{db: db}
+	checksums := &sync.Map{}
+
+	// Run computeChecksumsAsync — should write catalog entries to DB
+	svc.computeChecksumsAsync(context.Background(), files, checksums, backupSetID, sourceDir)
+
+	// Verify checksums are in sync.Map
+	if _, ok := checksums.Load(file1); !ok {
+		t.Error("expected checksum for a.txt in sync.Map")
+	}
+	if _, ok := checksums.Load(file2); !ok {
+		t.Error("expected checksum for b.txt in sync.Map")
+	}
+
+	// Verify catalog entries were written to DB
+	var count int
+	err = db.QueryRow("SELECT COUNT(*) FROM catalog_entries WHERE backup_set_id = ?", backupSetID).Scan(&count)
+	if err != nil {
+		t.Fatalf("failed to query catalog entries: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 catalog entries in DB, got %d", count)
+	}
+
+	// Verify checksums are stored in DB entries
+	var checksum string
+	err = db.QueryRow("SELECT checksum FROM catalog_entries WHERE file_path = 'a.txt'").Scan(&checksum)
+	if err != nil {
+		t.Fatalf("failed to query checksum: %v", err)
+	}
+	if len(checksum) != 64 {
+		t.Errorf("expected 64-char SHA256 in DB, got %d chars: %s", len(checksum), checksum)
 	}
 }
