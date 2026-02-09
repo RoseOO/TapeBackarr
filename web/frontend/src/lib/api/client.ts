@@ -72,7 +72,7 @@ export async function createTape(data: { barcode: string; label: string; pool_id
   });
 }
 
-export async function updateTape(id: number, data: { label?: string; pool_id?: number; status?: string; offsite_location?: string }) {
+export async function updateTape(id: number, data: { label?: string; barcode?: string; pool_id?: number; status?: string; offsite_location?: string }) {
   return fetchApi(`/tapes/${id}`, {
     method: 'PUT',
     body: JSON.stringify(data),
@@ -468,6 +468,34 @@ export async function restartService() {
 // Batch label tapes with auto-detect/label/eject loop
 export async function batchLabelTapes(driveId: number, data: { prefix: string; start_number: number; count: number; digits: number; pool_id?: number }) {
   return fetchApi(`/drives/${driveId}/batch-label`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+// Batch label tapes from tapes endpoint
+export async function batchLabelTapesFromTapes(data: { drive_id: number; prefix: string; start_number: number; count: number; digits: number; pool_id?: number }) {
+  return fetchApi('/tapes/batch-label', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+// Get batch label operation status
+export async function getBatchLabelStatus() {
+  return fetchApi('/tapes/batch-label/status');
+}
+
+// Cancel batch label operation
+export async function cancelBatchLabel() {
+  return fetchApi('/tapes/batch-label/cancel', {
+    method: 'POST',
+  });
+}
+
+// Batch update multiple tapes
+export async function batchUpdateTapes(data: { tape_ids: number[]; status?: string; pool_id?: number }) {
+  return fetchApi('/tapes/batch-update', {
     method: 'POST',
     body: JSON.stringify(data),
   });
