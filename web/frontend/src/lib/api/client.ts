@@ -278,6 +278,12 @@ export async function getBackupSet(id: number) {
   return fetchApi(`/backup-sets/${id}`);
 }
 
+export async function deleteBackupSet(id: number) {
+  return fetchApi(`/backup-sets/${id}`, {
+    method: 'DELETE',
+  });
+}
+
 export async function getBackupFiles(id: number, prefix?: string) {
   const params = prefix ? `?prefix=${encodeURIComponent(prefix)}` : '';
   return fetchApi(`/backup-sets/${id}/files${params}`);

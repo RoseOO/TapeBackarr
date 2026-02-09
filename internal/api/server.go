@@ -246,6 +246,7 @@ func (s *Server) setupRoutes() {
 			r.Get("/", s.handleListBackupSets)
 			r.Get("/{id}", s.handleGetBackupSet)
 			r.Get("/{id}/files", s.handleListBackupFiles)
+			r.Delete("/{id}", s.handleDeleteBackupSet)
 		})
 
 		// Catalog
@@ -2745,6 +2746,41 @@ func (s *Server) handleListBackupFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.respondJSON(w, http.StatusOK, entries)
+}
+
+func (s *Server) handleDeleteBackupSet(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid backup set id")
+		return
+	}
+
+	// Check the backup set exists and get its status
+	var status string
+	err = s.db.QueryRow("SELECT status FROM backup_sets WHERE id = ?", id).Scan(&status)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "backup set not found")
+		return
+	}
+
+	// Only allow deletion of failed or completed backup sets
+	if status != "failed" && status != "completed" {
+		s.respondError(w, http.StatusBadRequest, "can only delete failed or completed backup sets")
+		return
+	}
+
+	// Delete catalog entries first (foreign key)
+	s.db.Exec("DELETE FROM catalog_entries WHERE backup_set_id = ?", id)
+
+	// Delete the backup set
+	_, err = s.db.Exec("DELETE FROM backup_sets WHERE id = ?", id)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to delete backup set")
+		return
+	}
+
+	s.auditLog(r, "delete", "backup_set", id, fmt.Sprintf("Deleted backup set #%d (status: %s)", id, status))
+	s.respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 // Catalog handlers

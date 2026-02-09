@@ -169,6 +169,21 @@
       default: return 'badge-info';
     }
   }
+
+  async function handleDeleteBackupSet(set: BackupSet) {
+    if (!confirm(`Delete backup set "${set.job_name}" (${set.status})? This removes the record from the database but does not erase data from tape.`)) return;
+    try {
+      await api.deleteBackupSet(set.id);
+      if (selectedSet?.id === set.id) {
+        selectedSet = null;
+        catalogEntries = [];
+        selectedFiles = [];
+      }
+      await loadBackupSets();
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to delete backup set';
+    }
+  }
 </script>
 
 <div class="page-header">
@@ -256,6 +271,11 @@
               {/if}
               {#if set.compressed}
                 <span class="badge badge-info">{set.compression_type}</span>
+              {/if}
+              {#if set.status === 'failed' || set.status === 'completed'}
+                <button class="btn btn-danger btn-sm" on:click|stopPropagation={() => handleDeleteBackupSet(set)}>
+                  🗑️ Delete
+                </button>
               {/if}
             </div>
           </div>
@@ -467,6 +487,12 @@
     display: flex;
     gap: 0.5rem;
     align-items: center;
+    flex-wrap: wrap;
+  }
+
+  :global(.btn-sm) {
+    padding: 0.2rem 0.5rem;
+    font-size: 0.7rem;
   }
 
   .browser-header {

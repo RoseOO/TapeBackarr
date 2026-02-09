@@ -8,7 +8,6 @@
     { href: '/tapes', label: 'Tapes', icon: '💾' },
     { href: '/pools', label: 'Media Pools', icon: '🗂️' },
     { href: '/drives', label: 'Drives', icon: '🔌' },
-    { href: '/inspect', label: 'Inspect Tape', icon: '🔍' },
     { href: '/jobs', label: 'Backup Jobs', icon: '📦' },
     { href: '/sources', label: 'Sources', icon: '📁' },
     { href: '/restore', label: 'Restore', icon: '🔄' },
@@ -23,13 +22,27 @@
   $: currentPath = $page.url.pathname;
   $: isAdmin = $auth.user?.role === 'admin';
 
+  let mobileOpen = false;
+
   function handleLogout() {
     auth.logout();
     window.location.href = '/login';
   }
+
+  function closeMobile() {
+    mobileOpen = false;
+  }
 </script>
 
-<nav class="sidebar">
+<button class="mobile-toggle" on:click={() => mobileOpen = !mobileOpen} aria-label="Toggle menu">
+  {mobileOpen ? '✕' : '☰'}
+</button>
+
+{#if mobileOpen}
+  <div class="sidebar-overlay" on:click={closeMobile}></div>
+{/if}
+
+<nav class="sidebar" class:open={mobileOpen}>
   <div class="logo">
     <h1>📼 TapeBackarr</h1>
   </div>
@@ -37,7 +50,7 @@
   <ul class="nav-items">
     {#each navItems as item}
       <li class:active={currentPath.startsWith(item.href)}>
-        <a href={item.href}>
+        <a href={item.href} on:click={closeMobile}>
           <span class="icon">{item.icon}</span>
           <span class="label">{item.label}</span>
         </a>
@@ -45,7 +58,7 @@
     {/each}
     {#if isAdmin}
       <li class:active={currentPath.startsWith('/users')}>
-        <a href="/users">
+        <a href="/users" on:click={closeMobile}>
           <span class="icon">👥</span>
           <span class="label">Users</span>
         </a>
@@ -68,6 +81,28 @@
 </nav>
 
 <style>
+  .mobile-toggle {
+    display: none;
+    position: fixed;
+    top: 0.75rem;
+    left: 0.75rem;
+    z-index: 1100;
+    background: #1a1a2e;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    width: 40px;
+    height: 40px;
+    font-size: 1.25rem;
+    cursor: pointer;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .sidebar-overlay {
+    display: none;
+  }
+
   .sidebar {
     width: 240px;
     background: #1a1a2e;
@@ -78,6 +113,7 @@
     position: fixed;
     left: 0;
     top: 0;
+    z-index: 1050;
   }
 
   .logo {
@@ -96,6 +132,7 @@
     padding: 1rem 0;
     margin: 0;
     flex: 1;
+    overflow-y: auto;
   }
 
   .nav-items li {
@@ -179,5 +216,31 @@
 
   .logout-btn:hover {
     background: #ff3333;
+  }
+
+  @media (max-width: 768px) {
+    .mobile-toggle {
+      display: flex;
+    }
+
+    .sidebar-overlay {
+      display: block;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.5);
+      z-index: 1040;
+    }
+
+    .sidebar {
+      transform: translateX(-100%);
+      transition: transform 0.3s ease;
+    }
+
+    .sidebar.open {
+      transform: translateX(0);
+    }
   }
 </style>
