@@ -317,6 +317,17 @@
     }
   }
 
+  async function handleRetry(job: Job) {
+    if (!confirm(`Retry backup job "${job.name}"? This will resume from the last checkpoint if available, or start a fresh backup otherwise.`)) return;
+    try {
+      error = '';
+      await api.retryJob(job.id);
+      await loadActiveJobs();
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to retry job';
+    }
+  }
+
   function openEditModal(job: Job) {
     editJob = job;
     editFormData = {
@@ -521,6 +532,7 @@
               <div class="actions">
                 <button class="btn btn-primary" on:click={() => openEditModal(job)}>Edit</button>
                 <button class="btn btn-success" on:click={() => openRunModal(job)}>Run</button>
+                <button class="btn btn-warning" on:click={() => handleRetry(job)} title="Retry from last checkpoint">Retry</button>
                 <button class="btn btn-secondary" on:click={() => handleToggle(job)}>
                   {job.enabled ? 'Disable' : 'Enable'}
                 </button>

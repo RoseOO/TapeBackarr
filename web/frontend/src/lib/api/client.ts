@@ -185,6 +185,17 @@ export async function resumeJob(id: number) {
   return fetchApi(`/jobs/${id}/resume`, { method: 'POST' });
 }
 
+export async function retryJob(id: number, options?: { tape_id?: number; use_pool?: boolean; from_scratch?: boolean }) {
+  return fetchApi(`/jobs/${id}/retry`, {
+    method: 'POST',
+    body: JSON.stringify(options || {}),
+  });
+}
+
+export async function getResumableJobs() {
+  return fetchApi('/jobs/resumable');
+}
+
 // Scan for available tape drives
 export async function scanDrives() {
   return fetchApi('/drives/scan');

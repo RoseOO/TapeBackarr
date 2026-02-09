@@ -104,6 +104,7 @@ type Service struct {
 	activeJobs    map[int64]*JobProgress
 	cancelFuncs   map[int64]context.CancelFunc
 	pauseFlags    map[int64]*int32
+	resumeFiles   map[int64][]string // files already processed for resume
 	EventCallback EventCallback
 }
 
@@ -117,6 +118,7 @@ func NewService(db *database.DB, tapeService *tape.Service, logger *logging.Logg
 		activeJobs:  make(map[int64]*JobProgress),
 		cancelFuncs: make(map[int64]context.CancelFunc),
 		pauseFlags:  make(map[int64]*int32),
+		resumeFiles: make(map[int64][]string),
 	}
 }
 
@@ -149,7 +151,7 @@ func (s *Service) CancelJob(jobID int64) bool {
 	return false
 }
 
-// PauseJob pauses a running backup job
+// PauseJob pauses a running backup job and persists state to database for restart resilience
 func (s *Service) PauseJob(jobID int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -160,6 +162,9 @@ func (s *Service) PauseJob(jobID int64) bool {
 			p.Message = "Job paused by user"
 			p.UpdatedAt = time.Now()
 			p.LogLines = append(p.LogLines, fmt.Sprintf("[%s] Job paused by user", time.Now().Format("15:04:05")))
+
+			// Persist pause state to database for server restart resilience
+			s.saveJobExecutionState(jobID, p)
 		}
 		return true
 	}
@@ -1037,6 +1042,36 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		}
 	}
 
+	// Filter out already-processed files when resuming from a checkpoint
+	s.mu.Lock()
+	resumeFiles := s.resumeFiles[job.ID]
+	s.mu.Unlock()
+	if len(resumeFiles) > 0 {
+		processedSet := make(map[string]bool, len(resumeFiles))
+		for _, f := range resumeFiles {
+			processedSet[f] = true
+		}
+		var remaining []FileInfo
+		for _, f := range files {
+			relPath, err := filepath.Rel(source.Path, f.Path)
+			if err != nil {
+				// If we can't compute relative path, include the file to be safe
+				remaining = append(remaining, f)
+				continue
+			}
+			if !processedSet[relPath] {
+				remaining = append(remaining, f)
+			}
+		}
+		skipped := len(files) - len(remaining)
+		s.updateProgress(job.ID, "scanning", fmt.Sprintf("Resuming: skipping %d already-processed files, %d remaining", skipped, len(remaining)))
+		s.logger.Info("Resume checkpoint applied", map[string]interface{}{
+			"skipped":   skipped,
+			"remaining": len(remaining),
+		})
+		files = remaining
+	}
+
 	// Calculate total size
 	var totalBytes int64
 	for _, f := range files {
@@ -1170,6 +1205,15 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 	var compressionType models.CompressionType
 	useCompression := job.Compression != "" && job.Compression != models.CompressionNone
 
+	// streamFailed is a helper to save state on stream failure for retry capability
+	streamFailed := func(errMsg string) {
+		s.mu.Lock()
+		if p, ok := s.activeJobs[job.ID]; ok {
+			s.saveFailedJobState(job.ID, p, errMsg)
+		}
+		s.mu.Unlock()
+	}
+
 	if job.EncryptionEnabled && job.EncryptionKeyID != nil {
 		// Get encryption key
 		encKey, err := s.GetEncryptionKey(ctx, *job.EncryptionKeyID)
@@ -1189,6 +1233,7 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 				s.updateProgress(job.ID, "failed", "Stream failed: "+err.Error())
 				s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
 				s.emitEvent("error", "backup", "Backup Failed", fmt.Sprintf("Job %s failed: %s", job.Name, err.Error()))
+				streamFailed(err.Error())
 				return nil, fmt.Errorf("failed to stream compressed encrypted backup to tape: %w", err)
 			}
 			compressed = true
@@ -1199,6 +1244,7 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 				s.updateProgress(job.ID, "failed", "Stream failed: "+err.Error())
 				s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
 				s.emitEvent("error", "backup", "Backup Failed", fmt.Sprintf("Job %s failed: %s", job.Name, err.Error()))
+				streamFailed(err.Error())
 				return nil, fmt.Errorf("failed to stream encrypted backup to tape: %w", err)
 			}
 		}
@@ -1210,6 +1256,7 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 			s.updateProgress(job.ID, "failed", "Stream failed: "+err.Error())
 			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
 			s.emitEvent("error", "backup", "Backup Failed", fmt.Sprintf("Job %s failed: %s", job.Name, err.Error()))
+			streamFailed(err.Error())
 			return nil, fmt.Errorf("failed to stream compressed backup to tape: %w", err)
 		}
 		compressed = true
@@ -1219,6 +1266,7 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 			s.updateProgress(job.ID, "failed", "Stream failed: "+err.Error())
 			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
 			s.emitEvent("error", "backup", "Backup Failed", fmt.Sprintf("Job %s failed: %s", job.Name, err.Error()))
+			streamFailed(err.Error())
 			return nil, fmt.Errorf("failed to stream to tape: %w", err)
 		}
 	}
@@ -1360,6 +1408,151 @@ func (s *Service) updateBackupSetStatus(id int64, status models.BackupSetStatus,
 			"error":         errorMsg,
 		})
 	}
+}
+
+// ResumeState represents the persisted state of a paused/failed backup job for resume capability
+type ResumeState struct {
+	FilesProcessed []string `json:"files_processed"` // Relative paths of files already backed up
+	BytesWritten   int64    `json:"bytes_written"`
+	TotalFiles     int64    `json:"total_files"`
+	TotalBytes     int64    `json:"total_bytes"`
+	TapeID         int64    `json:"tape_id"`
+	BackupSetID    int64    `json:"backup_set_id"`
+}
+
+// saveJobExecutionState persists the current job progress to the database so it can survive server restarts
+func (s *Service) saveJobExecutionState(jobID int64, p *JobProgress) {
+	if s.db == nil {
+		return
+	}
+
+	// Build resume state from current progress
+	state := ResumeState{
+		BytesWritten: p.BytesWritten,
+		TotalFiles:   p.TotalFiles,
+		TotalBytes:   p.TotalBytes,
+		BackupSetID:  p.BackupSetID,
+	}
+
+	// Collect processed files from catalog entries if we have a backup set ID
+	if p.BackupSetID > 0 {
+		rows, err := s.db.Query("SELECT file_path FROM catalog_entries WHERE backup_set_id = ?", p.BackupSetID)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var filePath string
+				if rows.Scan(&filePath) == nil {
+					state.FilesProcessed = append(state.FilesProcessed, filePath)
+				}
+			}
+		}
+	}
+
+	stateJSON, err := json.Marshal(state)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("Failed to marshal resume state", map[string]interface{}{
+				"job_id": jobID,
+				"error":  err.Error(),
+			})
+		}
+		return
+	}
+
+	// Upsert into job_executions
+	_, err = s.db.Exec(`
+		INSERT INTO job_executions (job_id, backup_set_id, status, files_processed, bytes_processed, can_resume, resume_state)
+		VALUES (?, ?, 'paused', ?, ?, 1, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			status = 'paused', files_processed = excluded.files_processed,
+			bytes_processed = excluded.bytes_processed, can_resume = 1,
+			resume_state = excluded.resume_state, updated_at = CURRENT_TIMESTAMP
+	`, jobID, p.BackupSetID, p.FileCount, p.BytesWritten, string(stateJSON))
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("Failed to save job execution state", map[string]interface{}{
+				"job_id": jobID,
+				"error":  err.Error(),
+			})
+		}
+	}
+}
+
+// saveFailedJobState saves state for a failed job so it can be retried
+func (s *Service) saveFailedJobState(jobID int64, p *JobProgress, errorMessage string) {
+	if s.db == nil {
+		return
+	}
+
+	state := ResumeState{
+		BytesWritten: p.BytesWritten,
+		TotalFiles:   p.TotalFiles,
+		TotalBytes:   p.TotalBytes,
+		BackupSetID:  p.BackupSetID,
+	}
+
+	if p.BackupSetID > 0 {
+		rows, err := s.db.Query("SELECT file_path FROM catalog_entries WHERE backup_set_id = ?", p.BackupSetID)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var filePath string
+				if rows.Scan(&filePath) == nil {
+					state.FilesProcessed = append(state.FilesProcessed, filePath)
+				}
+			}
+		}
+	}
+
+	stateJSON, err := json.Marshal(state)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("Failed to marshal failed job resume state", map[string]interface{}{
+				"job_id": jobID,
+				"error":  err.Error(),
+			})
+		}
+		return
+	}
+
+	s.db.Exec(`
+		INSERT INTO job_executions (job_id, backup_set_id, status, files_processed, bytes_processed, error_message, can_resume, resume_state)
+		VALUES (?, ?, 'failed', ?, ?, ?, 1, ?)
+	`, jobID, p.BackupSetID, p.FileCount, p.BytesWritten, errorMessage, string(stateJSON))
+}
+
+// RunBackupWithResume runs a backup that resumes from a previous checkpoint, skipping already-processed files
+func (s *Service) RunBackupWithResume(ctx context.Context, job *models.BackupJob, source *models.BackupSource, tapeID int64, backupType models.BackupType, resumeStateJSON string) (*models.BackupSet, error) {
+	var state ResumeState
+	if err := json.Unmarshal([]byte(resumeStateJSON), &state); err != nil {
+		// If resume state is invalid, fall back to full backup
+		if s.logger != nil {
+			s.logger.Warn("Invalid resume state, starting fresh backup", map[string]interface{}{
+				"job_id": job.ID,
+				"error":  err.Error(),
+			})
+		}
+		return s.RunBackup(ctx, job, source, tapeID, backupType)
+	}
+
+	if len(state.FilesProcessed) == 0 {
+		// No files were processed, just run normally
+		return s.RunBackup(ctx, job, source, tapeID, backupType)
+	}
+
+	// Store the set of already-processed files for filtering
+	s.mu.Lock()
+	s.resumeFiles[job.ID] = state.FilesProcessed
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.resumeFiles, job.ID)
+		s.mu.Unlock()
+	}()
+
+	s.emitEvent("info", "backup", "Backup Resuming", fmt.Sprintf("Resuming backup job: %s (skipping %d already-processed files)", job.Name, len(state.FilesProcessed)))
+
+	return s.RunBackup(ctx, job, source, tapeID, backupType)
 }
 
 // ListBackupSets returns backup sets with optional filters

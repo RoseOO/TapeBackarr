@@ -10,6 +10,9 @@
     allow_reuse: boolean;
     allocation_policy: string;
     tape_count: number;
+    total_capacity_bytes: number;
+    total_used_bytes: number;
+    total_free_bytes: number;
     created_at: string;
   }
 
@@ -130,6 +133,19 @@
     const years = Math.floor(days / 365);
     return `${years} year${years > 1 ? 's' : ''}`;
   }
+
+  function formatBytes(bytes: number): string {
+    if (bytes === 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+    const k = 1024;
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + units[i];
+  }
+
+  function usagePercent(pool: Pool): number {
+    if (!pool.total_capacity_bytes || pool.total_capacity_bytes === 0) return 0;
+    return Math.min(100, Math.round((pool.total_used_bytes / pool.total_capacity_bytes) * 100));
+  }
 </script>
 
 <div class="page-header">
@@ -184,6 +200,25 @@
             <span class="stat-value">{pool.allocation_policy || 'continue'}</span>
           </div>
         </div>
+        {#if pool.total_capacity_bytes > 0}
+          <div class="storage-section">
+            <div class="storage-header">
+              <span class="stat-label">Storage</span>
+              <span class="storage-summary">{formatBytes(pool.total_used_bytes)} / {formatBytes(pool.total_capacity_bytes)} ({usagePercent(pool)}%)</span>
+            </div>
+            <div class="storage-bar">
+              <div class="storage-bar-fill" style="width: {usagePercent(pool)}%"></div>
+            </div>
+            <div class="storage-detail">
+              <span>{formatBytes(pool.total_free_bytes)} free</span>
+            </div>
+          </div>
+        {:else if pool.tape_count > 0}
+          <div class="storage-section">
+            <span class="stat-label">Storage</span>
+            <span class="storage-summary">No capacity data</span>
+          </div>
+        {/if}
       </div>
     {:else}
       <div class="card">
@@ -415,5 +450,47 @@
 
   .checkbox-group input[type="checkbox"] {
     width: auto;
+  }
+
+  .storage-section {
+    margin-top: 0.75rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid #eee;
+  }
+
+  .storage-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.25rem;
+  }
+
+  .storage-summary {
+    font-size: 0.8rem;
+    color: #555;
+    font-weight: 500;
+  }
+
+  .storage-bar {
+    width: 100%;
+    height: 8px;
+    background: #e9ecef;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+
+  .storage-bar-fill {
+    height: 100%;
+    background: #4a9eff;
+    border-radius: 4px;
+    transition: width 0.3s ease;
+  }
+
+  .storage-detail {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 0.25rem;
+    font-size: 0.75rem;
+    color: #888;
   }
 </style>
