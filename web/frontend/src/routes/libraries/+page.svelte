@@ -233,14 +233,6 @@
     return new Date(d).toLocaleString();
   }
 
-  function getSlotIcon(slotType: string): string {
-    switch (slotType) {
-      case 'drive': return '🔌';
-      case 'import_export': return '📬';
-      default: return '📦';
-    }
-  }
-
   function isLibraryAlreadyAdded(devicePath: string): boolean {
     return libraries.some(l => l.device_path === devicePath);
   }

@@ -44,11 +44,17 @@ export function invalidateData(...categories: string[]) {
 
 // Hook into the existing notification store's SSE connection.
 // When notifications arrive, we invalidate relevant data categories.
-let lastProcessedId = '';
+const recentlyProcessed = new Set<string>();
+const MAX_RECENT = 100;
 
 export function processSSEEvent(event: { category?: string; type?: string; id?: string }) {
-  if (!event.id || event.id === lastProcessedId) return;
-  lastProcessedId = event.id;
+  if (!event.id || recentlyProcessed.has(event.id)) return;
+  recentlyProcessed.add(event.id);
+  // Keep set bounded
+  if (recentlyProcessed.size > MAX_RECENT) {
+    const first = recentlyProcessed.values().next().value;
+    if (first !== undefined) recentlyProcessed.delete(first);
+  }
 
   const sseCategory = event.category || '';
   const targets = categoryMap[sseCategory] || ['dashboard'];

@@ -60,7 +60,7 @@
   let tapes: any[] = [];
   let pools: any[] = [];
 
-  let jobForm = {
+  const defaultJobForm = {
     name: '',
     vmids: '',
     schedule_cron: '0 2 * * *',
@@ -72,6 +72,8 @@
     notify_on_failure: true,
     notes: '',
   };
+
+  let jobForm = { ...defaultJobForm };
 
   onMount(async () => {
     await loadData();
@@ -175,7 +177,7 @@
   }
 
   function resetJobForm() {
-    jobForm = { name: '', vmids: '', schedule_cron: '0 2 * * *', pool_id: 0, compression: 'zstd', backup_mode: 'snapshot', retention_days: 30, notify_on_success: false, notify_on_failure: true, notes: '' };
+    jobForm = { ...defaultJobForm };
   }
 
   async function handleDeleteJob(id: number) {
@@ -411,7 +413,7 @@
               <td><strong>{job.name}</strong></td>
               <td><code>{job.vmids || 'All'}</code></td>
               <td><code>{job.schedule_cron || 'Manual'}</code></td>
-              <td>{job.backup_mode || job.compression || '-'}</td>
+              <td>{job.backup_mode || '-'}</td>
               <td>{job.pool_name || (job.pool_id ? `Pool #${job.pool_id}` : 'None')}</td>
               <td>{job.retention_days ? `${job.retention_days}d` : '-'}</td>
               <td>

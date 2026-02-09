@@ -2785,7 +2785,9 @@ func (s *Server) handleDeleteBackupSet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Delete catalog entries first (foreign key)
-	s.db.Exec("DELETE FROM catalog_entries WHERE backup_set_id = ?", id)
+	if _, err := s.db.Exec("DELETE FROM catalog_entries WHERE backup_set_id = ?", id); err != nil {
+		s.logger.Warn("failed to delete catalog entries for backup set", map[string]interface{}{"backup_set_id": id, "error": err.Error()})
+	}
 
 	// Delete the backup set
 	_, err = s.db.Exec("DELETE FROM backup_sets WHERE id = ?", id)
@@ -6080,7 +6082,7 @@ func (s *Server) handleScanLibraries(w http.ResponseWriter, r *http.Request) {
 	cmd := exec.Command("lsscsi", "--generic")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		// Fallback: look for /dev/sg* or /dev/sch* devices
+		s.logger.Warn("lsscsi scan failed", map[string]interface{}{"error": err.Error()})
 		s.respondJSON(w, http.StatusOK, []map[string]string{})
 		return
 	}
@@ -6314,6 +6316,16 @@ func parseMtxStatus(output string) []map[string]string {
 	var slots []map[string]string
 	lines := strings.Split(output, "\n")
 
+	extractBarcode := func(line, prefix string) string {
+		if idx := strings.Index(line, prefix); idx >= 0 {
+			bc := strings.TrimSpace(line[idx+len(prefix):])
+			// Remove any trailing whitespace or non-printable chars
+			bc = strings.Fields(bc)[0]
+			return bc
+		}
+		return ""
+	}
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 
@@ -6332,8 +6344,9 @@ func parseMtxStatus(output string) []map[string]string {
 			if strings.Contains(line, "Full") {
 				slot["is_empty"] = "false"
 			}
-			if idx := strings.Index(line, "VolumeTag = "); idx >= 0 {
-				slot["barcode"] = strings.TrimSpace(line[idx+len("VolumeTag = "):])
+			slot["barcode"] = extractBarcode(line, "VolumeTag = ")
+			if slot["barcode"] == "" {
+				slot["barcode"] = extractBarcode(line, "VolumeTag=")
 			}
 			slots = append(slots, slot)
 
@@ -6352,8 +6365,9 @@ func parseMtxStatus(output string) []map[string]string {
 			if strings.Contains(line, "Full") {
 				slot["is_empty"] = "false"
 			}
-			if idx := strings.Index(line, "VolumeTag="); idx >= 0 {
-				slot["barcode"] = strings.TrimSpace(line[idx+len("VolumeTag="):])
+			slot["barcode"] = extractBarcode(line, "VolumeTag=")
+			if slot["barcode"] == "" {
+				slot["barcode"] = extractBarcode(line, "VolumeTag = ")
 			}
 			slots = append(slots, slot)
 
@@ -6371,8 +6385,9 @@ func parseMtxStatus(output string) []map[string]string {
 			if strings.Contains(line, "Full") {
 				slot["is_empty"] = "false"
 			}
-			if idx := strings.Index(line, "VolumeTag="); idx >= 0 {
-				slot["barcode"] = strings.TrimSpace(line[idx+len("VolumeTag="):])
+			slot["barcode"] = extractBarcode(line, "VolumeTag=")
+			if slot["barcode"] == "" {
+				slot["barcode"] = extractBarcode(line, "VolumeTag = ")
 			}
 			slots = append(slots, slot)
 		}
