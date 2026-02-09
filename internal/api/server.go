@@ -651,7 +651,28 @@ func (s *Server) telegramActiveCommand() string {
 		if j.Status == "paused" {
 			msg += " [PAUSED]"
 		}
-		msg += fmt.Sprintf("\n  Phase: %s", j.Phase)
+
+		// Phase-specific icon
+		phaseIcon := "📝"
+		switch j.Phase {
+		case "streaming":
+			phaseIcon = "📼"
+		case "scanning":
+			phaseIcon = "🔍"
+		case "cataloging":
+			phaseIcon = "📋"
+		case "waiting":
+			phaseIcon = "⏳"
+		case "positioning":
+			phaseIcon = "⏩"
+		case "initializing":
+			phaseIcon = "⚙️"
+		case "completed":
+			phaseIcon = "✅"
+		case "failed":
+			phaseIcon = "❌"
+		}
+		msg += fmt.Sprintf("\n  %s Phase: %s", phaseIcon, j.Phase)
 
 		// Tape info
 		if j.TapeLabel != "" {
@@ -684,27 +705,32 @@ func (s *Server) telegramActiveCommand() string {
 		// Written
 		msg += fmt.Sprintf("\n  Written: %s / %s", telegramFormatBytes(j.BytesWritten), telegramFormatBytes(j.TotalBytes))
 
-		// Speed
-		if j.WriteSpeed > 0 {
-			msg += fmt.Sprintf("\n  Speed: %s/s", telegramFormatBytes(int64(j.WriteSpeed)))
+		// Speed and ETAs — only meaningful during streaming phase
+		if j.Phase == "cataloging" {
+			msg += fmt.Sprintf("\n  📋 Cataloging %d/%d files...", j.FileCount, j.TotalFiles)
 		} else {
-			msg += "\n  Speed: ---"
-		}
+			// Speed
+			if j.WriteSpeed > 0 {
+				msg += fmt.Sprintf("\n  Speed: %s/s", telegramFormatBytes(int64(j.WriteSpeed)))
+			} else {
+				msg += "\n  Speed: ---"
+			}
 
-		// Job ETA
-		if j.EstimatedSecondsRemaining > 0 {
-			msg += fmt.Sprintf("\n  Job ETA: %s", telegramFormatDuration(time.Duration(j.EstimatedSecondsRemaining)*time.Second))
-		} else {
-			msg += "\n  Job ETA: ---"
-		}
+			// Job ETA
+			if j.EstimatedSecondsRemaining > 0 {
+				msg += fmt.Sprintf("\n  Job ETA: %s", telegramFormatDuration(time.Duration(j.EstimatedSecondsRemaining)*time.Second))
+			} else {
+				msg += "\n  Job ETA: ---"
+			}
 
-		// Tape ETA
-		if j.TapeEstimatedSecondsRemaining > 0 {
-			msg += fmt.Sprintf("\n  Tape ETA: %s", telegramFormatDuration(time.Duration(j.TapeEstimatedSecondsRemaining)*time.Second))
-		}
+			// Tape ETA
+			if j.TapeEstimatedSecondsRemaining > 0 {
+				msg += fmt.Sprintf("\n  Tape ETA: %s", telegramFormatDuration(time.Duration(j.TapeEstimatedSecondsRemaining)*time.Second))
+			}
 
-		// Files
-		msg += fmt.Sprintf("\n  Files: %d/%d", j.FileCount, j.TotalFiles)
+			// Files
+			msg += fmt.Sprintf("\n  Files: %d/%d", j.FileCount, j.TotalFiles)
+		}
 
 		// Tape space
 		if j.TapeCapacityBytes > 0 {
