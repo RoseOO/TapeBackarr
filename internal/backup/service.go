@@ -144,6 +144,12 @@ func buildCompressionCmd(ctx context.Context, compression models.CompressionType
 // lock contention in the hot data path, and throttles the progress callback
 // to fire at most once per second to reduce overhead from mutex acquisition,
 // time.Now() calls, and float math in the callback.
+//
+// countingReader also implements io.WriterTo so that when Go's exec package
+// uses io.Copy to relay data (e.g. when set as Cmd.Stdin), a 256KB buffer
+// is used instead of io.Copy's default 32KB. This is critical for tape
+// streaming performance: the larger buffer reduces syscall overhead in the
+// tar → mbuffer → tape pipeline and keeps the mbuffer fed at full speed.
 type countingReader struct {
 	reader       io.Reader
 	count        int64 // accessed atomically
@@ -172,6 +178,47 @@ func (cr *countingReader) Read(p []byte) (int, error) {
 		}
 	}
 	return n, err
+}
+
+// WriteTo implements io.WriterTo so that io.Copy (used internally by Go's
+// exec package to relay data when Cmd.Stdin is not an *os.File) transfers
+// data in 256KB chunks instead of the default 32KB. This keeps the mbuffer
+// fed faster and prevents tape shoe-shining during streaming.
+func (cr *countingReader) WriteTo(w io.Writer) (int64, error) {
+	buf := make([]byte, 256*1024) // 256KB — matches typical LTO block size
+	var total int64
+	for {
+		for cr.paused != nil && atomic.LoadInt32(cr.paused) == 1 {
+			time.Sleep(100 * time.Millisecond)
+		}
+		nr, readErr := cr.reader.Read(buf)
+		if nr > 0 {
+			newTotal := atomic.AddInt64(&cr.count, int64(nr))
+			if cr.callback != nil {
+				now := time.Now().UnixNano()
+				last := atomic.LoadInt64(&cr.lastCallback)
+				if now-last >= int64(time.Second) {
+					if atomic.CompareAndSwapInt64(&cr.lastCallback, last, now) {
+						cr.callback(newTotal)
+					}
+				}
+			}
+			nw, writeErr := w.Write(buf[:nr])
+			total += int64(nw)
+			if writeErr != nil {
+				return total, writeErr
+			}
+			if nw != nr {
+				return total, io.ErrShortWrite
+			}
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				return total, nil
+			}
+			return total, readErr
+		}
+	}
 }
 
 func (cr *countingReader) bytesRead() int64 {
@@ -1210,10 +1257,11 @@ func (s *Service) CalculateChecksum(path string) (string, error) {
 // cataloging" state for large file counts. The TOC file list is written to
 // tape separately at the end by finishTape.
 func (s *Service) computeChecksumsAsync(ctx context.Context, files []FileInfo, checksums *sync.Map, backupSetID int64, sourcePath string) {
-	numWorkers := runtime.NumCPU()
-	if numWorkers < 4 {
-		numWorkers = 4
-	}
+	// Use at most 2 workers to avoid I/O contention with the concurrent tape
+	// streaming pipeline (tar reads the same files from disk). More workers
+	// would create random I/O patterns that destroy sequential read throughput,
+	// especially on HDDs — the exact symptom that causes slow tape writes.
+	numWorkers := 2
 
 	type catalogEntry struct {
 		relPath  string

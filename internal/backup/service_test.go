@@ -670,6 +670,44 @@ func TestCountingReaderThrottledCallback(t *testing.T) {
 	}
 }
 
+func TestCountingReaderWriteTo(t *testing.T) {
+	// Verify that WriteTo transfers all data, counts bytes accurately,
+	// and fires the progress callback. WriteTo is used by Go's exec
+	// package (via io.Copy) when countingReader is set as Cmd.Stdin.
+	data := make([]byte, 512*1024) // 512KB
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+	reader := bytes.NewReader(data)
+
+	var lastCount int64
+	cr := &countingReader{
+		reader: reader,
+		callback: func(bytesRead int64) {
+			atomic.StoreInt64(&lastCount, bytesRead)
+		},
+	}
+
+	var dst bytes.Buffer
+	n, err := cr.WriteTo(&dst)
+	if err != nil {
+		t.Fatalf("WriteTo error: %v", err)
+	}
+	if n != int64(len(data)) {
+		t.Errorf("WriteTo returned %d bytes, expected %d", n, len(data))
+	}
+	if cr.bytesRead() != int64(len(data)) {
+		t.Errorf("bytesRead() = %d, expected %d", cr.bytesRead(), len(data))
+	}
+	if dst.Len() != len(data) {
+		t.Errorf("destination has %d bytes, expected %d", dst.Len(), len(data))
+	}
+	// Verify data integrity
+	if !bytes.Equal(dst.Bytes(), data) {
+		t.Error("destination data does not match source")
+	}
+}
+
 func TestJobProgressFields(t *testing.T) {
 	p := JobProgress{
 		JobID:                     1,
