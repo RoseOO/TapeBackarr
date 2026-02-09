@@ -331,7 +331,7 @@
           <button class="btn btn-secondary btn-sm" on:click={() => { transferForm = { source_slot: 0, dest_slot: 0 }; showTransferModal = true; }}>
             🔀 Transfer
           </button>
-          <button class="btn btn-secondary btn-sm" on:click={() => runInventory(selectedLibrary)} disabled={inventoryRunning}>
+          <button class="btn btn-secondary btn-sm" on:click={() => { if (selectedLibrary) runInventory(selectedLibrary); }} disabled={inventoryRunning}>
             🔄 Refresh
           </button>
         </div>
