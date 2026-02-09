@@ -3,11 +3,13 @@ package proxmox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/RoseOO/TapeBackarr/internal/database"
@@ -258,7 +260,12 @@ func (s *RestoreService) extractFromTape(ctx context.Context, devicePath, destPa
 	cmd := exec.CommandContext(ctx, "tar", tarArgs...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("tar extract failed: %s", string(output))
+		detail := strings.TrimSpace(string(output))
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return fmt.Errorf("tar extract failed (exit code %d): %s", exitErr.ExitCode(), detail)
+		}
+		return fmt.Errorf("tar extract failed: %s", detail)
 	}
 
 	return nil
@@ -331,7 +338,16 @@ func (s *RestoreService) performRestore(ctx context.Context, req *RestoreRequest
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("restore command failed: %s", string(output))
+		detail := strings.TrimSpace(string(output))
+		cmdName := "qmrestore"
+		if guestType != GuestTypeVM {
+			cmdName = "pct restore"
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return fmt.Errorf("%s failed (exit code %d): %s", cmdName, exitErr.ExitCode(), detail)
+		}
+		return fmt.Errorf("%s failed: %s", cmdName, detail)
 	}
 
 	return nil
@@ -451,7 +467,12 @@ func (s *RestoreService) StreamRestoreFromReader(ctx context.Context, r io.Reade
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("tar extract failed: %s", string(output))
+		detail := strings.TrimSpace(string(output))
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return fmt.Errorf("tar extract failed (exit code %d): %s", exitErr.ExitCode(), detail)
+		}
+		return fmt.Errorf("tar extract failed: %s", detail)
 	}
 
 	return nil

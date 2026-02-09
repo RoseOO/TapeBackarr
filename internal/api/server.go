@@ -4182,7 +4182,13 @@ func (s *Server) handleRestoreDatabaseBackup(w http.ResponseWriter, r *http.Requ
 	cmd := exec.CommandContext(ctx, "tar", tarArgs...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		s.respondError(w, http.StatusInternalServerError, "restore failed: "+string(output))
+		detail := strings.TrimSpace(string(output))
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			s.respondError(w, http.StatusInternalServerError, fmt.Sprintf("database restore failed (exit code %d): %s", exitErr.ExitCode(), detail))
+		} else {
+			s.respondError(w, http.StatusInternalServerError, fmt.Sprintf("database restore failed: %s", detail))
+		}
 		return
 	}
 
