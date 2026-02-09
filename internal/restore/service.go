@@ -410,18 +410,26 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 	}
 
 	if encrypted && compressed {
-		// For compressed+encrypted backups: openssl dec | decompress | tar
+		// For compressed+encrypted backups: tape -> openssl dec -> decompress -> tar
 		s.logger.Info("Using encrypted+compressed restore pipeline", map[string]interface{}{
 			"compression_type": compressionType,
 		})
+
+		// Open tape device for reading and feed data into the pipeline
+		tapeFile, err := os.Open(devicePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open tape device: %w", err)
+		}
+		defer tapeFile.Close()
+
 		opensslCmd := exec.CommandContext(ctx, "openssl", "enc",
 			"-d", // Decrypt
 			"-aes-256-cbc",
 			"-pbkdf2",
 			"-iter", "100000",
 			"-pass", "pass:"+encryptionKey,
-			"-in", devicePath,
 		)
+		opensslCmd.Stdin = tapeFile
 
 		decompCmd, err := buildDecompressionCmd(ctx, models.CompressionType(compressionType))
 		if err != nil {
@@ -436,7 +444,7 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 		decompCmd.Stderr = &decompStderr
 		tarCmd.Stderr = &tarStderr
 
-		// Pipeline: openssl -> decompress -> tar
+		// Pipeline: tape -> openssl -> decompress -> tar
 		opensslPipe, err := opensslCmd.StdoutPipe()
 		if err != nil {
 			return nil, fmt.Errorf("failed to create openssl pipe: %w", err)
@@ -484,16 +492,24 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 			return result, fmt.Errorf("restore failed: %s", errMsg)
 		}
 	} else if encrypted {
-		// For encrypted-only backups (no compression): openssl dec | tar
+		// For encrypted-only backups (no compression): tape -> openssl dec -> tar
 		s.logger.Info("Using encrypted-only restore pipeline", nil)
+
+		// Open tape device for reading and feed data into the pipeline
+		tapeFile, err := os.Open(devicePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open tape device: %w", err)
+		}
+		defer tapeFile.Close()
+
 		opensslCmd := exec.CommandContext(ctx, "openssl", "enc",
 			"-d", // Decrypt
 			"-aes-256-cbc",
 			"-pbkdf2",
 			"-iter", "100000",
 			"-pass", "pass:"+encryptionKey,
-			"-in", devicePath,
 		)
+		opensslCmd.Stdin = tapeFile
 
 		tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
 
