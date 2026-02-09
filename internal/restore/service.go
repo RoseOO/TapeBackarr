@@ -1,6 +1,7 @@
 package restore
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/RoseOO/TapeBackarr/internal/cmdutil"
 	"github.com/RoseOO/TapeBackarr/internal/database"
 	"github.com/RoseOO/TapeBackarr/internal/logging"
 	"github.com/RoseOO/TapeBackarr/internal/models"
@@ -297,7 +299,6 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 		return nil, fmt.Errorf("backup set is marked as encrypted but no encryption key is available")
 	}
 
-	var output []byte
 	if encrypted && compressed {
 		// For compressed+encrypted backups: openssl dec | decompress | tar
 		s.logger.Info("Using encrypted+compressed restore pipeline", map[string]interface{}{
@@ -318,6 +319,12 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 		}
 
 		tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
+
+		// Capture stderr from each pipeline stage for diagnostics
+		var opensslStderr, decompStderr, tarStderr bytes.Buffer
+		opensslCmd.Stderr = &opensslStderr
+		decompCmd.Stderr = &decompStderr
+		tarCmd.Stderr = &tarStderr
 
 		// Pipeline: openssl -> decompress -> tar
 		opensslPipe, err := opensslCmd.StdoutPipe()
@@ -355,16 +362,16 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 		opensslErr := opensslCmd.Wait()
 
 		if tarErr != nil {
-			errMsg := fmt.Sprintf("tar extract failed: %v", tarErr)
+			errMsg := fmt.Sprintf("tar extract failed (%s)", cmdutil.ErrorDetail(tarErr, &tarStderr))
 			if decompErr != nil {
-				errMsg += fmt.Sprintf(" (decompression: %v)", decompErr)
+				errMsg += fmt.Sprintf("; decompression failed (%s)", cmdutil.ErrorDetail(decompErr, &decompStderr))
 			}
 			if opensslErr != nil {
-				errMsg += fmt.Sprintf(" (decryption: %v)", opensslErr)
+				errMsg += fmt.Sprintf("; decryption failed (%s)", cmdutil.ErrorDetail(opensslErr, &opensslStderr))
 			}
 			result.Errors = append(result.Errors, errMsg)
 			s.logger.Error("Restore failed", map[string]interface{}{"error": errMsg})
-			return result, fmt.Errorf("restore failed: %w", tarErr)
+			return result, fmt.Errorf("restore failed: %s", errMsg)
 		}
 	} else if encrypted {
 		// For encrypted-only backups (no compression): openssl dec | tar
@@ -379,6 +386,11 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 		)
 
 		tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
+
+		// Capture stderr from each pipeline stage for diagnostics
+		var opensslStderr, tarStderr bytes.Buffer
+		opensslCmd.Stderr = &opensslStderr
+		tarCmd.Stderr = &tarStderr
 
 		// Pipe openssl output to tar
 		opensslPipe, err := opensslCmd.StdoutPipe()
@@ -401,13 +413,13 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 		opensslErr := opensslCmd.Wait()
 
 		if tarErr != nil {
-			errMsg := fmt.Sprintf("tar extract failed: %v", tarErr)
+			errMsg := fmt.Sprintf("tar extract failed (%s)", cmdutil.ErrorDetail(tarErr, &tarStderr))
 			if opensslErr != nil {
-				errMsg += fmt.Sprintf(" (decryption: %v)", opensslErr)
+				errMsg += fmt.Sprintf("; decryption failed (%s)", cmdutil.ErrorDetail(opensslErr, &opensslStderr))
 			}
 			result.Errors = append(result.Errors, errMsg)
 			s.logger.Error("Restore failed", map[string]interface{}{"error": errMsg})
-			return result, fmt.Errorf("restore failed: %w", tarErr)
+			return result, fmt.Errorf("restore failed: %s", errMsg)
 		}
 	} else if compressed {
 		// For compressed-only backups: decompress < device | tar
@@ -429,6 +441,11 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 
 		tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
 
+		// Capture stderr from each pipeline stage for diagnostics
+		var decompStderr, tarStderr bytes.Buffer
+		decompCmd.Stderr = &decompStderr
+		tarCmd.Stderr = &tarStderr
+
 		decompPipe, err := decompCmd.StdoutPipe()
 		if err != nil {
 			return nil, fmt.Errorf("failed to create decompression pipe: %w", err)
@@ -449,13 +466,13 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 		decompErr := decompCmd.Wait()
 
 		if tarErr != nil {
-			errMsg := fmt.Sprintf("tar extract failed: %v", tarErr)
+			errMsg := fmt.Sprintf("tar extract failed (%s)", cmdutil.ErrorDetail(tarErr, &tarStderr))
 			if decompErr != nil {
-				errMsg += fmt.Sprintf(" (decompression: %v)", decompErr)
+				errMsg += fmt.Sprintf("; decompression failed (%s)", cmdutil.ErrorDetail(decompErr, &decompStderr))
 			}
 			result.Errors = append(result.Errors, errMsg)
 			s.logger.Error("Restore failed", map[string]interface{}{"error": errMsg})
-			return result, fmt.Errorf("restore failed: %w", tarErr)
+			return result, fmt.Errorf("restore failed: %s", errMsg)
 		}
 	} else {
 		// Standard unencrypted, uncompressed restore
@@ -476,12 +493,14 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 		}
 
 		cmd := exec.CommandContext(ctx, "tar", tarArgs...)
-		output, err = cmd.CombinedOutput()
+		var tarStderr bytes.Buffer
+		cmd.Stderr = &tarStderr
+		err = cmd.Run()
 		if err != nil {
-			errMsg := fmt.Sprintf("tar extract failed: %s", string(output))
+			errMsg := fmt.Sprintf("tar extract failed (%s)", cmdutil.ErrorDetail(err, &tarStderr))
 			result.Errors = append(result.Errors, errMsg)
 			s.logger.Error("Restore failed", map[string]interface{}{"error": errMsg})
-			return result, fmt.Errorf("restore failed: %w", err)
+			return result, fmt.Errorf("restore failed: %s", errMsg)
 		}
 	}
 

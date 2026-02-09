@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/RoseOO/TapeBackarr/internal/auth"
 	"github.com/RoseOO/TapeBackarr/internal/backup"
+	"github.com/RoseOO/TapeBackarr/internal/cmdutil"
 	"github.com/RoseOO/TapeBackarr/internal/config"
 	"github.com/RoseOO/TapeBackarr/internal/database"
 	"github.com/RoseOO/TapeBackarr/internal/encryption"
@@ -4180,9 +4182,10 @@ func (s *Server) handleRestoreDatabaseBackup(w http.ResponseWriter, r *http.Requ
 	// Extract database
 	tarArgs := []string{"-x", "-f", devicePath, "-C", destPath, "tapebackarr.db"}
 	cmd := exec.CommandContext(ctx, "tar", tarArgs...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		s.respondError(w, http.StatusInternalServerError, "restore failed: "+string(output))
+	var tarStderr bytes.Buffer
+	cmd.Stderr = &tarStderr
+	if err := cmd.Run(); err != nil {
+		s.respondError(w, http.StatusInternalServerError, fmt.Sprintf("database restore failed (%s)", cmdutil.ErrorDetail(err, &tarStderr)))
 		return
 	}
 
