@@ -1,12 +1,16 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/RoseOO/TapeBackarr/internal/database"
+	"github.com/RoseOO/TapeBackarr/internal/tape"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -103,5 +107,131 @@ func TestNoStaticDir(t *testing.T) {
 
 	if rr.Code != http.StatusNotFound {
 		t.Errorf("expected 404 for root with no static dir, got %d", rr.Code)
+	}
+}
+
+func TestHandleDashboardPoolStorage(t *testing.T) {
+	// Create a temp database with migrations applied
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := database.New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("failed to migrate database: %v", err)
+	}
+
+	// Migrations already create DAILY (id=1), WEEKLY (id=2), MONTHLY (id=3), ARCHIVE (id=4)
+	// Insert test tapes into the DAILY pool (id=1)
+	_, err = db.Exec("INSERT INTO tapes (uuid, barcode, label, pool_id, status, capacity_bytes, used_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		"uuid-1", "TAPE01", "TAPE01", 1, "active", int64(1500000000000), int64(500000000000))
+	if err != nil {
+		t.Fatalf("failed to insert tape: %v", err)
+	}
+	_, err = db.Exec("INSERT INTO tapes (uuid, barcode, label, pool_id, status, capacity_bytes, used_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		"uuid-2", "TAPE02", "TAPE02", 1, "active", int64(1500000000000), int64(1200000000000))
+	if err != nil {
+		t.Fatalf("failed to insert tape: %v", err)
+	}
+
+	// Insert a tape into the ARCHIVE pool (id=4)
+	_, err = db.Exec("INSERT INTO tapes (uuid, barcode, label, pool_id, status, capacity_bytes, used_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		"uuid-3", "TAPE03", "TAPE03", 4, "full", int64(1500000000000), int64(1500000000000))
+	if err != nil {
+		t.Fatalf("failed to insert tape: %v", err)
+	}
+
+	// Create server with the test database and a dummy tape service
+	tapeService := tape.NewService("/dev/null", 65536)
+	s := &Server{
+		router:      chi.NewRouter(),
+		db:          db,
+		tapeService: tapeService,
+	}
+
+	// Call the dashboard handler directly (bypassing auth middleware)
+	req := httptest.NewRequest("GET", "/api/v1/dashboard", nil)
+	rr := httptest.NewRecorder()
+	s.handleDashboard(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rr.Code)
+	}
+
+	var result struct {
+		TotalTapes int `json:"total_tapes"`
+		PoolStorage []struct {
+			ID                 int64  `json:"id"`
+			Name               string `json:"name"`
+			TapeCount          int    `json:"tape_count"`
+			TotalCapacityBytes int64  `json:"total_capacity_bytes"`
+			TotalUsedBytes     int64  `json:"total_used_bytes"`
+			TotalFreeBytes     int64  `json:"total_free_bytes"`
+		} `json:"pool_storage"`
+	}
+
+	if err := json.NewDecoder(rr.Body).Decode(&result); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if result.TotalTapes != 3 {
+		t.Errorf("expected 3 total tapes, got %d", result.TotalTapes)
+	}
+
+	// Migrations create 4 pools: ARCHIVE, DAILY, MONTHLY, WEEKLY (sorted by name)
+	if len(result.PoolStorage) != 4 {
+		t.Fatalf("expected 4 pools in pool_storage, got %d", len(result.PoolStorage))
+	}
+
+	// Find ARCHIVE and DAILY pools in the results
+	var archive, daily *struct {
+		ID                 int64  `json:"id"`
+		Name               string `json:"name"`
+		TapeCount          int    `json:"tape_count"`
+		TotalCapacityBytes int64  `json:"total_capacity_bytes"`
+		TotalUsedBytes     int64  `json:"total_used_bytes"`
+		TotalFreeBytes     int64  `json:"total_free_bytes"`
+	}
+	for i := range result.PoolStorage {
+		switch result.PoolStorage[i].Name {
+		case "ARCHIVE":
+			archive = &result.PoolStorage[i]
+		case "DAILY":
+			daily = &result.PoolStorage[i]
+		}
+	}
+
+	if archive == nil {
+		t.Fatal("ARCHIVE pool not found in pool_storage")
+	}
+	if archive.TapeCount != 1 {
+		t.Errorf("expected ARCHIVE to have 1 tape, got %d", archive.TapeCount)
+	}
+	if archive.TotalCapacityBytes != 1500000000000 {
+		t.Errorf("expected ARCHIVE capacity 1500000000000, got %d", archive.TotalCapacityBytes)
+	}
+	if archive.TotalUsedBytes != 1500000000000 {
+		t.Errorf("expected ARCHIVE used 1500000000000, got %d", archive.TotalUsedBytes)
+	}
+	if archive.TotalFreeBytes != 0 {
+		t.Errorf("expected ARCHIVE free 0, got %d", archive.TotalFreeBytes)
+	}
+
+	if daily == nil {
+		t.Fatal("DAILY pool not found in pool_storage")
+	}
+	if daily.TapeCount != 2 {
+		t.Errorf("expected DAILY to have 2 tapes, got %d", daily.TapeCount)
+	}
+	if daily.TotalCapacityBytes != 3000000000000 {
+		t.Errorf("expected DAILY capacity 3000000000000, got %d", daily.TotalCapacityBytes)
+	}
+	if daily.TotalUsedBytes != 1700000000000 {
+		t.Errorf("expected DAILY used 1700000000000, got %d", daily.TotalUsedBytes)
+	}
+	if daily.TotalFreeBytes != 1300000000000 {
+		t.Errorf("expected DAILY free 1300000000000, got %d", daily.TotalFreeBytes)
 	}
 }

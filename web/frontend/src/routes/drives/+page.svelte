@@ -31,6 +31,31 @@
     serial_number?: string;
   }
 
+  interface DriveStats {
+    drive_id: number;
+    total_bytes_read: number;
+    total_bytes_written: number;
+    read_errors: number;
+    write_errors: number;
+    total_load_count: number;
+    cleaning_required: boolean;
+    last_cleaned_at: string | null;
+    power_on_hours: number;
+    tape_motion_hours: number;
+    updated_at: string;
+  }
+
+  interface DriveAlert {
+    id: number;
+    drive_id: number;
+    severity: string;
+    category: string;
+    message: string;
+    resolved: boolean;
+    resolved_at: string | null;
+    created_at: string;
+  }
+
   let drives: Drive[] = [];
   let scannedDrives: ScannedDrive[] = [];
   let loading = true;
@@ -58,6 +83,13 @@
     serial_number: '',
     model: ''
   };
+
+  // Drive stats & alerts
+  let showStatsModal = false;
+  let statsTarget: Drive | null = null;
+  let driveStats: DriveStats | null = null;
+  let driveAlerts: DriveAlert[] = [];
+  let loadingStats = false;
 
   // Auto-refresh drives when SSE events arrive
   const drivesVersion = dataVersion('drives');
@@ -269,6 +301,57 @@
     }
   }
 
+  async function openStatsModal(drive: Drive) {
+    statsTarget = drive;
+    driveStats = null;
+    driveAlerts = [];
+    showStatsModal = true;
+    loadingStats = true;
+    try {
+      const [stats, alerts] = await Promise.all([
+        api.getDriveStatistics(drive.id),
+        api.getDriveAlerts(drive.id)
+      ]);
+      driveStats = stats;
+      driveAlerts = Array.isArray(alerts) ? alerts : [];
+    } catch (e) {
+      error = 'Failed to load drive statistics';
+    } finally {
+      loadingStats = false;
+    }
+  }
+
+  async function cleanDrive(driveId: number) {
+    if (!confirm('This will initiate a cleaning cycle. Make sure a cleaning tape is loaded. Continue?')) return;
+    try {
+      error = '';
+      await api.cleanDrive(driveId);
+      showSuccessMsg('Drive cleaning cycle initiated');
+      if (statsTarget) await openStatsModal(statsTarget);
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to clean drive';
+    }
+  }
+
+  async function retensionDrive(driveId: number) {
+    if (!confirm('This will run a full tape retension pass (wind to end and back). This may take several minutes. Continue?')) return;
+    try {
+      error = '';
+      await api.retensionDrive(driveId);
+      showSuccessMsg('Tape retension completed');
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to retension tape';
+    }
+  }
+
+  function getAlertIcon(severity: string): string {
+    switch (severity) {
+      case 'critical': return '🔴';
+      case 'warning': return '🟡';
+      default: return '🔵';
+    }
+  }
+
 
 </script>
 
@@ -323,6 +406,7 @@
               <button class="btn btn-secondary btn-sm" on:click={() => selectDrive(drive.id)}>Select</button>
               <button class="btn btn-secondary btn-sm" on:click={() => rewindTape(drive.id)}>Rewind</button>
               <button class="btn btn-secondary btn-sm" on:click={() => ejectTape(drive.id)}>Eject</button>
+              <button class="btn btn-info btn-sm" on:click={() => openStatsModal(drive)} disabled={!drive.enabled}>📊 Stats</button>
               <button class="btn btn-warning btn-sm" on:click={() => openFormatDriveModal(drive)} disabled={drive.status === 'offline'}>Format</button>
               <button class="btn btn-danger btn-sm" on:click={() => deleteDrive(drive.id)}>Remove</button>
             </td>
@@ -498,6 +582,111 @@
           <button type="submit" class="btn btn-primary">Add to Library</button>
         </div>
       </form>
+    </div>
+  </div>
+{/if}
+
+<!-- Drive Statistics & Alerts Modal -->
+{#if showStatsModal && statsTarget}
+  <div class="modal-backdrop" on:click={() => showStatsModal = false}>
+    <div class="modal modal-wide" on:click|stopPropagation={() => {}}>
+      <h2>📊 Drive Details: {statsTarget.display_name || statsTarget.device_path}</h2>
+
+      {#if loadingStats}
+        <p>Loading statistics...</p>
+      {:else if driveStats}
+        <div class="stats-section">
+          <h3>Usage Statistics</h3>
+          <div class="stats-grid">
+            <div class="stat-card">
+              <div class="stat-label">Total Data Written</div>
+              <div class="stat-value">{formatBytes(driveStats.total_bytes_written)}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Total Data Read</div>
+              <div class="stat-value">{formatBytes(driveStats.total_bytes_read)}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Total Load Count</div>
+              <div class="stat-value">{driveStats.total_load_count}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Power On Hours</div>
+              <div class="stat-value">{driveStats.power_on_hours} hrs</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Tape Motion Hours</div>
+              <div class="stat-value">{(driveStats.tape_motion_hours ?? 0).toFixed(1)} hrs</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Last Cleaned</div>
+              <div class="stat-value">{driveStats.last_cleaned_at ? new Date(driveStats.last_cleaned_at).toLocaleDateString() : 'Never'}</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="stats-section">
+          <h3>Error Counters</h3>
+          <div class="stats-grid">
+            <div class="stat-card {driveStats.write_errors > 0 ? 'stat-warning' : ''}">
+              <div class="stat-label">Write Errors</div>
+              <div class="stat-value">{driveStats.write_errors}</div>
+            </div>
+            <div class="stat-card {driveStats.read_errors > 0 ? 'stat-warning' : ''}">
+              <div class="stat-label">Read Errors</div>
+              <div class="stat-value">{driveStats.read_errors}</div>
+            </div>
+            <div class="stat-card {driveStats.cleaning_required ? 'stat-danger' : ''}">
+              <div class="stat-label">Cleaning Required</div>
+              <div class="stat-value">{driveStats.cleaning_required ? '⚠️ Yes' : '✅ No'}</div>
+            </div>
+          </div>
+        </div>
+
+        {#if driveAlerts.length > 0}
+          <div class="stats-section">
+            <h3>Drive Alerts</h3>
+            <div class="alerts-list">
+              {#each driveAlerts as alert}
+                <div class="alert-item {alert.resolved ? 'alert-resolved' : ''}">
+                  <span class="alert-icon">{getAlertIcon(alert.severity)}</span>
+                  <div class="alert-content">
+                    <div class="alert-msg">{alert.message}</div>
+                    <div class="alert-meta">
+                      {new Date(alert.created_at).toLocaleString()}
+                      {#if alert.resolved}
+                        <span class="resolved-badge">Resolved</span>
+                      {/if}
+                    </div>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
+
+        <div class="stats-section">
+          <h3>Drive Maintenance</h3>
+          <div class="maintenance-actions">
+            <button class="btn btn-warning btn-sm" on:click={() => { if (statsTarget) cleanDrive(statsTarget.id); }} disabled={!statsTarget || statsTarget.status === 'busy'}>
+              🧹 Force Clean
+            </button>
+            <button class="btn btn-secondary btn-sm" on:click={() => { if (statsTarget) retensionDrive(statsTarget.id); }} disabled={!statsTarget || statsTarget.status === 'busy'}>
+              🔄 Retension Tape
+            </button>
+          </div>
+          <p class="maintenance-note">
+            <strong>Force Clean:</strong> Ejects the current tape so you can load a cleaning cartridge. The drive will automatically run its cleaning cycle when it detects the cleaning tape.<br/>
+            <strong>Retension:</strong> Winds tape to end and back to improve tension and reliability.
+          </p>
+        </div>
+      {:else}
+        <p>No statistics available. The drive may not support reporting or diagnostic tools (tapeinfo, sg_logs) may not be installed.</p>
+      {/if}
+
+      <div class="form-actions">
+        <button class="btn btn-secondary" on:click={() => showStatsModal = false}>Close</button>
+      </div>
     </div>
   </div>
 {/if}
@@ -710,5 +899,127 @@
 
   .file-list-scroll table {
     margin: 0;
+  }
+
+  .btn-info {
+    background: #17a2b8;
+    color: #fff;
+  }
+
+  .btn-info:hover {
+    background: #138496;
+  }
+
+  .stats-section {
+    margin-bottom: 1.5rem;
+  }
+
+  .stats-section h3 {
+    margin: 0 0 0.75rem;
+    font-size: 1rem;
+    color: var(--text-secondary, #666);
+    border-bottom: 1px solid #eee;
+    padding-bottom: 0.5rem;
+  }
+
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.75rem;
+  }
+
+  .stat-card {
+    background: var(--bg-input, #f8f9fa);
+    border: 1px solid #e9ecef;
+    border-radius: 8px;
+    padding: 0.75rem;
+    text-align: center;
+  }
+
+  .stat-card.stat-warning {
+    border-color: #ffc107;
+    background: #fff3cd;
+  }
+
+  .stat-card.stat-danger {
+    border-color: #dc3545;
+    background: #f8d7da;
+  }
+
+  .stat-label {
+    font-size: 0.75rem;
+    color: var(--text-secondary, #999);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 0.25rem;
+  }
+
+  .stat-value {
+    font-size: 1.1rem;
+    font-weight: 600;
+  }
+
+  .alerts-list {
+    max-height: 200px;
+    overflow-y: auto;
+    border: 1px solid #e9ecef;
+    border-radius: 8px;
+  }
+
+  .alert-item {
+    display: flex;
+    gap: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid #f0f0f0;
+    align-items: flex-start;
+  }
+
+  .alert-item:last-child {
+    border-bottom: none;
+  }
+
+  .alert-item.alert-resolved {
+    opacity: 0.6;
+  }
+
+  .alert-icon {
+    flex-shrink: 0;
+  }
+
+  .alert-content {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .alert-msg {
+    font-size: 0.875rem;
+  }
+
+  .alert-meta {
+    font-size: 0.75rem;
+    color: #999;
+    margin-top: 0.15rem;
+  }
+
+  .resolved-badge {
+    background: #d4edda;
+    color: #155724;
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+    font-size: 0.7rem;
+    margin-left: 0.5rem;
+  }
+
+  .maintenance-actions {
+    display: flex;
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .maintenance-note {
+    font-size: 0.8rem;
+    color: var(--text-secondary, #888);
+    margin: 0;
+    line-height: 1.5;
   }
 </style>
