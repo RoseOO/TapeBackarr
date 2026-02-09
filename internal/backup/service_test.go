@@ -1232,7 +1232,7 @@ func TestCountingWriterWithBufferedIO(t *testing.T) {
 	var writeSizes []int
 	tw := &trackingWriter{writeSizes: &writeSizes}
 
-	blockSize := 256 * 1024 // 256KB, matching LTO default
+	blockSize := 1024 * 1024 // 1MB, matching LTO default
 	buffered := bufio.NewWriterSize(tw, blockSize)
 	cw := &countingWriter{writer: buffered}
 
@@ -1243,8 +1243,8 @@ func TestCountingWriterWithBufferedIO(t *testing.T) {
 	}
 
 	totalWritten := 0
-	// Write 8 × 32KB = 256KB (fills the buffer exactly)
-	for i := 0; i < 8; i++ {
+	// Write 32 × 32KB = 1MB (fills the buffer exactly)
+	for i := 0; i < 32; i++ {
 		n, err := cw.Write(smallBuf)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -1257,7 +1257,7 @@ func TestCountingWriterWithBufferedIO(t *testing.T) {
 		t.Errorf("expected 0 writes while buffer fills, got %d", len(writeSizes))
 	}
 
-	// Next write triggers flush of the full 256KB block, then buffers new data
+	// Next write triggers flush of the full 1MB block, then buffers new data
 	partialBuf := make([]byte, 100)
 	n, err := cw.Write(partialBuf)
 	if err != nil {
