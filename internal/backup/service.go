@@ -674,9 +674,12 @@ func (s *Service) StreamToTape(ctx context.Context, sourcePath string, files []F
 	// Build tar command with streaming to tape
 	// Using mbuffer for buffering if available, otherwise direct
 	tarArgs := []string{
-		"-c",                                     // Create archive
-		"-b", fmt.Sprintf("%d", s.blockSize/512), // Block size in 512-byte units
-		"-C", sourcePath, // Change to source directory
+		"-c", // Create archive
+		// tar -b flag expects count of 512-byte blocks, so divide blockSize by 512
+		// Example: blockSize=262144 → -b 512 → 512*512 = 262144 bytes
+		// This ensures tar and mbuffer use the same block size
+		"-b", fmt.Sprintf("%d", s.blockSize/512),
+		"-C", sourcePath,   // Change to source directory
 		"-T", fileListPath, // Read files from list
 	}
 
@@ -687,6 +690,8 @@ func (s *Service) StreamToTape(ctx context.Context, sourcePath string, files []F
 	if mbufferErr == nil {
 		// Use mbuffer for better streaming performance
 		tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
+		// mbuffer -s flag expects block size in bytes, matching tar's effective block size
+		// Example: blockSize=262144 → -s 262144 → 262144 bytes (256KB optimal for LTO)
 		mbufferCmd := exec.CommandContext(ctx, "mbuffer", "-s", fmt.Sprintf("%d", s.blockSize), "-m", fmt.Sprintf("%dM", s.bufferSizeMB), "-P", "80", "-o", devicePath)
 
 		// Pipe tar output through counting reader to mbuffer
@@ -762,9 +767,11 @@ func (s *Service) StreamToTapeEncrypted(ctx context.Context, sourcePath string, 
 	fileList.Close()
 
 	// Build tar command
+	// tar -b expects count of 512-byte blocks; mbuffer -s expects bytes
+	// Both use the same effective block size for alignment
 	tarArgs := []string{
 		"-c",
-		"-b", fmt.Sprintf("%d", s.blockSize/512),
+		"-b", fmt.Sprintf("%d", s.blockSize/512), // Converts bytes to 512-byte block count
 		"-C", sourcePath,
 		"-T", fileListPath,
 	}
@@ -895,9 +902,11 @@ func (s *Service) StreamToTapeCompressed(ctx context.Context, sourcePath string,
 	fileList.Close()
 
 	// Build tar command
+	// tar -b expects count of 512-byte blocks; mbuffer -s expects bytes
+	// Both use the same effective block size for alignment
 	tarArgs := []string{
 		"-c",
-		"-b", fmt.Sprintf("%d", s.blockSize/512),
+		"-b", fmt.Sprintf("%d", s.blockSize/512), // Converts bytes to 512-byte block count
 		"-C", sourcePath,
 		"-T", fileListPath,
 	}
@@ -1014,9 +1023,12 @@ func (s *Service) StreamToTapeCompressedEncrypted(ctx context.Context, sourcePat
 	}
 	fileList.Close()
 
+	// Build tar command
+	// tar -b expects count of 512-byte blocks; mbuffer -s expects bytes
+	// Both use the same effective block size for alignment
 	tarArgs := []string{
 		"-c",
-		"-b", fmt.Sprintf("%d", s.blockSize/512),
+		"-b", fmt.Sprintf("%d", s.blockSize/512), // Converts bytes to 512-byte block count
 		"-C", sourcePath,
 		"-T", fileListPath,
 	}

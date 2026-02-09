@@ -117,7 +117,7 @@ separated by file marks (FM):
 
 - **File #1 — Backup Data**: Standard tar archive streamed directly from the backup
   source. May be encrypted (AES-256-CBC) and/or compressed (gzip/zstd). Uses a
-  configurable block size (default 64KB / 128×512-byte blocks).
+  configurable block size (default 256KB / 512×512-byte blocks, optimal for LTO drives).
 
 - **File #2 — Table of Contents (TOC)**: A JSON document written after the backup
   data completes. Contains the full file catalog (paths, sizes, checksums, timestamps)
