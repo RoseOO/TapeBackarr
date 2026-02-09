@@ -394,9 +394,10 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 	}
 
 	// --- Step 6: Build tar extract command and execute pipeline ---
+	// tar -b expects count of 512-byte blocks to match the block size used during backup
 	tarArgs := []string{
 		"-x",                                     // Extract
-		"-b", fmt.Sprintf("%d", s.blockSize/512), // Block size
+		"-b", fmt.Sprintf("%d", s.blockSize/512), // Block size in 512-byte units (must match backup)
 		"-C", req.DestPath, // Change to destination
 	}
 
