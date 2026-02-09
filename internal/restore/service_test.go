@@ -341,3 +341,73 @@ func TestBuildDecompressionCmdNone(t *testing.T) {
 		t.Error("expected error for CompressionNone")
 	}
 }
+
+func TestRestorePipeline(t *testing.T) {
+	tests := []struct {
+		name          string
+		encrypted     bool
+		encryptionKey string
+		compressed    bool
+		wantPipeline  string
+		wantErr       bool
+	}{
+		{
+			name:         "standard unencrypted uncompressed",
+			encrypted:    false,
+			compressed:   false,
+			wantPipeline: "standard",
+		},
+		{
+			name:          "encrypted-only (no compression)",
+			encrypted:     true,
+			encryptionKey: "secret",
+			compressed:    false,
+			wantPipeline:  "encrypted-only",
+		},
+		{
+			name:          "compressed-only (no encryption)",
+			encrypted:     false,
+			compressed:    true,
+			wantPipeline:  "compressed-only",
+		},
+		{
+			name:          "encrypted and compressed",
+			encrypted:     true,
+			encryptionKey: "secret",
+			compressed:    true,
+			wantPipeline:  "encrypted+compressed",
+		},
+		{
+			name:      "encrypted but key missing",
+			encrypted: true,
+			// encryptionKey intentionally empty
+			compressed: false,
+			wantErr:    true,
+		},
+		{
+			name:      "encrypted and compressed but key missing",
+			encrypted: true,
+			// encryptionKey intentionally empty
+			compressed: true,
+			wantErr:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pipeline, err := restorePipeline(tt.encrypted, tt.encryptionKey, tt.compressed)
+			if tt.wantErr {
+				if err == nil {
+					t.Error("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if pipeline != tt.wantPipeline {
+				t.Errorf("expected pipeline %q, got %q", tt.wantPipeline, pipeline)
+			}
+		})
+	}
+}

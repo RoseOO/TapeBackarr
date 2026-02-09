@@ -83,6 +83,25 @@ func buildDecompressionCmd(ctx context.Context, compression models.CompressionTy
 	}
 }
 
+// restorePipeline returns a label describing which restore pipeline will
+// be used for a backup set with the given flags.  It also returns an error
+// when the flag combination is invalid (e.g. encrypted without a key).
+func restorePipeline(encrypted bool, encryptionKey string, compressed bool) (string, error) {
+	if encrypted && encryptionKey == "" {
+		return "", fmt.Errorf("backup set is marked as encrypted but no encryption key is available")
+	}
+	if encrypted && compressed {
+		return "encrypted+compressed", nil
+	}
+	if encrypted {
+		return "encrypted-only", nil
+	}
+	if compressed {
+		return "compressed-only", nil
+	}
+	return "standard", nil
+}
+
 // GetRequiredTapes returns the tapes needed for a restore operation
 func (s *Service) GetRequiredTapes(ctx context.Context, req *RestoreRequest) ([]TapeRequirement, error) {
 	var requirements []TapeRequirement
@@ -271,9 +290,19 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 		tarArgs = append(tarArgs, allFilePaths...)
 	}
 
+	// Validate: if the backup is marked encrypted we must have a key.
+	// Without this check a corrupt/incomplete DB row could silently skip
+	// decryption and feed encrypted bytes to tar or a decompressor.
+	if encrypted && encryptionKey == "" {
+		return nil, fmt.Errorf("backup set is marked as encrypted but no encryption key is available")
+	}
+
 	var output []byte
-	if encrypted && encryptionKey != "" && compressed {
+	if encrypted && compressed {
 		// For compressed+encrypted backups: openssl dec | decompress | tar
+		s.logger.Info("Using encrypted+compressed restore pipeline", map[string]interface{}{
+			"compression_type": compressionType,
+		})
 		opensslCmd := exec.CommandContext(ctx, "openssl", "enc",
 			"-d", // Decrypt
 			"-aes-256-cbc",
@@ -338,8 +367,9 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 			s.logger.Error("Restore failed", map[string]interface{}{"error": errMsg})
 			return result, fmt.Errorf("restore failed: %w", tarErr)
 		}
-	} else if encrypted && encryptionKey != "" {
-		// For encrypted-only backups: openssl dec | tar
+	} else if encrypted {
+		// For encrypted-only backups (no compression): openssl dec | tar
+		s.logger.Info("Using encrypted-only restore pipeline", nil)
 		opensslCmd := exec.CommandContext(ctx, "openssl", "enc",
 			"-d", // Decrypt
 			"-aes-256-cbc",
@@ -383,6 +413,9 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 		}
 	} else if compressed {
 		// For compressed-only backups: decompress < device | tar
+		s.logger.Info("Using compressed-only restore pipeline", map[string]interface{}{
+			"compression_type": compressionType,
+		})
 		decompCmd, err := buildDecompressionCmd(ctx, models.CompressionType(compressionType))
 		if err != nil {
 			return nil, fmt.Errorf("failed to build decompression command: %w", err)
@@ -429,6 +462,7 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 		}
 	} else {
 		// Standard unencrypted, uncompressed restore
+		s.logger.Info("Using standard (unencrypted, uncompressed) restore pipeline", nil)
 		tarArgs = []string{
 			"-x",
 			"-b", fmt.Sprintf("%d", s.blockSize/512),
