@@ -251,6 +251,15 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 		return nil, fmt.Errorf("tape not loaded in any drive: %w", err)
 	}
 
+	// Ensure tape is physically loaded and ready before any tape operations
+	s.logger.Info("Waiting for tape to be ready", map[string]interface{}{
+		"device_path": devicePath,
+		"tape_id":     tapeID,
+	})
+	if err := s.tapeService.WaitForTape(ctx, 30*time.Second); err != nil {
+		return nil, fmt.Errorf("tape not ready: %w", err)
+	}
+
 	// Ensure destination exists
 	if err := os.MkdirAll(req.DestPath, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create destination directory: %w", err)
