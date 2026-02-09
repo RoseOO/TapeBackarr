@@ -712,10 +712,12 @@ type DriveStatisticsData struct {
 	TapeMotionHours   float64 `json:"tape_motion_hours"`
 }
 
-// ForceClean sends a cleaning command to the tape drive.
-// This requires a cleaning tape to be loaded in the drive.
+// ForceClean sends a rewind-offline command to eject the current tape from the drive,
+// preparing it for a cleaning cartridge to be loaded. Once a cleaning tape is inserted,
+// the drive automatically detects it and initiates a cleaning cycle.
 func (s *Service) ForceClean(ctx context.Context) error {
-	// The mt cleaner command tells the drive to initiate a cleaning cycle
+	// rewoffl (rewind-offline) ejects the tape, which is the preparatory step for
+	// loading a cleaning cartridge. LTO drives auto-detect cleaning tapes on load.
 	cmd := exec.CommandContext(ctx, "mt", "-f", s.devicePath, "rewoffl")
 	output, err := cmd.CombinedOutput()
 	if err != nil {

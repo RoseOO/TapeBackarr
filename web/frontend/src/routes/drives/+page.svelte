@@ -616,7 +616,7 @@
             </div>
             <div class="stat-card">
               <div class="stat-label">Tape Motion Hours</div>
-              <div class="stat-value">{driveStats.tape_motion_hours.toFixed(1)} hrs</div>
+              <div class="stat-value">{(driveStats.tape_motion_hours ?? 0).toFixed(1)} hrs</div>
             </div>
             <div class="stat-card">
               <div class="stat-label">Last Cleaned</div>
@@ -668,15 +668,15 @@
         <div class="stats-section">
           <h3>Drive Maintenance</h3>
           <div class="maintenance-actions">
-            <button class="btn btn-warning btn-sm" on:click={() => cleanDrive(statsTarget?.id ?? 0)} disabled={statsTarget?.status === 'busy'}>
+            <button class="btn btn-warning btn-sm" on:click={() => { if (statsTarget) cleanDrive(statsTarget.id); }} disabled={!statsTarget || statsTarget.status === 'busy'}>
               🧹 Force Clean
             </button>
-            <button class="btn btn-secondary btn-sm" on:click={() => retensionDrive(statsTarget?.id ?? 0)} disabled={statsTarget?.status === 'busy'}>
+            <button class="btn btn-secondary btn-sm" on:click={() => { if (statsTarget) retensionDrive(statsTarget.id); }} disabled={!statsTarget || statsTarget.status === 'busy'}>
               🔄 Retension Tape
             </button>
           </div>
           <p class="maintenance-note">
-            <strong>Force Clean:</strong> Ejects the current tape and prepares for a cleaning cycle. Load a cleaning cartridge first.<br/>
+            <strong>Force Clean:</strong> Ejects the current tape so you can load a cleaning cartridge. The drive will automatically run its cleaning cycle when it detects the cleaning tape.<br/>
             <strong>Retension:</strong> Winds tape to end and back to improve tension and reliability.
           </p>
         </div>
