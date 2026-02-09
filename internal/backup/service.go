@@ -312,12 +312,12 @@ func (s *Service) ScanSource(ctx context.Context, source *models.BackupSource, p
 		json.Unmarshal([]byte(source.ExcludePatterns), &excludePatterns)
 	}
 
-	// Use more workers than CPUs: on NAS paths the bottleneck is network
+	// Use many more workers than CPUs: on NAS paths the bottleneck is network
 	// latency (each stat blocks ~1-5 ms), so extra goroutines keep many
 	// I/O requests in flight at the same time.
-	numWorkers := runtime.NumCPU() * 2
-	if numWorkers < 8 {
-		numWorkers = 8
+	numWorkers := runtime.NumCPU() * 4
+	if numWorkers < 16 {
+		numWorkers = 16
 	}
 
 	var (
@@ -325,8 +325,33 @@ func (s *Service) ScanSource(ctx context.Context, source *models.BackupSource, p
 		filesMu  sync.Mutex
 		dirWg    sync.WaitGroup
 		workerWg sync.WaitGroup
-		dirs     = make(chan string, numWorkers*4)
+		dirs     = make(chan string, numWorkers*8)
 	)
+
+	// Separate exclude patterns into exact names (fast map lookup) vs globs.
+	// Most exclude patterns are plain directory/file names like "#recycle" or
+	// ".snapshots" which don't contain any glob meta-characters.  We can check
+	// those with a O(1) map lookup instead of calling filepath.Match per
+	// pattern per entry.
+	excludeExact := make(map[string]struct{})
+	var excludeGlobs []string
+	for _, p := range excludePatterns {
+		if strings.ContainsAny(p, "*?[") {
+			excludeGlobs = append(excludeGlobs, p)
+		} else {
+			excludeExact[p] = struct{}{}
+		}
+	}
+
+	includeExact := make(map[string]struct{})
+	var includeGlobs []string
+	for _, p := range includePatterns {
+		if strings.ContainsAny(p, "*?[") {
+			includeGlobs = append(includeGlobs, p)
+		} else {
+			includeExact[p] = struct{}{}
+		}
+	}
 
 	// Atomic counters for scan progress
 	var filesFound int64
@@ -352,45 +377,78 @@ func (s *Service) ScanSource(ctx context.Context, source *models.BackupSource, p
 		}
 	}
 
-	// shouldExcludeDir checks if a directory path matches any exclude pattern
+	// shouldExcludeDir checks if a directory path matches any exclude pattern.
+	// Fast path: exact name lookup via map.  Slow path: glob matching.
 	shouldExcludeDir := func(path string) bool {
-		relPath, _ := filepath.Rel(source.Path, path)
 		baseName := filepath.Base(path)
 
-		for _, pattern := range excludePatterns {
-			if matched, _ := filepath.Match(pattern, relPath); matched {
-				return true
-			}
-			if matched, _ := filepath.Match(pattern, baseName); matched {
-				return true
-			}
-		}
-		return false
-	}
-
-	// matchFile checks if a file path matches the include/exclude patterns
-	matchFile := func(path string) bool {
-		relPath, _ := filepath.Rel(source.Path, path)
-		baseName := filepath.Base(path)
-
-		// Check exclude patterns
-		for _, pattern := range excludePatterns {
-			if matched, _ := filepath.Match(pattern, relPath); matched {
-				return false
-			}
-			if matched, _ := filepath.Match(pattern, baseName); matched {
-				return false
-			}
+		// Fast exact-match check (covers most real-world excludes)
+		if _, ok := excludeExact[baseName]; ok {
+			return true
 		}
 
-		// Check include patterns (if any)
-		if len(includePatterns) > 0 {
-			for _, pattern := range includePatterns {
+		// Only compute relPath and run globs if there are glob patterns
+		if len(excludeGlobs) > 0 {
+			relPath, _ := filepath.Rel(source.Path, path)
+			if _, ok := excludeExact[relPath]; ok {
+				return true
+			}
+			for _, pattern := range excludeGlobs {
 				if matched, _ := filepath.Match(pattern, relPath); matched {
 					return true
 				}
 				if matched, _ := filepath.Match(pattern, baseName); matched {
 					return true
+				}
+			}
+		}
+		return false
+	}
+
+	// matchFile checks if a file path matches the include/exclude patterns.
+	// Uses fast exact-match maps before falling back to glob matching.
+	matchFile := func(path string) bool {
+		baseName := filepath.Base(path)
+
+		// Fast exact-match exclude check
+		if _, ok := excludeExact[baseName]; ok {
+			return false
+		}
+
+		// Glob exclude check (only if glob patterns exist)
+		if len(excludeGlobs) > 0 {
+			relPath, _ := filepath.Rel(source.Path, path)
+			if _, ok := excludeExact[relPath]; ok {
+				return false
+			}
+			for _, pattern := range excludeGlobs {
+				if matched, _ := filepath.Match(pattern, relPath); matched {
+					return false
+				}
+				if matched, _ := filepath.Match(pattern, baseName); matched {
+					return false
+				}
+			}
+		}
+
+		// Check include patterns (if any)
+		if len(includePatterns) > 0 {
+			// Fast exact-match include check
+			if _, ok := includeExact[baseName]; ok {
+				return true
+			}
+			if len(includeGlobs) > 0 {
+				relPath, _ := filepath.Rel(source.Path, path)
+				if _, ok := includeExact[relPath]; ok {
+					return true
+				}
+				for _, pattern := range includeGlobs {
+					if matched, _ := filepath.Match(pattern, relPath); matched {
+						return true
+					}
+					if matched, _ := filepath.Match(pattern, baseName); matched {
+						return true
+					}
 				}
 			}
 			return false
@@ -481,9 +539,11 @@ func (s *Service) ScanSource(ctx context.Context, source *models.BackupSource, p
 			filesMu.Lock()
 			files = append(files, localFiles...)
 			filesMu.Unlock()
-
-			emitProgress()
 		}
+
+		// Always emit progress after each directory so the UI stays up to
+		// date even when traversing large trees with few files.
+		emitProgress()
 	}
 
 	// Seed root directory

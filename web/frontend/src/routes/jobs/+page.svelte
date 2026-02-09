@@ -42,6 +42,9 @@
     log_lines: string[];
     compression: string;
     tape_estimated_seconds_remaining: number;
+    scan_files_found: number;
+    scan_dirs_scanned: number;
+    scan_bytes_found: number;
   }
 
   interface Source {
@@ -441,33 +444,48 @@
             {/if}
           </div>
           <div class="terminal-stats">
-            <div class="stat-item">
-              <span class="stat-label">Written</span>
-              <span class="stat-value">{formatBytes(job.bytes_written)} / {formatBytes(job.total_bytes)}</span>
-            </div>
-            <div class="stat-item">
-              <span class="stat-label">Speed</span>
-              <span class="stat-value">{formatSpeed(job.write_speed)}</span>
-            </div>
-            <div class="stat-item">
-              <span class="stat-label">Job ETA</span>
-              <span class="stat-value">{formatETA(job.estimated_seconds_remaining)}</span>
-            </div>
-            {#if job.tape_estimated_seconds_remaining > 0}
+            {#if job.phase === 'scanning'}
               <div class="stat-item">
-                <span class="stat-label">Tape ETA</span>
-                <span class="stat-value">{formatETA(job.tape_estimated_seconds_remaining)}</span>
+                <span class="stat-label">Files Found</span>
+                <span class="stat-value">{(job.scan_files_found || 0).toLocaleString()}</span>
               </div>
-            {/if}
-            <div class="stat-item">
-              <span class="stat-label">Files</span>
-              <span class="stat-value">{job.file_count}/{job.total_files}</span>
-            </div>
-            {#if job.tape_capacity_bytes > 0}
               <div class="stat-item">
-                <span class="stat-label">Tape Space</span>
-                <span class="stat-value">{formatBytes(Math.max(0, job.tape_capacity_bytes - job.tape_used_bytes - job.bytes_written))} free</span>
+                <span class="stat-label">Dirs Scanned</span>
+                <span class="stat-value">{(job.scan_dirs_scanned || 0).toLocaleString()}</span>
               </div>
+              <div class="stat-item">
+                <span class="stat-label">Total Size</span>
+                <span class="stat-value">{formatBytes(job.scan_bytes_found || 0)}</span>
+              </div>
+            {:else}
+              <div class="stat-item">
+                <span class="stat-label">Written</span>
+                <span class="stat-value">{formatBytes(job.bytes_written)} / {formatBytes(job.total_bytes)}</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">Speed</span>
+                <span class="stat-value">{formatSpeed(job.write_speed)}</span>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">Job ETA</span>
+                <span class="stat-value">{formatETA(job.estimated_seconds_remaining)}</span>
+              </div>
+              {#if job.tape_estimated_seconds_remaining > 0}
+                <div class="stat-item">
+                  <span class="stat-label">Tape ETA</span>
+                  <span class="stat-value">{formatETA(job.tape_estimated_seconds_remaining)}</span>
+                </div>
+              {/if}
+              <div class="stat-item">
+                <span class="stat-label">Files</span>
+                <span class="stat-value">{job.file_count}/{job.total_files}</span>
+              </div>
+              {#if job.tape_capacity_bytes > 0}
+                <div class="stat-item">
+                  <span class="stat-label">Tape Space</span>
+                  <span class="stat-value">{formatBytes(Math.max(0, job.tape_capacity_bytes - job.tape_used_bytes - job.bytes_written))} free</span>
+                </div>
+              {/if}
             {/if}
           </div>
           <div class="terminal-output">
