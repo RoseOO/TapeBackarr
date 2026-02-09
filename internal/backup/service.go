@@ -2174,25 +2174,47 @@ func (s *Service) finishTape(p finishTapeParams) error {
 	// For multi-tape tape 2+, catalog entries were inserted with the initial
 	// backup_set_id during checksum computation. Reassign them to this tape's
 	// backup_set_id so restore knows which files are on which tape.
+	// Use batched transactions for performance with large file counts.
 	if p.initialBackupSetID != 0 && p.initialBackupSetID != p.backupSetID && len(p.files) > 0 {
 		s.updateProgress(p.job.ID, "cataloging", fmt.Sprintf("Reassigning %d catalog entries to tape %s...", len(p.files), p.tapeLabel))
-		for _, f := range p.files {
+		const batchSize = 500
+		for i := 0; i < len(p.files); i += batchSize {
 			select {
 			case <-p.ctx.Done():
 				return p.ctx.Err()
 			default:
 			}
-			relPath, relErr := filepath.Rel(p.source.Path, f.Path)
-			if relErr != nil {
-				relPath = f.Path
+			end := i + batchSize
+			if end > len(p.files) {
+				end = len(p.files)
 			}
-			if _, err := s.db.Exec(`UPDATE catalog_entries SET backup_set_id = ? WHERE backup_set_id = ? AND file_path = ?`,
-				p.backupSetID, p.initialBackupSetID, relPath); err != nil {
-				s.logger.Warn("Failed to reassign catalog entry", map[string]interface{}{
-					"file":  relPath,
-					"error": err.Error(),
-				})
+			batch := p.files[i:end]
+
+			tx, err := s.db.Begin()
+			if err != nil {
+				s.logger.Warn("Failed to begin transaction for catalog reassignment", map[string]interface{}{"error": err.Error()})
+				continue
 			}
+			stmt, err := tx.Prepare(`UPDATE catalog_entries SET backup_set_id = ? WHERE backup_set_id = ? AND file_path = ?`)
+			if err != nil {
+				tx.Rollback()
+				s.logger.Warn("Failed to prepare statement for catalog reassignment", map[string]interface{}{"error": err.Error()})
+				continue
+			}
+			for _, f := range batch {
+				relPath, relErr := filepath.Rel(p.source.Path, f.Path)
+				if relErr != nil {
+					relPath = f.Path
+				}
+				if _, err := stmt.Exec(p.backupSetID, p.initialBackupSetID, relPath); err != nil {
+					s.logger.Warn("Failed to reassign catalog entry", map[string]interface{}{
+						"file":  relPath,
+						"error": err.Error(),
+					})
+				}
+			}
+			stmt.Close()
+			tx.Commit()
 		}
 	}
 
@@ -2267,20 +2289,49 @@ func (s *Service) finishTape(p finishTapeParams) error {
 	// cumulative size of all preceding files (plus tar header overhead per file).
 	// This allows the restore page to show where each file lives on tape.
 	// Tar header overhead: 512-byte header + up to 512 bytes padding = ~1KB per file.
+	// Use batched transactions for performance with large file counts.
 	const tarHeaderOverhead = 1024
+	const offsetBatchSize = 500
 	var cumulativeOffset int64
-	for _, f := range p.files {
-		relPath, relErr := filepath.Rel(p.source.Path, f.Path)
-		if relErr != nil {
-			relPath = f.Path
+	for i := 0; i < len(p.files); i += offsetBatchSize {
+		end := i + offsetBatchSize
+		if end > len(p.files) {
+			end = len(p.files)
 		}
-		if _, err := s.db.Exec(`UPDATE catalog_entries SET block_offset = ? WHERE backup_set_id = ? AND file_path = ?`,
-			cumulativeOffset, p.backupSetID, relPath); err != nil {
-			s.logger.Warn("Failed to update block_offset for catalog entry", map[string]interface{}{
-				"file": relPath, "error": err.Error(),
-			})
+		batch := p.files[i:end]
+
+		tx, err := s.db.Begin()
+		if err != nil {
+			s.logger.Warn("Failed to begin transaction for block_offset update", map[string]interface{}{"error": err.Error()})
+			// Advance cumulative offset even on failure to maintain correctness
+			for _, f := range batch {
+				cumulativeOffset += f.Size + tarHeaderOverhead
+			}
+			continue
 		}
-		cumulativeOffset += f.Size + tarHeaderOverhead
+		stmt, err := tx.Prepare(`UPDATE catalog_entries SET block_offset = ? WHERE backup_set_id = ? AND file_path = ?`)
+		if err != nil {
+			tx.Rollback()
+			s.logger.Warn("Failed to prepare statement for block_offset update", map[string]interface{}{"error": err.Error()})
+			for _, f := range batch {
+				cumulativeOffset += f.Size + tarHeaderOverhead
+			}
+			continue
+		}
+		for _, f := range batch {
+			relPath, relErr := filepath.Rel(p.source.Path, f.Path)
+			if relErr != nil {
+				relPath = f.Path
+			}
+			if _, err := stmt.Exec(cumulativeOffset, p.backupSetID, relPath); err != nil {
+				s.logger.Warn("Failed to update block_offset for catalog entry", map[string]interface{}{
+					"file": relPath, "error": err.Error(),
+				})
+			}
+			cumulativeOffset += f.Size + tarHeaderOverhead
+		}
+		stmt.Close()
+		tx.Commit()
 	}
 
 	// Update tape usage — use actual bytes written to tape (post-compression)
