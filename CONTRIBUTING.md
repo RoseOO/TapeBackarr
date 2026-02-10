@@ -40,6 +40,7 @@ TapeBackarr/
 │   ├── api/            # REST API handlers
 │   ├── auth/           # Authentication
 │   ├── backup/         # Backup service
+│   ├── cmdutil/        # Command utility functions
 │   ├── config/         # Configuration
 │   ├── database/       # Database layer
 │   ├── encryption/     # Encryption service

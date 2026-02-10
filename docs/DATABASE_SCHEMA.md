@@ -158,6 +158,7 @@ CREATE TABLE tapes (
     labeled_at DATETIME,
     encryption_key_fingerprint TEXT DEFAULT '',
     encryption_key_name TEXT DEFAULT '',
+    format_type TEXT NOT NULL DEFAULT 'raw' CHECK (format_type IN ('raw', 'ltfs')),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -243,6 +244,7 @@ CREATE TABLE backup_sets (
     encryption_key_id INTEGER REFERENCES encryption_keys(id),
     compressed BOOLEAN DEFAULT 0,
     compression_type TEXT DEFAULT 'none',
+    format_type TEXT NOT NULL DEFAULT 'raw' CHECK (format_type IN ('raw', 'ltfs')),
     parent_set_id INTEGER REFERENCES backup_sets(id),  -- For incremental reference
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP

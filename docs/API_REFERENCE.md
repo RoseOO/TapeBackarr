@@ -797,6 +797,22 @@ Deletes a backup set and its associated catalog entries. Only backup sets with s
 }
 ```
 
+### Cancel Backup Set
+
+```http
+POST /api/v1/backup-sets/{id}/cancel
+Authorization: Bearer <token>
+```
+
+Cancels an in-progress backup set. Only backup sets with status `running` can be cancelled.
+
+**Response:**
+```json
+{
+  "status": "cancelled"
+}
+```
+
 ---
 
 ## Catalog
@@ -925,6 +941,32 @@ Content-Type: application/json
   "restore_id": 42,
   "status": "running",
   "message": "Restore started. Please insert tape WEEKLY-001."
+}
+```
+
+### Raw Read from Tape
+
+```http
+POST /api/v1/restore/raw-read
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "drive_id": 1,
+  "file_number": 1,
+  "dest_path": "/tmp/raw-output",
+  "block_size": 65536
+}
+```
+
+Performs a low-level raw read from the tape at a specified file position. Useful for diagnostics and manual data recovery.
+
+**Response:**
+```json
+{
+  "status": "completed",
+  "bytes_read": 1048576,
+  "dest_path": "/tmp/raw-output"
 }
 ```
 
@@ -1880,6 +1922,110 @@ Content-Type: application/json
 ```
 
 Transfers a tape between two slots using `mtx transfer`.
+
+---
+
+## LTFS (Linear Tape File System)
+
+LTFS endpoints manage tapes formatted with the Linear Tape File System, allowing file-level access to tape contents.
+
+### LTFS Status
+
+```http
+GET /api/v1/ltfs/status
+Authorization: Bearer <token>
+```
+
+Returns the current LTFS status including mounted tapes and mount points.
+
+### Format Tape with LTFS
+
+```http
+POST /api/v1/ltfs/format
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "drive_id": 1,
+  "tape_id": 1,
+  "label": "LTFS-001"
+}
+```
+
+Formats a tape with LTFS. **Warning:** This erases all existing data on the tape.
+
+### Mount LTFS Tape
+
+```http
+POST /api/v1/ltfs/mount
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "drive_id": 1,
+  "mount_point": "/mnt/ltfs"
+}
+```
+
+Mounts an LTFS-formatted tape as a filesystem at the specified mount point.
+
+### Unmount LTFS Tape
+
+```http
+POST /api/v1/ltfs/unmount
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "drive_id": 1
+}
+```
+
+Cleanly unmounts the LTFS tape. Always unmount before ejecting.
+
+### Browse LTFS Tape
+
+```http
+GET /api/v1/ltfs/browse
+Authorization: Bearer <token>
+```
+
+**Query Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `path` | string | Directory path to browse (default: root) |
+
+Returns a listing of files and directories on the mounted LTFS tape.
+
+### Restore from LTFS Tape
+
+```http
+POST /api/v1/ltfs/restore
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "source_path": "/mnt/ltfs/documents",
+  "dest_path": "/restore/output",
+  "files": ["report.pdf", "data.csv"]
+}
+```
+
+Copies files from the mounted LTFS tape to a destination path.
+
+### LTFS Consistency Check
+
+```http
+POST /api/v1/ltfs/check
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "drive_id": 1
+}
+```
+
+Runs a consistency check on the LTFS tape. Use this if the tape was not cleanly unmounted.
 
 ---
 
