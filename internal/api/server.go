@@ -7530,9 +7530,9 @@ func (s *Server) handleLTFSStatus(w http.ResponseWriter, r *http.Request) {
 	if driveIDStr != "" {
 		driveID, err := strconv.ParseInt(driveIDStr, 10, 64)
 		if err == nil {
-			var dp string
-			if dbErr := s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", driveID).Scan(&dp); dbErr == nil {
-				devicePath = dp
+			var drivePath string
+			if dbErr := s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", driveID).Scan(&drivePath); dbErr == nil {
+				devicePath = drivePath
 			}
 		}
 	}
@@ -7781,7 +7781,7 @@ func (s *Server) handleLTFSBrowse(w http.ResponseWriter, r *http.Request) {
 
 	for _, f := range allFiles {
 		// Skip the metadata file
-		if f.Path == ".tapebackarr.json" {
+		if f.Path == tape.LTFSMetadataFile {
 			continue
 		}
 

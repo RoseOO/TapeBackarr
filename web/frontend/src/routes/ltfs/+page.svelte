@@ -565,7 +565,8 @@
       </div>
       <div class="form-group">
         <label for="fmt-label">Tape Label</label>
-        <input id="fmt-label" type="text" bind:value={formatLabel} placeholder="e.g. BACKUP01" maxlength="6" />
+        <input id="fmt-label" type="text" bind:value={formatLabel} placeholder="e.g. BKP001" maxlength="6" />
+        <small>Up to 6 characters (LTO barcode format)</small>
       </div>
       <div class="form-group">
         <label for="fmt-uuid">UUID</label>

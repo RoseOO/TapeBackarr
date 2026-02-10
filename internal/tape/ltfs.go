@@ -15,6 +15,11 @@ import (
 // LTFSDefaultMountPoint is the default directory where LTFS tapes are mounted.
 const LTFSDefaultMountPoint = "/mnt/ltfs"
 
+// LTFSMetadataFile is the filename written to the root of LTFS volumes for
+// TapeBackarr identification. Defined as a constant for consistency across
+// the codebase.
+const LTFSMetadataFile = ".tapebackarr.json"
+
 // LTFSService provides LTFS (Linear Tape File System) operations for tape drives.
 // LTFS makes tapes self-describing by storing data as a standard POSIX filesystem,
 // allowing any LTFS-compatible tool to read the tape without needing an external
@@ -386,7 +391,7 @@ func (l *LTFSService) FormatAndLabel(ctx context.Context, label string, uuid str
 		return fmt.Errorf("failed to marshal LTFS metadata: %w", err)
 	}
 
-	metadataPath := filepath.Join(l.mountPoint, ".tapebackarr.json")
+	metadataPath := filepath.Join(l.mountPoint, LTFSMetadataFile)
 	if err := os.WriteFile(metadataPath, metadata, 0644); err != nil {
 		l.Unmount(ctx)
 		return fmt.Errorf("failed to write metadata to LTFS: %w", err)
@@ -407,7 +412,7 @@ func (l *LTFSService) ReadLTFSLabel(ctx context.Context) (*LTFSLabel, error) {
 		return nil, fmt.Errorf("LTFS volume not mounted at %s", l.mountPoint)
 	}
 
-	metadataPath := filepath.Join(l.mountPoint, ".tapebackarr.json")
+	metadataPath := filepath.Join(l.mountPoint, LTFSMetadataFile)
 	data, err := os.ReadFile(metadataPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -456,9 +461,9 @@ func copyFile(src, dst string) (int64, error) {
 		return total, err
 	}
 
-	// Preserve file mode from source
+	// Preserve file mode from source; chmod failure is non-fatal.
 	if info, statErr := srcFile.Stat(); statErr == nil {
-		os.Chmod(dst, info.Mode())
+		_ = os.Chmod(dst, info.Mode())
 	}
 
 	return total, nil
