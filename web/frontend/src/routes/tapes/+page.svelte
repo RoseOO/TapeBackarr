@@ -67,6 +67,7 @@
   let batchLabelCount = 1;
   let batchLabelDigits = 3;
   let batchLabelPoolId: number | null = null;
+  let batchLabelFormatType = 'raw';
 
   // Batch label progress
   let batchLabelStatus: BatchLabelStatus | null = null;
@@ -87,6 +88,7 @@
     drive_id: null as number | null,
     write_label: true,
     auto_eject: true,
+    format_type: 'raw' as string,
   };
 
   let formatDriveId: number | null = null;
@@ -253,6 +255,7 @@
         count: batchLabelCount,
         digits: batchLabelDigits,
         pool_id: batchLabelPoolId ?? undefined,
+        format_type: batchLabelFormatType,
       });
       showBatchLabelModal = false;
       showSuccess('Batch label started');
@@ -461,6 +464,7 @@
     batchLabelCount = 1;
     batchLabelDigits = 3;
     batchLabelPoolId = null;
+    batchLabelFormatType = 'raw';
     showBatchLabelModal = true;
   }
 
@@ -475,6 +479,7 @@
       drive_id: defaultDriveId,
       write_label: true,
       auto_eject: true,
+      format_type: 'raw',
     };
     selectedTape = null;
     detectedType = '';
@@ -735,6 +740,14 @@
                 </label>
                 <small>Automatically ejects the tape from the drive after writing the label</small>
               </div>
+              <div class="form-group">
+                <label for="format-type">Tape Format</label>
+                <select id="format-type" bind:value={formData.format_type}>
+                  <option value="raw">Raw (tar-based)</option>
+                  <option value="ltfs">LTFS (Linear Tape File System)</option>
+                </select>
+                <small>{formData.format_type === 'ltfs' ? 'LTFS makes the tape self-describing and readable without TapeBackarr. Requires LTFS tools installed.' : 'Traditional tar-based format with TapeBackarr label.'}</small>
+              </div>
             {/if}
           {/if}
         {/if}
@@ -918,6 +931,14 @@
               <option value={pool.id}>{pool.name}</option>
             {/each}
           </select>
+        </div>
+        <div class="form-group">
+          <label for="batch-format-type">Tape Format</label>
+          <select id="batch-format-type" bind:value={batchLabelFormatType}>
+            <option value="raw">Raw (tar-based)</option>
+            <option value="ltfs">LTFS (Linear Tape File System)</option>
+          </select>
+          <small>{batchLabelFormatType === 'ltfs' ? 'Each tape will be formatted with LTFS. Requires LTFS tools installed.' : 'Traditional tar-based format with TapeBackarr label.'}</small>
         </div>
         {#if batchLabelPreview.length > 0}
           <div class="batch-preview">

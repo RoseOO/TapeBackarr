@@ -95,23 +95,24 @@ type UnknownTapeInfo struct {
 
 // Tape represents a physical tape media
 type Tape struct {
-	ID              int64      `json:"id" db:"id"`
-	UUID            string     `json:"uuid" db:"uuid"`
-	Barcode         string     `json:"barcode" db:"barcode"`
-	Label           string     `json:"label" db:"label"`
-	LTOType         string     `json:"lto_type" db:"lto_type"`
-	PoolID          *int64     `json:"pool_id" db:"pool_id"`
-	Status          TapeStatus `json:"status" db:"status"`
-	CapacityBytes   int64      `json:"capacity_bytes" db:"capacity_bytes"`
-	UsedBytes       int64      `json:"used_bytes" db:"used_bytes"`
-	WriteCount      int        `json:"write_count" db:"write_count"`
-	LastWrittenAt   *time.Time `json:"last_written_at" db:"last_written_at"`
-	OffsiteLocation string     `json:"offsite_location" db:"offsite_location"`
-	ExportTime      *time.Time `json:"export_time" db:"export_time"`
-	ImportTime      *time.Time `json:"import_time" db:"import_time"`
-	LabeledAt       *time.Time `json:"labeled_at" db:"labeled_at"`
-	CreatedAt       time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at" db:"updated_at"`
+	ID              int64          `json:"id" db:"id"`
+	UUID            string         `json:"uuid" db:"uuid"`
+	Barcode         string         `json:"barcode" db:"barcode"`
+	Label           string         `json:"label" db:"label"`
+	LTOType         string         `json:"lto_type" db:"lto_type"`
+	PoolID          *int64         `json:"pool_id" db:"pool_id"`
+	Status          TapeStatus     `json:"status" db:"status"`
+	FormatType      TapeFormatType `json:"format_type" db:"format_type"`
+	CapacityBytes   int64          `json:"capacity_bytes" db:"capacity_bytes"`
+	UsedBytes       int64          `json:"used_bytes" db:"used_bytes"`
+	WriteCount      int            `json:"write_count" db:"write_count"`
+	LastWrittenAt   *time.Time     `json:"last_written_at" db:"last_written_at"`
+	OffsiteLocation string         `json:"offsite_location" db:"offsite_location"`
+	ExportTime      *time.Time     `json:"export_time" db:"export_time"`
+	ImportTime      *time.Time     `json:"import_time" db:"import_time"`
+	LabeledAt       *time.Time     `json:"labeled_at" db:"labeled_at"`
+	CreatedAt       time.Time      `json:"created_at" db:"created_at"`
+	UpdatedAt       time.Time      `json:"updated_at" db:"updated_at"`
 }
 
 // DriveStatus represents the state of a tape drive
@@ -239,6 +240,7 @@ type BackupSet struct {
 	JobID           int64           `json:"job_id" db:"job_id"`
 	TapeID          int64           `json:"tape_id" db:"tape_id"`
 	BackupType      BackupType      `json:"backup_type" db:"backup_type"`
+	FormatType      TapeFormatType  `json:"format_type" db:"format_type"`
 	StartTime       time.Time       `json:"start_time" db:"start_time"`
 	EndTime         *time.Time      `json:"end_time" db:"end_time"`
 	Status          BackupSetStatus `json:"status" db:"status"`

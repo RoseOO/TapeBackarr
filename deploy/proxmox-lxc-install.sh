@@ -219,6 +219,10 @@ lxc.mount.entry: /dev/st0 dev/st0 none bind,optional,create=file
 
 # SCSI generic device access
 lxc.cgroup2.devices.allow: c 21:* rwm
+
+# FUSE device access (required for LTFS)
+lxc.cgroup2.devices.allow: c 10:229 rwm
+lxc.mount.entry: /dev/fuse dev/fuse none bind,optional,create=file
 EOF
         
         # Also try to passthrough the SCSI generic device if available
@@ -295,7 +299,7 @@ install_tapebackarr() {
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
         apt-get upgrade -y -qq
-        apt-get install -y -qq wget curl git mt-st mtx tar mbuffer sg3-utils lsscsi pigz
+        apt-get install -y -qq wget curl git mt-st mtx tar mbuffer sg3-utils lsscsi pigz fuse libfuse2 ltfs
     "
     msg_ok "Dependencies installed"
     

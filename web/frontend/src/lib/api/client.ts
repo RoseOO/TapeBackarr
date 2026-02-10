@@ -65,7 +65,7 @@ export async function getTape(id: number) {
   return fetchApi(`/tapes/${id}`);
 }
 
-export async function createTape(data: { barcode: string; label: string; pool_id?: number; lto_type?: string; capacity_bytes: number; drive_id?: number; write_label?: boolean; auto_eject?: boolean }) {
+export async function createTape(data: { barcode: string; label: string; pool_id?: number; lto_type?: string; capacity_bytes: number; drive_id?: number; write_label?: boolean; auto_eject?: boolean; format_type?: string }) {
   return fetchApi('/tapes', {
     method: 'POST',
     body: JSON.stringify(data),
@@ -496,7 +496,7 @@ export async function restartService() {
 }
 
 // Batch label tapes with auto-detect/label/eject loop
-export async function batchLabelTapes(driveId: number, data: { prefix: string; start_number: number; count: number; digits: number; pool_id?: number }) {
+export async function batchLabelTapes(driveId: number, data: { prefix: string; start_number: number; count: number; digits: number; pool_id?: number; format_type?: string }) {
   return fetchApi(`/drives/${driveId}/batch-label`, {
     method: 'POST',
     body: JSON.stringify(data),
@@ -504,7 +504,7 @@ export async function batchLabelTapes(driveId: number, data: { prefix: string; s
 }
 
 // Batch label tapes from tapes endpoint
-export async function batchLabelTapesFromTapes(data: { drive_id: number; prefix: string; start_number: number; count: number; digits: number; pool_id?: number }) {
+export async function batchLabelTapesFromTapes(data: { drive_id: number; prefix: string; start_number: number; count: number; digits: number; pool_id?: number; format_type?: string }) {
   return fetchApi('/tapes/batch-label', {
     method: 'POST',
     body: JSON.stringify(data),

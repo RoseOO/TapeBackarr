@@ -2,6 +2,7 @@ package tape
 
 import (
 	"context"
+	"crypto/rand"
 	"os"
 	"path/filepath"
 	"testing"
@@ -224,5 +225,110 @@ func TestLTFSVolumeInfo(t *testing.T) {
 	}
 	if info.UsedBytes != 1000000 {
 		t.Errorf("unexpected used bytes: %d", info.UsedBytes)
+	}
+}
+
+func TestCopyFileEncryptedDecrypted(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcPath := filepath.Join(tmpDir, "source.txt")
+	encPath := filepath.Join(tmpDir, "source.txt.enc")
+	decPath := filepath.Join(tmpDir, "source_decrypted.txt")
+
+	content := []byte("Hello, encrypted LTFS tape world! This is a test of per-file encryption.")
+	if err := os.WriteFile(srcPath, content, 0644); err != nil {
+		t.Fatalf("failed to write source file: %v", err)
+	}
+
+	// Generate a random 32-byte AES-256 key
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+
+	// Encrypt
+	n, err := copyFileEncrypted(srcPath, encPath, key)
+	if err != nil {
+		t.Fatalf("copyFileEncrypted failed: %v", err)
+	}
+	if n != int64(len(content)) {
+		t.Errorf("expected %d plaintext bytes, got %d", len(content), n)
+	}
+
+	// Verify encrypted file is different from plaintext
+	encData, _ := os.ReadFile(encPath)
+	if string(encData) == string(content) {
+		t.Error("encrypted data should differ from plaintext")
+	}
+
+	// Decrypt
+	n, err = copyFileDecrypted(encPath, decPath, key)
+	if err != nil {
+		t.Fatalf("copyFileDecrypted failed: %v", err)
+	}
+	if n != int64(len(content)) {
+		t.Errorf("expected %d decrypted bytes, got %d", len(content), n)
+	}
+
+	// Verify decrypted content matches original
+	decData, err := os.ReadFile(decPath)
+	if err != nil {
+		t.Fatalf("failed to read decrypted file: %v", err)
+	}
+	if string(decData) != string(content) {
+		t.Errorf("decrypted content mismatch: expected %q, got %q", content, decData)
+	}
+}
+
+func TestCopyFileEncryptedWrongKey(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcPath := filepath.Join(tmpDir, "source.txt")
+	encPath := filepath.Join(tmpDir, "source.txt.enc")
+	decPath := filepath.Join(tmpDir, "source_decrypted.txt")
+
+	content := []byte("Secret data that should not be readable with the wrong key.")
+	if err := os.WriteFile(srcPath, content, 0644); err != nil {
+		t.Fatalf("failed to write source: %v", err)
+	}
+
+	key := make([]byte, 32)
+	rand.Read(key)
+
+	if _, err := copyFileEncrypted(srcPath, encPath, key); err != nil {
+		t.Fatalf("copyFileEncrypted failed: %v", err)
+	}
+
+	// Try to decrypt with a different key — should fail
+	wrongKey := make([]byte, 32)
+	rand.Read(wrongKey)
+
+	_, err := copyFileDecrypted(encPath, decPath, wrongKey)
+	if err == nil {
+		t.Error("expected decryption to fail with wrong key")
+	}
+}
+
+func TestWriteFilesEncryptedNotMounted(t *testing.T) {
+	svc := NewLTFSService("/dev/nst0", "/tmp/ltfs-test-enc-unmounted-"+t.Name())
+	key := make([]byte, 32)
+	rand.Read(key)
+	_, _, err := svc.WriteFilesEncrypted(context.Background(), "/tmp", nil, key, nil)
+	if err == nil {
+		t.Error("expected error when LTFS is not mounted")
+	}
+}
+
+func TestRestoreFilesDecryptedNotMounted(t *testing.T) {
+	svc := NewLTFSService("/dev/nst0", "/tmp/ltfs-test-dec-unmounted-"+t.Name())
+	key := make([]byte, 32)
+	rand.Read(key)
+	_, _, err := svc.RestoreFilesDecrypted(context.Background(), "/tmp/dest", nil, key)
+	if err == nil {
+		t.Error("expected error when LTFS is not mounted")
+	}
+}
+
+func TestEncryptedFileSuffix(t *testing.T) {
+	if EncryptedFileSuffix != ".enc" {
+		t.Errorf("unexpected encrypted file suffix: %s", EncryptedFileSuffix)
 	}
 }

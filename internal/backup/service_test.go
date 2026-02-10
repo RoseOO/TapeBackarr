@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -1905,6 +1906,53 @@ func TestStreamToTapeLTFSEmptyFiles(t *testing.T) {
 		"/tmp",
 		nil,
 		"/tmp/ltfs-test",
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 bytes, got %d", n)
+	}
+}
+
+// TestStreamToTapeLTFSEncryptedNotMounted verifies that StreamToTapeLTFSEncrypted
+// returns an error when the LTFS volume is not mounted.
+func TestStreamToTapeLTFSEncryptedNotMounted(t *testing.T) {
+	svc := &Service{}
+	files := []FileInfo{
+		{Path: "/tmp/test.txt", Size: 100},
+	}
+	// Generate a test key (base64 encoded 32 bytes)
+	key := base64.StdEncoding.EncodeToString(make([]byte, 32))
+
+	_, err := svc.StreamToTapeLTFSEncrypted(
+		context.Background(),
+		"/tmp",
+		files,
+		"/tmp/ltfs-enc-not-mounted-"+t.Name(),
+		key,
+		nil,
+		nil,
+	)
+	if err == nil {
+		t.Error("expected error when LTFS volume is not mounted")
+	}
+}
+
+// TestStreamToTapeLTFSEncryptedEmptyFiles verifies that StreamToTapeLTFSEncrypted
+// handles empty file lists correctly.
+func TestStreamToTapeLTFSEncryptedEmptyFiles(t *testing.T) {
+	svc := &Service{}
+	key := base64.StdEncoding.EncodeToString(make([]byte, 32))
+
+	n, err := svc.StreamToTapeLTFSEncrypted(
+		context.Background(),
+		"/tmp",
+		nil,
+		"/tmp/ltfs-enc-test",
+		key,
 		nil,
 		nil,
 	)
