@@ -1356,6 +1356,43 @@ func (s *Service) StreamToTapeLTFS(ctx context.Context, sourcePath string, files
 	return totalBytes, err
 }
 
+// StreamToTapeLTFSEncrypted writes files to a mounted LTFS volume with per-file
+// AES-256-GCM encryption. Each file is encrypted individually so single files
+// can be restored without decrypting the entire volume.
+func (s *Service) StreamToTapeLTFSEncrypted(ctx context.Context, sourcePath string, files []FileInfo, ltfsMountPoint string, encryptionKey string, progressCb func(bytesWritten int64), pauseFlag *int32) (int64, error) {
+	if len(files) == 0 {
+		return 0, nil
+	}
+
+	ltfsSvc := tape.NewLTFSService("", ltfsMountPoint)
+	if !ltfsSvc.IsMounted() {
+		return 0, fmt.Errorf("LTFS volume not mounted at %s", ltfsMountPoint)
+	}
+
+	keyBytes, err := base64.StdEncoding.DecodeString(encryptionKey)
+	if err != nil {
+		return 0, fmt.Errorf("failed to decode encryption key: %w", err)
+	}
+
+	filePaths := make([]string, len(files))
+	for i, f := range files {
+		filePaths[i] = f.Path
+	}
+
+	totalBytes, _, err := ltfsSvc.WriteFilesEncrypted(ctx, sourcePath, filePaths, keyBytes, func(bytesWritten int64) {
+		if pauseFlag != nil {
+			for atomic.LoadInt32(pauseFlag) == 1 {
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+		if progressCb != nil {
+			progressCb(bytesWritten)
+		}
+	})
+
+	return totalBytes, err
+}
+
 // GetEncryptionKey retrieves the base64 encryption key for a given key ID
 func (s *Service) GetEncryptionKey(ctx context.Context, keyID int64) (string, error) {
 	var keyData string
@@ -1522,6 +1559,19 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		})
 	}
 
+	// Check the tape's format type to determine streaming method (raw tar or LTFS)
+	var tapeFormatType string
+	if err := s.db.QueryRow("SELECT COALESCE(format_type, 'raw') FROM tapes WHERE id = ?", tapeID).Scan(&tapeFormatType); err != nil {
+		tapeFormatType = "raw"
+	}
+	useLTFS := tapeFormatType == string(models.TapeFormatLTFS)
+
+	// For LTFS tapes, determine the mount point
+	ltfsMountPoint := ""
+	if useLTFS {
+		ltfsMountPoint = tape.LTFSDefaultMountPoint
+	}
+
 	// Register active job progress
 	s.mu.Lock()
 	s.activeJobs[job.ID] = &JobProgress{
@@ -1560,9 +1610,9 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 
 	// Create backup set record
 	result, err := s.db.Exec(`
-		INSERT INTO backup_sets (job_id, tape_id, backup_type, start_time, status)
-		VALUES (?, ?, ?, ?, ?)
-	`, job.ID, tapeID, backupType, startTime, models.BackupSetStatusRunning)
+		INSERT INTO backup_sets (job_id, tape_id, backup_type, format_type, start_time, status)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, job.ID, tapeID, backupType, tapeFormatType, startTime, models.BackupSetStatusRunning)
 	if err != nil {
 		s.updateProgress(job.ID, "failed", "Failed to create backup set: "+err.Error())
 		s.emitEvent("error", "backup", "Backup Failed", fmt.Sprintf("Job %s failed: %s", job.Name, err.Error()))
@@ -1937,6 +1987,24 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		compressionType = job.Compression
 	}
 
+	// For LTFS tapes, mount the volume before streaming
+	if useLTFS {
+		ltfsSvc := tape.NewLTFSService(devicePath, ltfsMountPoint)
+		s.updateProgress(job.ID, "positioning", "Mounting LTFS volume...")
+		if err := ltfsSvc.Mount(ctx); err != nil {
+			errMsg := fmt.Sprintf("Failed to mount LTFS volume: %s", err.Error())
+			s.updateProgress(job.ID, "failed", errMsg)
+			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, errMsg)
+			return nil, fmt.Errorf("failed to mount LTFS: %w", err)
+		}
+		defer func() {
+			umountSvc := tape.NewLTFSService(devicePath, ltfsMountPoint)
+			if umountErr := umountSvc.Unmount(ctx); umountErr != nil {
+				s.logger.Warn("Failed to unmount LTFS after backup", map[string]interface{}{"error": umountErr.Error()})
+			}
+		}()
+	}
+
 	// streamFailed is a helper to save state on stream failure for retry capability
 	streamFailed := func(errMsg string) {
 		s.mu.Lock()
@@ -1948,12 +2016,24 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 
 	// streamBatch streams a batch of files to the tape device with the configured
 	// encryption and compression settings. Returns actual bytes written to tape.
+	// For LTFS tapes, files are written directly to the mounted LTFS volume.
 	streamBatch := func(batch []FileInfo) (int64, error) {
 		var batchBytes int64
 		for _, f := range batch {
 			batchBytes += f.Size
 		}
 
+		if useLTFS {
+			// LTFS mode: write files to the mounted LTFS volume
+			if encrypted {
+				s.updateProgress(job.ID, "streaming", fmt.Sprintf("Encrypting and writing %d files to LTFS tape %s...", len(batch), expectedLabel))
+				return s.StreamToTapeLTFSEncrypted(ctx, source.Path, batch, ltfsMountPoint, encKey, progressCb, &pauseFlag)
+			}
+			s.updateProgress(job.ID, "streaming", fmt.Sprintf("Writing %d files to LTFS tape %s...", len(batch), expectedLabel))
+			return s.StreamToTapeLTFS(ctx, source.Path, batch, ltfsMountPoint, progressCb, &pauseFlag)
+		}
+
+		// Raw mode: tar-based streaming pipeline
 		if encrypted && useCompression {
 			s.updateProgress(job.ID, "streaming", fmt.Sprintf("Compressing (%s), encrypting and streaming %d files to tape %s...", job.Compression, len(batch), expectedLabel))
 			return s.StreamToTapeCompressedEncrypted(ctx, source.Path, batch, devicePath, job.Compression, encKey, progressCb, &pauseFlag)
@@ -2070,9 +2150,9 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 				// For tapes after the first, we need a new backup set
 				if seqNum > 1 {
 					setResult, err := s.db.Exec(`
-						INSERT INTO backup_sets (job_id, tape_id, backup_type, start_time, status)
-						VALUES (?, ?, ?, ?, ?)
-					`, job.ID, currentTapeID, backupType, time.Now(), models.BackupSetStatusRunning)
+						INSERT INTO backup_sets (job_id, tape_id, backup_type, format_type, start_time, status)
+						VALUES (?, ?, ?, ?, ?, ?)
+					`, job.ID, currentTapeID, backupType, tapeFormatType, time.Now(), models.BackupSetStatusRunning)
 					if err != nil {
 						s.updateProgress(job.ID, "failed", "Failed to create backup set for tape "+currentLabel+": "+err.Error())
 						s.db.Exec("UPDATE tape_spanning_sets SET status = 'failed' WHERE id = ?", spanningSetID)
@@ -2132,6 +2212,17 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 			remaining = rest
 			if len(remaining) == 0 {
 				break
+			}
+
+			// For LTFS tapes, unmount the volume before ejecting
+			if useLTFS {
+				umountSvc := tape.NewLTFSService(devicePath, ltfsMountPoint)
+				if umountErr := umountSvc.Unmount(ctx); umountErr != nil {
+					s.logger.Warn("Failed to unmount LTFS before tape eject", map[string]interface{}{
+						"tape_label": currentLabel,
+						"error":      umountErr.Error(),
+					})
+				}
 			}
 
 			// Auto-eject the completed tape so the operator can swap it
@@ -2282,6 +2373,18 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 			}
 			s.mu.Unlock()
 
+			// For LTFS tapes, mount the new volume before continuing
+			if useLTFS {
+				mountSvc := tape.NewLTFSService(devicePath, ltfsMountPoint)
+				s.updateProgress(job.ID, "positioning", fmt.Sprintf("Mounting LTFS volume on tape %s...", currentLabel))
+				if mountErr := mountSvc.Mount(ctx); mountErr != nil {
+					errMsg := fmt.Sprintf("Failed to mount LTFS on new tape %s: %s", currentLabel, mountErr.Error())
+					s.updateProgress(job.ID, "failed", errMsg)
+					s.db.Exec("UPDATE tape_spanning_sets SET status = 'failed' WHERE id = ?", spanningSetID)
+					return nil, fmt.Errorf("%s", errMsg)
+				}
+			}
+
 			s.updateProgress(job.ID, "streaming", fmt.Sprintf("Continuing backup on tape %s (%d files remaining)", currentLabel, len(remaining)))
 		}
 
@@ -2327,6 +2430,7 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		JobID:           job.ID,
 		TapeID:          tapeID,
 		BackupType:      backupType,
+		FormatType:      models.TapeFormatType(tapeFormatType),
 		StartTime:       startTime,
 		EndTime:         &endTime,
 		Status:          models.BackupSetStatusCompleted,

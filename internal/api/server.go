@@ -1120,6 +1120,7 @@ func (s *Server) handleCreateTape(w http.ResponseWriter, r *http.Request) {
 		DriveID       *int64 `json:"drive_id"`
 		WriteLabel    bool   `json:"write_label"`
 		AutoEject     bool   `json:"auto_eject"`
+		FormatType    string `json:"format_type"` // "raw" (default) or "ltfs"
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.respondError(w, http.StatusBadRequest, "invalid request body")
@@ -1128,6 +1129,21 @@ func (s *Server) handleCreateTape(w http.ResponseWriter, r *http.Request) {
 
 	if req.Label == "" {
 		s.respondError(w, http.StatusBadRequest, "label is required")
+		return
+	}
+
+	// Default format type to raw
+	if req.FormatType == "" {
+		req.FormatType = string(models.TapeFormatRaw)
+	}
+	if req.FormatType != string(models.TapeFormatRaw) && req.FormatType != string(models.TapeFormatLTFS) {
+		s.respondError(w, http.StatusBadRequest, "format_type must be 'raw' or 'ltfs'")
+		return
+	}
+
+	// LTFS format requires a drive and write_label to be set
+	if req.FormatType == string(models.TapeFormatLTFS) && req.WriteLabel && !tape.IsAvailable() {
+		s.respondError(w, http.StatusServiceUnavailable, "LTFS software not installed on this system")
 		return
 	}
 
@@ -1210,12 +1226,26 @@ func (s *Server) handleCreateTape(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Write label to physical tape
-		if err := driveSvc.WriteTapeLabel(ctx, req.Label, tapeUUID, poolName); err != nil {
-			s.logger.Warn("Failed to write label to physical tape, continuing with software tracking", map[string]interface{}{
-				"error": err.Error(),
-				"label": req.Label,
-			})
+		// Write label to physical tape — use LTFS format if requested
+		if req.FormatType == string(models.TapeFormatLTFS) {
+			mountPoint := s.config.Tape.LTFSMountPoint
+			if mountPoint == "" {
+				mountPoint = tape.LTFSDefaultMountPoint
+			}
+			ltfsSvc := tape.NewLTFSService(devicePath, mountPoint)
+			if err := ltfsSvc.FormatAndLabel(ctx, req.Label, tapeUUID, poolName); err != nil {
+				s.logger.Warn("Failed to format tape as LTFS, continuing with software tracking", map[string]interface{}{
+					"error": err.Error(),
+					"label": req.Label,
+				})
+			}
+		} else {
+			if err := driveSvc.WriteTapeLabel(ctx, req.Label, tapeUUID, poolName); err != nil {
+				s.logger.Warn("Failed to write label to physical tape, continuing with software tracking", map[string]interface{}{
+					"error": err.Error(),
+					"label": req.Label,
+				})
+			}
 		}
 
 		// Auto-eject after labeling if requested
@@ -1229,9 +1259,9 @@ func (s *Server) handleCreateTape(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := s.db.Exec(`
-		INSERT INTO tapes (uuid, barcode, label, pool_id, lto_type, status, capacity_bytes, labeled_at)
-		VALUES (?, ?, ?, ?, ?, 'blank', ?, CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END)
-	`, tapeUUID, req.Barcode, req.Label, req.PoolID, req.LTOType, req.CapacityBytes, req.WriteLabel)
+		INSERT INTO tapes (uuid, barcode, label, pool_id, lto_type, status, capacity_bytes, format_type, labeled_at)
+		VALUES (?, ?, ?, ?, ?, 'blank', ?, ?, CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END)
+	`, tapeUUID, req.Barcode, req.Label, req.PoolID, req.LTOType, req.CapacityBytes, req.FormatType, req.WriteLabel)
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -6191,11 +6221,12 @@ func (s *Server) handleBatchLabel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Prefix   string `json:"prefix"`       // e.g., "NAS-OFF-"
-		StartNum int    `json:"start_number"` // e.g., 1
-		Count    int    `json:"count"`        // How many tapes to label
-		Digits   int    `json:"digits"`       // e.g., 3 for 001, 002
-		PoolID   *int64 `json:"pool_id"`
+		Prefix     string `json:"prefix"`       // e.g., "NAS-OFF-"
+		StartNum   int    `json:"start_number"` // e.g., 1
+		Count      int    `json:"count"`        // How many tapes to label
+		Digits     int    `json:"digits"`       // e.g., 3 for 001, 002
+		PoolID     *int64 `json:"pool_id"`
+		FormatType string `json:"format_type"` // "raw" (default) or "ltfs"
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.respondError(w, http.StatusBadRequest, "invalid request body")
@@ -6215,6 +6246,19 @@ func (s *Server) handleBatchLabel(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.StartNum < 0 {
 		req.StartNum = 1
+	}
+
+	// Default and validate format type
+	if req.FormatType == "" {
+		req.FormatType = string(models.TapeFormatRaw)
+	}
+	if req.FormatType != string(models.TapeFormatRaw) && req.FormatType != string(models.TapeFormatLTFS) {
+		s.respondError(w, http.StatusBadRequest, "format_type must be 'raw' or 'ltfs'")
+		return
+	}
+	if req.FormatType == string(models.TapeFormatLTFS) && !tape.IsAvailable() {
+		s.respondError(w, http.StatusServiceUnavailable, "LTFS software not installed on this system")
+		return
 	}
 
 	s.batchLabel.mu.Lock()
@@ -6247,7 +6291,7 @@ func (s *Server) handleBatchLabel(w http.ResponseWriter, r *http.Request) {
 	s.batchLabel.mu.Unlock()
 
 	// Start batch labelling in background
-	go s.runBatchLabel(ctx, devicePath, driveID, req.Prefix, req.StartNum, req.Count, req.Digits, req.PoolID)
+	go s.runBatchLabel(ctx, devicePath, driveID, req.Prefix, req.StartNum, req.Count, req.Digits, req.PoolID, req.FormatType)
 
 	s.respondJSON(w, http.StatusAccepted, map[string]interface{}{
 		"status":  "started",
@@ -6255,7 +6299,7 @@ func (s *Server) handleBatchLabel(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) runBatchLabel(ctx context.Context, devicePath string, driveID int64, prefix string, startNum, count, digits int, poolID *int64) {
+func (s *Server) runBatchLabel(ctx context.Context, devicePath string, driveID int64, prefix string, startNum, count, digits int, poolID *int64, formatType string) {
 	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
 
 	defer func() {
@@ -6368,10 +6412,24 @@ func (s *Server) runBatchLabel(ctx context.Context, devicePath string, driveID i
 		s.batchLabel.message = fmt.Sprintf("Writing label '%s' to tape...", label)
 		s.batchLabel.mu.Unlock()
 
-		// Write label
-		if err := driveSvc.WriteTapeLabel(ctx, label, tapeUUID, poolName); err != nil {
+		// Write label — use LTFS format if requested
+		var writeErr error
+		if formatType == string(models.TapeFormatLTFS) {
+			mountPoint := s.config.Tape.LTFSMountPoint
+			if mountPoint == "" {
+				mountPoint = tape.LTFSDefaultMountPoint
+			}
+			ltfsSvc := tape.NewLTFSService(devicePath, mountPoint)
 			s.batchLabel.mu.Lock()
-			s.batchLabel.message = fmt.Sprintf("Failed to write label '%s': %s", label, err.Error())
+			s.batchLabel.message = fmt.Sprintf("Formatting tape as LTFS and writing label '%s'...", label)
+			s.batchLabel.mu.Unlock()
+			writeErr = ltfsSvc.FormatAndLabel(ctx, label, tapeUUID, poolName)
+		} else {
+			writeErr = driveSvc.WriteTapeLabel(ctx, label, tapeUUID, poolName)
+		}
+		if writeErr != nil {
+			s.batchLabel.mu.Lock()
+			s.batchLabel.message = fmt.Sprintf("Failed to write label '%s': %s", label, writeErr.Error())
 			s.batchLabel.failed++
 			s.batchLabel.mu.Unlock()
 			if s.eventBus != nil {
@@ -6379,7 +6437,7 @@ func (s *Server) runBatchLabel(ctx context.Context, devicePath string, driveID i
 					Type:     "error",
 					Category: "tape",
 					Title:    "Batch Label",
-					Message:  fmt.Sprintf("[%d/%d] Failed to write label '%s': %s", i+1, count, label, err.Error()),
+					Message:  fmt.Sprintf("[%d/%d] Failed to write label '%s': %s", i+1, count, label, writeErr.Error()),
 				})
 			}
 			return
@@ -6398,9 +6456,9 @@ func (s *Server) runBatchLabel(ctx context.Context, devicePath string, driveID i
 		// Create tape record in database
 		now := time.Now()
 		s.db.Exec(`
-			INSERT INTO tapes (uuid, barcode, label, lto_type, pool_id, status, capacity_bytes, used_bytes, write_count, labeled_at)
-			VALUES (?, ?, ?, ?, ?, 'blank', ?, 0, 0, ?)
-		`, tapeUUID, label, label, ltoType, poolID, capacityBytes, now)
+			INSERT INTO tapes (uuid, barcode, label, lto_type, pool_id, status, capacity_bytes, used_bytes, write_count, format_type, labeled_at)
+			VALUES (?, ?, ?, ?, ?, 'blank', ?, 0, 0, ?, ?)
+		`, tapeUUID, label, label, ltoType, poolID, capacityBytes, formatType, now)
 
 		s.batchLabel.mu.Lock()
 		s.batchLabel.completed++
@@ -6452,12 +6510,13 @@ func (s *Server) runBatchLabel(ctx context.Context, devicePath string, driveID i
 // handleTapesBatchLabel starts a batch tape labelling operation (under /tapes route)
 func (s *Server) handleTapesBatchLabel(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		DriveID  int64  `json:"drive_id"`
-		Prefix   string `json:"prefix"`
-		StartNum int    `json:"start_number"`
-		Count    int    `json:"count"`
-		Digits   int    `json:"digits"`
-		PoolID   *int64 `json:"pool_id"`
+		DriveID    int64  `json:"drive_id"`
+		Prefix     string `json:"prefix"`
+		StartNum   int    `json:"start_number"`
+		Count      int    `json:"count"`
+		Digits     int    `json:"digits"`
+		PoolID     *int64 `json:"pool_id"`
+		FormatType string `json:"format_type"` // "raw" (default) or "ltfs"
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.respondError(w, http.StatusBadRequest, "invalid request body")
@@ -6481,6 +6540,19 @@ func (s *Server) handleTapesBatchLabel(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.StartNum < 0 {
 		req.StartNum = 1
+	}
+
+	// Default and validate format type
+	if req.FormatType == "" {
+		req.FormatType = string(models.TapeFormatRaw)
+	}
+	if req.FormatType != string(models.TapeFormatRaw) && req.FormatType != string(models.TapeFormatLTFS) {
+		s.respondError(w, http.StatusBadRequest, "format_type must be 'raw' or 'ltfs'")
+		return
+	}
+	if req.FormatType == string(models.TapeFormatLTFS) && !tape.IsAvailable() {
+		s.respondError(w, http.StatusServiceUnavailable, "LTFS software not installed on this system")
+		return
 	}
 
 	s.batchLabel.mu.Lock()
@@ -6512,7 +6584,7 @@ func (s *Server) handleTapesBatchLabel(w http.ResponseWriter, r *http.Request) {
 	s.batchLabel.failed = 0
 	s.batchLabel.mu.Unlock()
 
-	go s.runBatchLabel(ctx, devicePath, req.DriveID, req.Prefix, req.StartNum, req.Count, req.Digits, req.PoolID)
+	go s.runBatchLabel(ctx, devicePath, req.DriveID, req.Prefix, req.StartNum, req.Count, req.Digits, req.PoolID, req.FormatType)
 
 	s.respondJSON(w, http.StatusAccepted, map[string]interface{}{
 		"status":  "started",

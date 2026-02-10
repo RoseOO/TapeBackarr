@@ -2,6 +2,9 @@ package tape
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	cryptoRand "crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -438,6 +441,178 @@ type LTFSLabel struct {
 	Pool      string `json:"pool"`
 	Format    string `json:"format"`
 	CreatedAt string `json:"created_at"`
+}
+
+// EncryptedFileSuffix is appended to files written with per-file encryption
+// on LTFS volumes so they can be identified during restore.
+const EncryptedFileSuffix = ".enc"
+
+// WriteFilesEncrypted copies files to the mounted LTFS volume with per-file
+// AES-256-GCM encryption. Each file is encrypted individually so that single
+// files can be decrypted during restore without needing the full volume.
+// Encrypted files are stored with the ".enc" suffix.
+func (l *LTFSService) WriteFilesEncrypted(ctx context.Context, sourcePath string, files []string, encryptionKey []byte, progressCb func(bytesWritten int64)) (totalBytes int64, fileCount int64, err error) {
+	if !l.IsMounted() {
+		return 0, 0, fmt.Errorf("LTFS volume not mounted at %s", l.mountPoint)
+	}
+
+	for _, filePath := range files {
+		select {
+		case <-ctx.Done():
+			return totalBytes, fileCount, ctx.Err()
+		default:
+		}
+
+		relPath, relErr := filepath.Rel(sourcePath, filePath)
+		if relErr != nil {
+			return totalBytes, fileCount, fmt.Errorf("failed to compute relative path for %s: %w", filePath, relErr)
+		}
+
+		destPath := filepath.Join(l.mountPoint, relPath+EncryptedFileSuffix)
+
+		destDir := filepath.Dir(destPath)
+		if mkErr := os.MkdirAll(destDir, 0755); mkErr != nil {
+			return totalBytes, fileCount, fmt.Errorf("failed to create directory %s: %w", destDir, mkErr)
+		}
+
+		n, copyErr := copyFileEncrypted(filePath, destPath, encryptionKey)
+		if copyErr != nil {
+			return totalBytes, fileCount, fmt.Errorf("failed to encrypt and copy %s to LTFS: %w", relPath, copyErr)
+		}
+
+		totalBytes += n
+		fileCount++
+
+		if progressCb != nil {
+			progressCb(totalBytes)
+		}
+	}
+
+	return totalBytes, fileCount, nil
+}
+
+// RestoreFilesDecrypted copies files from the mounted LTFS volume to a
+// destination directory, decrypting per-file encrypted files (those ending
+// with ".enc") using the provided key.
+func (l *LTFSService) RestoreFilesDecrypted(ctx context.Context, destPath string, filePaths []string, encryptionKey []byte) (totalBytes int64, fileCount int64, err error) {
+	if !l.IsMounted() {
+		return 0, 0, fmt.Errorf("LTFS volume not mounted at %s", l.mountPoint)
+	}
+
+	if len(filePaths) == 0 {
+		entries, listErr := l.ListFiles(ctx)
+		if listErr != nil {
+			return 0, 0, fmt.Errorf("failed to list LTFS files: %w", listErr)
+		}
+		for _, e := range entries {
+			filePaths = append(filePaths, e.Path)
+		}
+	}
+
+	for _, relPath := range filePaths {
+		select {
+		case <-ctx.Done():
+			return totalBytes, fileCount, ctx.Err()
+		default:
+		}
+
+		srcPath := filepath.Join(l.mountPoint, relPath)
+
+		// Determine the output file name — strip .enc suffix if present
+		outRelPath := relPath
+		if strings.HasSuffix(relPath, EncryptedFileSuffix) {
+			outRelPath = strings.TrimSuffix(relPath, EncryptedFileSuffix)
+		}
+		dstPath := filepath.Join(destPath, outRelPath)
+
+		if mkErr := os.MkdirAll(filepath.Dir(dstPath), 0755); mkErr != nil {
+			return totalBytes, fileCount, fmt.Errorf("failed to create directory for %s: %w", outRelPath, mkErr)
+		}
+
+		if strings.HasSuffix(relPath, EncryptedFileSuffix) && encryptionKey != nil {
+			n, decErr := copyFileDecrypted(srcPath, dstPath, encryptionKey)
+			if decErr != nil {
+				return totalBytes, fileCount, fmt.Errorf("failed to decrypt and restore %s: %w", relPath, decErr)
+			}
+			totalBytes += n
+		} else {
+			n, cpErr := copyFile(srcPath, dstPath)
+			if cpErr != nil {
+				return totalBytes, fileCount, fmt.Errorf("failed to restore %s: %w", relPath, cpErr)
+			}
+			totalBytes += n
+		}
+
+		fileCount++
+	}
+
+	return totalBytes, fileCount, nil
+}
+
+// copyFileEncrypted encrypts src with AES-256-GCM and writes the ciphertext
+// to dst. The format is: [12-byte nonce][ciphertext+tag]. Returns the number
+// of bytes in the original plaintext file.
+func copyFileEncrypted(src, dst string, key []byte) (int64, error) {
+	plaintext, err := os.ReadFile(src)
+	if err != nil {
+		return 0, err
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create GCM: %w", err)
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(cryptoRand.Reader, nonce); err != nil {
+		return 0, fmt.Errorf("failed to generate nonce: %w", err)
+	}
+
+	ciphertext := gcm.Seal(nonce, nonce, plaintext, nil)
+	if err := os.WriteFile(dst, ciphertext, 0644); err != nil {
+		return 0, err
+	}
+
+	return int64(len(plaintext)), nil
+}
+
+// copyFileDecrypted reads an AES-256-GCM encrypted file and writes the
+// plaintext to dst. Returns the number of plaintext bytes written.
+func copyFileDecrypted(src, dst string, key []byte) (int64, error) {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return 0, err
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create GCM: %w", err)
+	}
+
+	nonceSize := gcm.NonceSize()
+	if len(data) < nonceSize {
+		return 0, fmt.Errorf("encrypted file too short")
+	}
+	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
+
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return 0, fmt.Errorf("decryption failed: %w", err)
+	}
+
+	if err := os.WriteFile(dst, plaintext, 0644); err != nil {
+		return 0, err
+	}
+
+	return int64(len(plaintext)), nil
 }
 
 // copyFile copies a single file from src to dst. Returns bytes copied.

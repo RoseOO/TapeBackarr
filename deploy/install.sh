@@ -56,8 +56,9 @@ substep() {
 # Install dependencies
 step "Installing system dependencies..."
 apt-get update -qq
-apt-get install -y -qq mt-st mtx tar mbuffer sg3-utils lsscsi pigz 2>/dev/null || {
+apt-get install -y -qq mt-st mtx tar mbuffer sg3-utils lsscsi pigz fuse libfuse2 ltfs 2>/dev/null || {
     substep "Some optional packages may not be available"
+    substep "LTFS (ltfs) package may need to be installed from vendor or built from source"
 }
 
 # Create directories
