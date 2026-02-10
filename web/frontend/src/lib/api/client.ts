@@ -608,3 +608,48 @@ export async function libraryTransfer(id: number, sourceSlot: number, destSlot: 
     body: JSON.stringify({ source_slot: sourceSlot, dest_slot: destSlot }),
   });
 }
+
+// LTFS (Linear Tape File System)
+export async function getLTFSStatus(driveId?: number) {
+  const params = driveId ? `?drive_id=${driveId}` : '';
+  return fetchApi(`/ltfs/status${params}`);
+}
+
+export async function formatLTFS(driveId: number, label: string, uuid: string, pool: string, confirm: boolean) {
+  return fetchApi('/ltfs/format', {
+    method: 'POST',
+    body: JSON.stringify({ drive_id: driveId, label, uuid, pool, confirm }),
+  });
+}
+
+export async function mountLTFS(driveId: number) {
+  return fetchApi('/ltfs/mount', {
+    method: 'POST',
+    body: JSON.stringify({ drive_id: driveId }),
+  });
+}
+
+export async function unmountLTFS() {
+  return fetchApi('/ltfs/unmount', {
+    method: 'POST',
+  });
+}
+
+export async function browseLTFS(prefix?: string) {
+  const params = prefix ? `?prefix=${encodeURIComponent(prefix)}` : '';
+  return fetchApi(`/ltfs/browse${params}`);
+}
+
+export async function restoreLTFS(filePaths: string[], destPath: string) {
+  return fetchApi('/ltfs/restore', {
+    method: 'POST',
+    body: JSON.stringify({ file_paths: filePaths, dest_path: destPath }),
+  });
+}
+
+export async function checkLTFS(driveId: number) {
+  return fetchApi('/ltfs/check', {
+    method: 'POST',
+    body: JSON.stringify({ drive_id: driveId }),
+  });
+}

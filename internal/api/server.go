@@ -292,6 +292,17 @@ func (s *Server) setupRoutes() {
 			r.Post("/raw-read", s.handleRawReadTape)
 		})
 
+		// LTFS (Linear Tape File System)
+		r.Route("/api/v1/ltfs", func(r chi.Router) {
+			r.Get("/status", s.handleLTFSStatus)
+			r.Post("/format", s.handleLTFSFormat)
+			r.Post("/mount", s.handleLTFSMount)
+			r.Post("/unmount", s.handleLTFSUnmount)
+			r.Get("/browse", s.handleLTFSBrowse)
+			r.Post("/restore", s.handleLTFSRestore)
+			r.Post("/check", s.handleLTFSCheck)
+		})
+
 		// Logs
 		r.Route("/api/v1/logs", func(r chi.Router) {
 			r.Get("/audit", s.handleListAuditLogs)
@@ -7491,5 +7502,440 @@ func (s *Server) handleLibraryTransfer(w http.ResponseWriter, r *http.Request) {
 	s.auditLog(r, "transfer", "tape_library", id, fmt.Sprintf("Transferred tape from slot %d to slot %d", req.SourceSlot, req.DestSlot))
 	s.respondJSON(w, http.StatusOK, map[string]string{
 		"message": fmt.Sprintf("Tape transferred from slot %d to slot %d", req.SourceSlot, req.DestSlot),
+	})
+}
+
+// ─── LTFS Handlers ──────────────────────────────────────────────────────────
+
+// handleLTFSStatus returns the current LTFS status including availability,
+// mount state, and volume info.
+func (s *Server) handleLTFSStatus(w http.ResponseWriter, r *http.Request) {
+	driveIDStr := r.URL.Query().Get("drive_id")
+
+	result := map[string]interface{}{
+		"available":   tape.IsAvailable(),
+		"enabled":     s.config.Tape.EnableLTFS,
+		"mounted":     false,
+		"mount_point": s.config.Tape.LTFSMountPoint,
+	}
+
+	if !tape.IsAvailable() {
+		result["message"] = "LTFS software not installed (mkltfs and ltfs commands required)"
+		s.respondJSON(w, http.StatusOK, result)
+		return
+	}
+
+	// Get device path from drive_id or default
+	devicePath := s.config.Tape.DefaultDevice
+	if driveIDStr != "" {
+		driveID, err := strconv.ParseInt(driveIDStr, 10, 64)
+		if err == nil {
+			var dp string
+			if dbErr := s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", driveID).Scan(&dp); dbErr == nil {
+				devicePath = dp
+			}
+		}
+	}
+
+	mountPoint := s.config.Tape.LTFSMountPoint
+	if mountPoint == "" {
+		mountPoint = tape.LTFSDefaultMountPoint
+	}
+
+	ltfsSvc := tape.NewLTFSService(devicePath, mountPoint)
+	result["mounted"] = ltfsSvc.IsMounted()
+
+	if ltfsSvc.IsMounted() {
+		info := ltfsSvc.GetVolumeInfo(r.Context())
+		result["volume_info"] = info
+
+		// Try to read TapeBackarr label
+		label, err := ltfsSvc.ReadLTFSLabel(r.Context())
+		if err == nil && label != nil {
+			result["label"] = label
+		}
+	}
+
+	s.respondJSON(w, http.StatusOK, result)
+}
+
+// handleLTFSFormat formats a tape with LTFS filesystem.
+func (s *Server) handleLTFSFormat(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		DriveID int64  `json:"drive_id"`
+		Label   string `json:"label"`
+		UUID    string `json:"uuid"`
+		Pool    string `json:"pool"`
+		Confirm bool   `json:"confirm"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if !req.Confirm {
+		s.respondError(w, http.StatusBadRequest, "destructive action requires confirm=true")
+		return
+	}
+
+	if !tape.IsAvailable() {
+		s.respondError(w, http.StatusServiceUnavailable, "LTFS software not installed")
+		return
+	}
+
+	var devicePath string
+	if err := s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", req.DriveID).Scan(&devicePath); err != nil {
+		s.respondError(w, http.StatusBadRequest, "drive not found or not enabled")
+		return
+	}
+
+	mountPoint := s.config.Tape.LTFSMountPoint
+	if mountPoint == "" {
+		mountPoint = tape.LTFSDefaultMountPoint
+	}
+
+	ctx := r.Context()
+	ltfsSvc := tape.NewLTFSService(devicePath, mountPoint)
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "ltfs",
+			Title:    "LTFS Format Started",
+			Message:  fmt.Sprintf("Formatting tape with LTFS on drive %s (label: %s)", devicePath, req.Label),
+		})
+	}
+
+	if req.Label != "" && req.UUID != "" {
+		if err := ltfsSvc.FormatAndLabel(ctx, req.Label, req.UUID, req.Pool); err != nil {
+			s.respondError(w, http.StatusInternalServerError, "LTFS format failed: "+err.Error())
+			return
+		}
+	} else {
+		if err := ltfsSvc.Format(ctx, req.Label); err != nil {
+			s.respondError(w, http.StatusInternalServerError, "LTFS format failed: "+err.Error())
+			return
+		}
+	}
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "success",
+			Category: "ltfs",
+			Title:    "LTFS Format Complete",
+			Message:  fmt.Sprintf("Tape formatted with LTFS on drive %s", devicePath),
+		})
+	}
+
+	s.auditLog(r, "ltfs_format", "tape_drive", req.DriveID, fmt.Sprintf("Formatted tape with LTFS (label: %s)", req.Label))
+	s.respondJSON(w, http.StatusOK, map[string]string{
+		"message": "Tape formatted with LTFS successfully",
+	})
+}
+
+// handleLTFSMount mounts an LTFS tape.
+func (s *Server) handleLTFSMount(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		DriveID int64 `json:"drive_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if !tape.IsAvailable() {
+		s.respondError(w, http.StatusServiceUnavailable, "LTFS software not installed")
+		return
+	}
+
+	var devicePath string
+	if err := s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", req.DriveID).Scan(&devicePath); err != nil {
+		s.respondError(w, http.StatusBadRequest, "drive not found or not enabled")
+		return
+	}
+
+	mountPoint := s.config.Tape.LTFSMountPoint
+	if mountPoint == "" {
+		mountPoint = tape.LTFSDefaultMountPoint
+	}
+
+	ltfsSvc := tape.NewLTFSService(devicePath, mountPoint)
+
+	if ltfsSvc.IsMounted() {
+		s.respondError(w, http.StatusConflict, "LTFS volume already mounted at "+mountPoint)
+		return
+	}
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "ltfs",
+			Title:    "LTFS Mount",
+			Message:  fmt.Sprintf("Mounting LTFS tape from drive %s at %s...", devicePath, mountPoint),
+		})
+	}
+
+	if err := ltfsSvc.Mount(r.Context()); err != nil {
+		s.respondError(w, http.StatusInternalServerError, "LTFS mount failed: "+err.Error())
+		return
+	}
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "success",
+			Category: "ltfs",
+			Title:    "LTFS Mounted",
+			Message:  fmt.Sprintf("LTFS tape mounted at %s", mountPoint),
+		})
+	}
+
+	s.auditLog(r, "ltfs_mount", "tape_drive", req.DriveID, fmt.Sprintf("Mounted LTFS tape at %s", mountPoint))
+	s.respondJSON(w, http.StatusOK, map[string]string{
+		"message":     "LTFS tape mounted successfully",
+		"mount_point": mountPoint,
+	})
+}
+
+// handleLTFSUnmount unmounts an LTFS tape.
+func (s *Server) handleLTFSUnmount(w http.ResponseWriter, r *http.Request) {
+	if !tape.IsAvailable() {
+		s.respondError(w, http.StatusServiceUnavailable, "LTFS software not installed")
+		return
+	}
+
+	mountPoint := s.config.Tape.LTFSMountPoint
+	if mountPoint == "" {
+		mountPoint = tape.LTFSDefaultMountPoint
+	}
+
+	ltfsSvc := tape.NewLTFSService("", mountPoint)
+
+	if !ltfsSvc.IsMounted() {
+		s.respondError(w, http.StatusConflict, "no LTFS volume mounted at "+mountPoint)
+		return
+	}
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "ltfs",
+			Title:    "LTFS Unmount",
+			Message:  fmt.Sprintf("Unmounting LTFS tape from %s...", mountPoint),
+		})
+	}
+
+	if err := ltfsSvc.Unmount(r.Context()); err != nil {
+		s.respondError(w, http.StatusInternalServerError, "LTFS unmount failed: "+err.Error())
+		return
+	}
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "success",
+			Category: "ltfs",
+			Title:    "LTFS Unmounted",
+			Message:  "LTFS tape safely unmounted",
+		})
+	}
+
+	s.auditLog(r, "ltfs_unmount", "tape_drive", 0, fmt.Sprintf("Unmounted LTFS tape from %s", mountPoint))
+	s.respondJSON(w, http.StatusOK, map[string]string{
+		"message": "LTFS tape unmounted successfully",
+	})
+}
+
+// handleLTFSBrowse lists files on a mounted LTFS tape, optionally filtering
+// by a directory prefix for folder-based navigation.
+func (s *Server) handleLTFSBrowse(w http.ResponseWriter, r *http.Request) {
+	mountPoint := s.config.Tape.LTFSMountPoint
+	if mountPoint == "" {
+		mountPoint = tape.LTFSDefaultMountPoint
+	}
+
+	ltfsSvc := tape.NewLTFSService("", mountPoint)
+
+	if !ltfsSvc.IsMounted() {
+		s.respondError(w, http.StatusConflict, "no LTFS volume mounted — mount a tape first")
+		return
+	}
+
+	prefix := r.URL.Query().Get("prefix")
+
+	allFiles, err := ltfsSvc.ListFiles(r.Context())
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to list LTFS files: "+err.Error())
+		return
+	}
+
+	// Build a directory-aware listing for the requested prefix
+	type browseEntry struct {
+		Name    string `json:"name"`
+		Path    string `json:"path"`
+		IsDir   bool   `json:"is_dir"`
+		Size    int64  `json:"size"`
+		ModTime string `json:"mod_time,omitempty"`
+	}
+
+	seenDirs := make(map[string]bool)
+	var entries []browseEntry
+
+	for _, f := range allFiles {
+		// Skip the metadata file
+		if f.Path == ".tapebackarr.json" {
+			continue
+		}
+
+		rel := f.Path
+		if prefix != "" {
+			if !strings.HasPrefix(rel, prefix) {
+				continue
+			}
+			rel = strings.TrimPrefix(rel, prefix)
+			rel = strings.TrimPrefix(rel, "/")
+		}
+
+		if rel == "" {
+			continue
+		}
+
+		// Check if this is a direct child or in a subdirectory
+		parts := strings.SplitN(rel, "/", 2)
+		if len(parts) == 1 {
+			// Direct file in this directory
+			entries = append(entries, browseEntry{
+				Name:    parts[0],
+				Path:    f.Path,
+				IsDir:   false,
+				Size:    f.Size,
+				ModTime: f.ModTime.Format("2006-01-02 15:04:05"),
+			})
+		} else {
+			// Subdirectory — show as folder entry (deduplicated)
+			dirName := parts[0]
+			dirPath := prefix
+			if dirPath != "" {
+				dirPath += "/"
+			}
+			dirPath += dirName
+			if !seenDirs[dirPath] {
+				seenDirs[dirPath] = true
+				entries = append(entries, browseEntry{
+					Name:  dirName + "/",
+					Path:  dirPath,
+					IsDir: true,
+				})
+			}
+		}
+	}
+
+	// Read TapeBackarr label if present
+	var labelInfo *tape.LTFSLabel
+	label, err := ltfsSvc.ReadLTFSLabel(r.Context())
+	if err == nil && label != nil {
+		labelInfo = label
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"mount_point": mountPoint,
+		"prefix":      prefix,
+		"entries":     entries,
+		"total_files": len(allFiles),
+		"label":       labelInfo,
+	})
+}
+
+// handleLTFSRestore copies files from the LTFS volume to a destination.
+func (s *Server) handleLTFSRestore(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		FilePaths []string `json:"file_paths"`
+		DestPath  string   `json:"dest_path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.DestPath == "" {
+		s.respondError(w, http.StatusBadRequest, "dest_path is required")
+		return
+	}
+
+	mountPoint := s.config.Tape.LTFSMountPoint
+	if mountPoint == "" {
+		mountPoint = tape.LTFSDefaultMountPoint
+	}
+
+	ltfsSvc := tape.NewLTFSService("", mountPoint)
+	if !ltfsSvc.IsMounted() {
+		s.respondError(w, http.StatusConflict, "no LTFS volume mounted — mount a tape first")
+		return
+	}
+
+	if s.eventBus != nil {
+		msg := fmt.Sprintf("Restoring %d files from LTFS to %s", len(req.FilePaths), req.DestPath)
+		if len(req.FilePaths) == 0 {
+			msg = fmt.Sprintf("Restoring all files from LTFS to %s", req.DestPath)
+		}
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "ltfs",
+			Title:    "LTFS Restore Started",
+			Message:  msg,
+		})
+	}
+
+	totalBytes, fileCount, err := ltfsSvc.RestoreFiles(r.Context(), req.DestPath, req.FilePaths)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "LTFS restore failed: "+err.Error())
+		return
+	}
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "success",
+			Category: "ltfs",
+			Title:    "LTFS Restore Complete",
+			Message:  fmt.Sprintf("Restored %d files (%d bytes) to %s", fileCount, totalBytes, req.DestPath),
+		})
+	}
+
+	s.auditLog(r, "ltfs_restore", "ltfs", 0, fmt.Sprintf("Restored %d files (%d bytes) to %s", fileCount, totalBytes, req.DestPath))
+	s.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"message":     "LTFS restore completed",
+		"files":       fileCount,
+		"total_bytes": totalBytes,
+		"dest_path":   req.DestPath,
+	})
+}
+
+// handleLTFSCheck runs an LTFS consistency check on the tape.
+func (s *Server) handleLTFSCheck(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		DriveID int64 `json:"drive_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if !tape.IsAvailable() {
+		s.respondError(w, http.StatusServiceUnavailable, "LTFS software not installed")
+		return
+	}
+
+	var devicePath string
+	if err := s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", req.DriveID).Scan(&devicePath); err != nil {
+		s.respondError(w, http.StatusBadRequest, "drive not found or not enabled")
+		return
+	}
+
+	ltfsSvc := tape.NewLTFSService(devicePath, "")
+	if err := ltfsSvc.Check(r.Context()); err != nil {
+		s.respondError(w, http.StatusInternalServerError, "LTFS check failed: "+err.Error())
+		return
+	}
+
+	s.auditLog(r, "ltfs_check", "tape_drive", req.DriveID, "LTFS consistency check passed")
+	s.respondJSON(w, http.StatusOK, map[string]string{
+		"message": "LTFS consistency check passed",
 	})
 }

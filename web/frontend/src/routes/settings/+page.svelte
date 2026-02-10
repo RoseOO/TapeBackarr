@@ -237,6 +237,21 @@
             <small>Read back data after writing to verify integrity</small>
           </div>
 
+          <h3>LTFS (Linear Tape File System)</h3>
+          <p class="section-desc">LTFS makes tapes self-describing. Files are stored as a standard POSIX filesystem, readable by any LTFS-compatible tool without needing TapeBackarr. Requires LTO-5+ drives and LTFS software.</p>
+          <div class="form-group checkbox-group">
+            <label>
+              <input type="checkbox" bind:checked={config.tape.enable_ltfs} />
+              Enable LTFS
+            </label>
+            <small>Use LTFS format for new tape operations (format, backup)</small>
+          </div>
+          <div class="form-group">
+            <label for="ltfs-mount">LTFS Mount Point</label>
+            <input type="text" id="ltfs-mount" bind:value={config.tape.ltfs_mount_point} placeholder="/mnt/ltfs" />
+            <small>Directory where LTFS tapes will be mounted</small>
+          </div>
+
           <h3>Drives</h3>
           {#if config.tape.drives}
             {#each config.tape.drives as drive, i}
