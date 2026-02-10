@@ -76,3 +76,39 @@ func TestSaveAndLoad(t *testing.T) {
 		t.Errorf("expected jwt secret 'test-secret', got %s", loaded.Auth.JWTSecret)
 	}
 }
+
+func TestDefaultConfigLTFSFields(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if cfg.Tape.EnableLTFS != false {
+		t.Error("expected EnableLTFS to default to false")
+	}
+	if cfg.Tape.LTFSMountPoint != "/mnt/ltfs" {
+		t.Errorf("expected LTFSMountPoint /mnt/ltfs, got %s", cfg.Tape.LTFSMountPoint)
+	}
+}
+
+func TestSaveAndLoadLTFSConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+
+	cfg := DefaultConfig()
+	cfg.Tape.EnableLTFS = true
+	cfg.Tape.LTFSMountPoint = "/mnt/custom-ltfs"
+
+	if err := cfg.Save(configPath); err != nil {
+		t.Fatalf("failed to save config: %v", err)
+	}
+
+	loaded, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	if !loaded.Tape.EnableLTFS {
+		t.Error("expected EnableLTFS to be true after load")
+	}
+	if loaded.Tape.LTFSMountPoint != "/mnt/custom-ltfs" {
+		t.Errorf("expected LTFSMountPoint /mnt/custom-ltfs, got %s", loaded.Tape.LTFSMountPoint)
+	}
+}

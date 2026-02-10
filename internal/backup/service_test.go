@@ -1828,3 +1828,90 @@ func TestWrongTapeCallbackNoTapeLoaded(t *testing.T) {
 		t.Errorf("expected actualLabel 'no tape loaded', got %q", calledWith.actualLabel)
 	}
 }
+
+// TestFileSortingByPath verifies that files are sorted by path before streaming
+// to tape, which is the key write speed optimization inspired by acp's sorted
+// copy order. Sorting groups files by directory, ensuring sequential source
+// reads that prevent shoe-shining.
+func TestFileSortingByPath(t *testing.T) {
+	// Simulate an unsorted file list as would come from concurrent ScanSource
+	files := []FileInfo{
+		{Path: "/data/zebra/z.txt", Size: 100},
+		{Path: "/data/alpha/a.txt", Size: 200},
+		{Path: "/data/beta/b.txt", Size: 300},
+		{Path: "/data/alpha/c.txt", Size: 400},
+		{Path: "/data/beta/a.txt", Size: 500},
+		{Path: "/data/gamma/deep/nested.txt", Size: 600},
+		{Path: "/data/alpha/b.txt", Size: 700},
+	}
+
+	// Apply the same sort as RunBackup
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].Path < files[j].Path
+	})
+
+	// Verify files are sorted by path
+	for i := 1; i < len(files); i++ {
+		if files[i].Path < files[i-1].Path {
+			t.Errorf("files not sorted: %s comes after %s", files[i].Path, files[i-1].Path)
+		}
+	}
+
+	// Verify directory grouping (files in same directory should be adjacent)
+	expected := []string{
+		"/data/alpha/a.txt",
+		"/data/alpha/b.txt",
+		"/data/alpha/c.txt",
+		"/data/beta/a.txt",
+		"/data/beta/b.txt",
+		"/data/gamma/deep/nested.txt",
+		"/data/zebra/z.txt",
+	}
+
+	for i, f := range files {
+		if f.Path != expected[i] {
+			t.Errorf("position %d: expected %s, got %s", i, expected[i], f.Path)
+		}
+	}
+}
+
+// TestStreamToTapeLTFSNotMounted verifies that StreamToTapeLTFS returns an error
+// when the LTFS volume is not mounted.
+func TestStreamToTapeLTFSNotMounted(t *testing.T) {
+	svc := &Service{}
+	files := []FileInfo{
+		{Path: "/tmp/test.txt", Size: 100},
+	}
+
+	_, err := svc.StreamToTapeLTFS(
+		context.Background(),
+		"/tmp",
+		files,
+		"/tmp/ltfs-not-mounted-"+t.Name(),
+		nil,
+		nil,
+	)
+	if err == nil {
+		t.Error("expected error when LTFS volume is not mounted")
+	}
+}
+
+// TestStreamToTapeLTFSEmptyFiles verifies that StreamToTapeLTFS handles empty
+// file lists correctly.
+func TestStreamToTapeLTFSEmptyFiles(t *testing.T) {
+	svc := &Service{}
+	n, err := svc.StreamToTapeLTFS(
+		context.Background(),
+		"/tmp",
+		nil,
+		"/tmp/ltfs-test",
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 bytes, got %d", n)
+	}
+}

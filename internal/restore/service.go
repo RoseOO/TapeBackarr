@@ -975,20 +975,20 @@ type RawReadRequest struct {
 
 // RawReadResult contains detailed information about what was read from the tape.
 type RawReadResult struct {
-	HasHeader     bool            `json:"has_header"`
-	TapeLabel     string          `json:"tape_label,omitempty"`
-	TapeUUID      string          `json:"tape_uuid,omitempty"`
-	TapePool      string          `json:"tape_pool,omitempty"`
-	LabelTime     int64           `json:"label_time,omitempty"`
-	Encryption    string          `json:"encryption,omitempty"`
-	Compression   string          `json:"compression,omitempty"`
-	FilesFound    int64           `json:"files_found"`
-	BytesRestored int64           `json:"bytes_restored"`
-	StartTime     time.Time       `json:"start_time"`
-	EndTime       time.Time       `json:"end_time"`
-	Errors        []string        `json:"errors,omitempty"`
-	LogMessages   []string        `json:"log_messages"`
-	FileList      []RawReadFile   `json:"file_list,omitempty"`
+	HasHeader     bool          `json:"has_header"`
+	TapeLabel     string        `json:"tape_label,omitempty"`
+	TapeUUID      string        `json:"tape_uuid,omitempty"`
+	TapePool      string        `json:"tape_pool,omitempty"`
+	LabelTime     int64         `json:"label_time,omitempty"`
+	Encryption    string        `json:"encryption,omitempty"`
+	Compression   string        `json:"compression,omitempty"`
+	FilesFound    int64         `json:"files_found"`
+	BytesRestored int64         `json:"bytes_restored"`
+	StartTime     time.Time     `json:"start_time"`
+	EndTime       time.Time     `json:"end_time"`
+	Errors        []string      `json:"errors,omitempty"`
+	LogMessages   []string      `json:"log_messages"`
+	FileList      []RawReadFile `json:"file_list,omitempty"`
 }
 
 // RawReadFile describes a single file discovered and restored from a raw tape read.
@@ -1102,8 +1102,8 @@ func (s *Service) RawReadTape(ctx context.Context, req *RawReadRequest) (*RawRea
 	addLog("Starting data extraction from tape...")
 
 	tarArgs := []string{
-		"-x",  // Extract
-		"-v",  // Verbose - list each file as it's extracted
+		"-x", // Extract
+		"-v", // Verbose - list each file as it's extracted
 		"-f", devicePath,
 		"-C", req.DestPath,
 	}
@@ -1184,4 +1184,32 @@ func (s *Service) RawReadTape(ctx context.Context, req *RawReadRequest) (*RawRea
 	`, "raw_read", "tape_drive", req.DriveID, details)
 
 	return result, nil
+}
+
+// RestoreFromLTFS restores files from a mounted LTFS volume to the specified
+// destination path. This is the counterpart to the LTFS backup path and reads
+// files directly from the LTFS-mounted tape filesystem.
+//
+// If filePaths is empty, all files on the volume are restored.
+// Inspired by github.com/samuelncui/yatm's LTFS-based tape management.
+func (s *Service) RestoreFromLTFS(ctx context.Context, ltfsMountPoint string, destPath string, filePaths []string) (totalBytes int64, fileCount int64, err error) {
+	ltfsSvc := tape.NewLTFSService("", ltfsMountPoint)
+	if !ltfsSvc.IsMounted() {
+		return 0, 0, fmt.Errorf("LTFS volume not mounted at %s", ltfsMountPoint)
+	}
+
+	totalBytes, fileCount, err = ltfsSvc.RestoreFiles(ctx, destPath, filePaths)
+	if err != nil {
+		return totalBytes, fileCount, fmt.Errorf("LTFS restore failed: %w", err)
+	}
+
+	if s.logger != nil {
+		s.logger.Info("LTFS restore completed", map[string]interface{}{
+			"files_restored": fileCount,
+			"bytes_restored": totalBytes,
+			"destination":    destPath,
+		})
+	}
+
+	return totalBytes, fileCount, nil
 }

@@ -90,6 +90,7 @@
   };
 
   let formatDriveId: number | null = null;
+  let formatAsLTFS = false;
   let exportLocation = '';
   let labelDriveId: number | null = null;
   let labelForce = false;
@@ -364,9 +365,15 @@
     if (!selectedTape || !formatDriveId) return;
     try {
       error = '';
-      await api.formatTape(selectedTape.id, formatDriveId, true);
-      showFormatModal = false;
-      showSuccess('Tape formatted successfully');
+      if (formatAsLTFS) {
+        await api.formatLTFS(formatDriveId, selectedTape.label, selectedTape.uuid || crypto.randomUUID(), '', true);
+        showFormatModal = false;
+        showSuccess('Tape formatted with LTFS successfully');
+      } else {
+        await api.formatTape(selectedTape.id, formatDriveId, true);
+        showFormatModal = false;
+        showSuccess('Tape formatted successfully');
+      }
       await loadData();
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to format tape';
@@ -428,6 +435,7 @@
   function openFormatModal(tape: Tape) {
     selectedTape = tape;
     formatDriveId = drives.length > 0 ? drives[0].id : null;
+    formatAsLTFS = false;
     showFormatModal = true;
   }
 
@@ -792,9 +800,16 @@
         </select>
         <small>The tape must be loaded in the selected drive</small>
       </div>
+      <div class="form-group" style="margin-top: 0.5rem;">
+        <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+          <input type="checkbox" bind:checked={formatAsLTFS} />
+          Format as LTFS
+        </label>
+        <small>Use LTFS format for self-describing tape. Requires LTFS tools installed.</small>
+      </div>
       <div class="modal-actions">
         <button class="btn btn-secondary" on:click={() => showFormatModal = false}>Cancel</button>
-        <button class="btn btn-danger" on:click={handleFormat}>Format Tape</button>
+        <button class="btn btn-danger" on:click={handleFormat}>{formatAsLTFS ? 'Format as LTFS' : 'Format Tape'}</button>
       </div>
     </div>
   </div>

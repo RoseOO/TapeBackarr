@@ -59,6 +59,7 @@
 
   let stats: DashboardStats | null = null;
   let activeJobs: ActiveJob[] = [];
+  let ltfsStatus: { available: boolean; enabled: boolean; mounted: boolean; mount_point: string; label?: any } | null = null;
   let loading = true;
   let error = '';
   let pollInterval: ReturnType<typeof setInterval>;
@@ -78,6 +79,9 @@
     try {
       stats = await api.getDashboard();
     } catch { /* ignore refresh errors */ }
+    try {
+      ltfsStatus = await api.getLTFSStatus();
+    } catch { /* LTFS status is optional */ }
     await loadActiveJobs();
   }
 
@@ -89,6 +93,10 @@
     } finally {
       loading = false;
     }
+
+    try {
+      ltfsStatus = await api.getLTFSStatus();
+    } catch { /* LTFS status is optional */ }
 
     // Poll for active jobs
     await loadActiveJobs();
@@ -302,12 +310,39 @@
       {/if}
     </div>
 
+    {#if ltfsStatus}
+      <div class="card drive-status-card">
+        <h2>📂 LTFS</h2>
+        <div class="drive-status" class:online={ltfsStatus.mounted} class:offline={!ltfsStatus.mounted}>
+          <span class="status-indicator"></span>
+          <span class="status-text">{ltfsStatus.mounted ? 'Mounted' : ltfsStatus.available ? 'Ready' : 'Not Installed'}</span>
+        </div>
+        {#if ltfsStatus.mounted && ltfsStatus.label}
+          <div class="loaded-tape-info">
+            <h3>LTFS Volume</h3>
+            <div class="tape-detail"><strong>Label:</strong> {ltfsStatus.label.label}</div>
+            <div class="tape-detail"><strong>Pool:</strong> {ltfsStatus.label.pool || '—'}</div>
+            <span class="badge badge-info">LTFS</span>
+          </div>
+        {:else if ltfsStatus.mounted}
+          <div class="loaded-tape-info">
+            <div class="tape-detail">LTFS volume mounted at {ltfsStatus.mount_point}</div>
+          </div>
+        {:else if !ltfsStatus.available}
+          <div class="loaded-tape-info">
+            <p class="no-tape">LTFS tools not installed</p>
+          </div>
+        {/if}
+      </div>
+    {/if}
+
     <div class="card quick-actions-card">
       <h2>Quick Actions</h2>
       <div class="action-buttons">
         <a href="/jobs" class="btn btn-primary">📦 Create Backup Job</a>
         <a href="/tapes" class="btn btn-secondary">💾 Manage Tapes</a>
         <a href="/restore" class="btn btn-secondary">🔄 Restore Files</a>
+        <a href="/ltfs" class="btn btn-secondary">📂 LTFS Browser</a>
         <a href="/sources" class="btn btn-secondary">📁 Manage Sources</a>
       </div>
 
