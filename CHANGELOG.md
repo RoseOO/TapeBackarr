@@ -45,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tape library slot tracking with barcode matching
 - Per-tape Table of Contents (TOC) written as JSON after backup data for self-describing tapes
 - Multi-tape spanning with per-tape TOC and spanning set metadata
+- LTFS (Linear Tape File System) support: format, mount, unmount, browse, restore, and consistency check
+- Raw tape read endpoint for low-level data extraction
+- Backup set cancel endpoint for aborting in-progress backup sets
+- Tape format type tracking (raw vs LTFS) on tapes and backup sets
 - CONTRIBUTING.md guidelines
 - SECURITY.md policy
 - CHANGELOG.md version history

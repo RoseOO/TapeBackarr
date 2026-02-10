@@ -110,6 +110,10 @@ separated by file marks (FM):
   File #0               File #1               File #2
 ```
 
+Tapes can use either **raw** format (the default tar-based layout above) or **LTFS**
+(Linear Tape File System) format for drag-and-drop file access. The format type is
+tracked per tape and per backup set.
+
 - **File #0 — Label Block** (512 bytes): Contains tape identity in the format
   `TAPEBACKARR|label|uuid|pool|timestamp|encryption_fingerprint|compression_type`.
   Written once when the tape is first labeled. Read with
@@ -164,6 +168,7 @@ searching, but the on-tape TOC ensures disaster recovery is possible without the
 - **Tape Service**: Device control, status monitoring, pool management
 - **Encryption Service**: AES-256 encryption, key management, key sheet generation
 - **Notification Service**: Telegram bot alerts, Email (SMTP) notifications
+- **Scheduler Service**: Cron-based job scheduling via robfig/cron
 - **Proxmox Client**: VM/LXC discovery, vzdump streaming, guest restore
 
 ### 4. Tape I/O Layer

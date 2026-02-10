@@ -20,6 +20,7 @@ TapeBackarr is a disk-light, tape-first backup system designed to run on Debian 
 - **Multi-Drive Support**: Manage and select from multiple tape drives
 - **Tape Library Support**: Autochanger (tape library) control via SCSI medium changers — automated load, unload, transfer, and inventory
 - **Drive Health Monitoring**: Drive statistics, alerts, cleaning, and retension support
+- **LTFS Support**: Format, mount, browse, and restore tapes using Linear Tape File System
 - **Proxmox VE Integration**: Backup and restore VMs and LXC containers directly to tape
 
 ### Tape Management
@@ -358,10 +359,12 @@ Default credentials:
 | `/api/v1/backup-sets/{id}` | GET | Get backup set details |
 | `/api/v1/backup-sets/{id}` | DELETE | Delete backup set |
 | `/api/v1/backup-sets/{id}/files` | GET | List backup set files |
+| `/api/v1/backup-sets/{id}/cancel` | POST | Cancel backup set |
 | `/api/v1/catalog/search` | GET | Search catalog |
 | `/api/v1/catalog/browse/{backupSetId}` | GET | Browse catalog |
 | `/api/v1/restore/plan` | POST | Plan restore |
 | `/api/v1/restore/run` | POST | Execute restore |
+| `/api/v1/restore/raw-read` | POST | Raw read data from tape |
 | `/api/v1/logs/audit` | GET | Audit logs |
 | `/api/v1/logs/export` | GET | Export logs |
 | `/api/v1/users` | GET/POST | List/create users (admin) |
@@ -404,6 +407,13 @@ Default credentials:
 | `/api/v1/libraries/{id}/load` | POST | Load tape into drive |
 | `/api/v1/libraries/{id}/unload` | POST | Unload tape from drive |
 | `/api/v1/libraries/{id}/transfer` | POST | Transfer tape between slots |
+| `/api/v1/ltfs/status` | GET | LTFS status |
+| `/api/v1/ltfs/format` | POST | Format tape with LTFS |
+| `/api/v1/ltfs/mount` | POST | Mount LTFS tape |
+| `/api/v1/ltfs/unmount` | POST | Unmount LTFS tape |
+| `/api/v1/ltfs/browse` | GET | Browse LTFS tape contents |
+| `/api/v1/ltfs/restore` | POST | Restore files from LTFS tape |
+| `/api/v1/ltfs/check` | POST | LTFS consistency check |
 
 ### CLI Commands Used Internally
 

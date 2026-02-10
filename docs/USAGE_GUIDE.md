@@ -11,14 +11,16 @@ Complete guide to using TapeBackarr for tape backup and restore operations.
 5. [Creating and Running Backup Jobs](#creating-and-running-backup-jobs)
 6. [Multi-Tape Spanning](#multi-tape-spanning)
 7. [Restoring Data](#restoring-data)
-8. [Notifications](#notifications)
-9. [Viewing Logs](#viewing-logs)
-10. [Tape Inspection and Encryption](#tape-inspection-and-encryption)
-11. [User Management](#user-management)
-12. [Database Backup](#database-backup)
-13. [In-App Documentation](#in-app-documentation)
-14. [Best Practices](#best-practices)
-15. [Troubleshooting](#troubleshooting)
+8. [LTFS Management](#ltfs-management)
+9. [Notifications](#notifications)
+10. [Viewing Logs](#viewing-logs)
+11. [Tape Inspection and Encryption](#tape-inspection-and-encryption)
+12. [API Keys](#api-keys)
+13. [User Management](#user-management)
+14. [Database Backup](#database-backup)
+15. [In-App Documentation](#in-app-documentation)
+16. [Best Practices](#best-practices)
+17. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -61,10 +63,18 @@ The dashboard provides an at-a-glance view of your system:
 | Dashboard | System overview and quick stats |
 | Tapes | Manage tape inventory |
 | Drives | Manage and select tape drives |
+| Pools | Configure tape pools and retention policies |
 | Sources | Configure backup source paths |
 | Jobs | Create and manage backup jobs |
 | Restore | Browse catalog and restore files |
+| LTFS | Format, mount, and browse LTFS tapes |
+| Encryption | Manage encryption keys and key sheets |
+| API Keys | Manage API tokens for programmatic access |
+| Proxmox | Proxmox VE integration for VM/LXC backups |
+| Libraries | Tape library (autochanger) management |
+| Inspect | View tape contents from the web UI |
 | Logs | View operation logs and audit trail |
+| Settings | System configuration and service control |
 | Documentation | Access guides and references |
 | Users | Manage user accounts (admin only) |
 
@@ -394,6 +404,49 @@ sudo mount -t nfs server:/export/path /mnt/nfs/restore
 
 ---
 
+## LTFS Management
+
+TapeBackarr supports LTFS (Linear Tape File System), which allows tapes to be used like regular filesystems with drag-and-drop file access.
+
+### LTFS vs Raw Format
+
+| Feature | Raw (tar) | LTFS |
+|---------|-----------|------|
+| Format | tar archive with label/TOC | Filesystem on tape |
+| Access | Sequential read/write | Random file access |
+| Best for | Large streaming backups | Interoperability, file-level access |
+| Requires | mt, tar | ltfs utilities |
+
+### Formatting a Tape with LTFS
+
+1. Navigate to **LTFS** in the sidebar
+2. Select a drive with a loaded tape
+3. Click **Format** to initialize the tape with LTFS
+4. ⚠️ This erases all existing data on the tape
+
+### Mounting and Unmounting
+
+1. **Mount**: Click **Mount** to make the LTFS tape accessible as a filesystem
+2. **Browse**: Once mounted, browse the tape contents directly in the web UI
+3. **Unmount**: Always unmount before ejecting the tape
+
+### Restoring from LTFS
+
+1. Navigate to **LTFS**
+2. Mount the tape if not already mounted
+3. Browse to the files you need
+4. Click **Restore** to copy files to a local destination
+
+### LTFS Consistency Check
+
+If an LTFS tape was not cleanly unmounted, run a consistency check:
+
+1. Navigate to **LTFS**
+2. Click **Check** to verify tape integrity
+3. Review the results for any issues
+
+---
+
 ## Notifications
 
 TapeBackarr can send notifications via Telegram and Email when operator action is required.
@@ -594,6 +647,34 @@ You can restart the TapeBackarr service from the web UI:
 5. The page will automatically reload after 5 seconds
 
 > **Warning:** Restarting will interrupt any active backup or restore operations. Use this after making configuration changes that require a service restart.
+
+---
+
+## API Keys
+
+API keys provide programmatic access to TapeBackarr without using username/password authentication. They are useful for scripting and automation.
+
+### Creating an API Key (Admin Only)
+
+1. Navigate to **API Keys** in the sidebar
+2. Click **Create API Key**
+3. Enter a descriptive name (e.g., "Monitoring Script")
+4. Click **Create**
+5. **Copy the key immediately** — it will not be shown again
+
+### Using an API Key
+
+Include the key in the `Authorization` header:
+
+```bash
+curl -H "Authorization: Bearer <api-key>" http://localhost:8080/api/v1/dashboard
+```
+
+### Managing API Keys
+
+- **View**: See all active API keys and their creation dates
+- **Delete**: Revoke an API key when no longer needed
+- Rotate keys periodically for security
 
 ---
 
