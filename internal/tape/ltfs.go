@@ -573,7 +573,7 @@ func copyFileEncrypted(src, dst string, key []byte) (int64, error) {
 	}
 
 	ciphertext := gcm.Seal(nonce, nonce, plaintext, nil)
-	if err := os.WriteFile(dst, ciphertext, 0644); err != nil {
+	if err := os.WriteFile(dst, ciphertext, 0600); err != nil {
 		return 0, err
 	}
 
@@ -608,7 +608,7 @@ func copyFileDecrypted(src, dst string, key []byte) (int64, error) {
 		return 0, fmt.Errorf("decryption failed: %w", err)
 	}
 
-	if err := os.WriteFile(dst, plaintext, 0644); err != nil {
+	if err := os.WriteFile(dst, plaintext, 0600); err != nil {
 		return 0, err
 	}
 

@@ -1562,6 +1562,10 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 	// Check the tape's format type to determine streaming method (raw tar or LTFS)
 	var tapeFormatType string
 	if err := s.db.QueryRow("SELECT COALESCE(format_type, 'raw') FROM tapes WHERE id = ?", tapeID).Scan(&tapeFormatType); err != nil {
+		s.logger.Warn("Could not query tape format type, defaulting to raw", map[string]interface{}{
+			"tape_id": tapeID,
+			"error":   err.Error(),
+		})
 		tapeFormatType = "raw"
 	}
 	useLTFS := tapeFormatType == string(models.TapeFormatLTFS)
@@ -1999,7 +2003,10 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		}
 		defer func() {
 			umountSvc := tape.NewLTFSService(devicePath, ltfsMountPoint)
-			if umountErr := umountSvc.Unmount(ctx); umountErr != nil {
+			// Use a fresh context for cleanup since the original may be cancelled
+			umountCtx, umountCancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer umountCancel()
+			if umountErr := umountSvc.Unmount(umountCtx); umountErr != nil {
 				s.logger.Warn("Failed to unmount LTFS after backup", map[string]interface{}{"error": umountErr.Error()})
 			}
 		}()
