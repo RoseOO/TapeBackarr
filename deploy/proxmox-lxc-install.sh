@@ -312,7 +312,7 @@ install_tapebackarr() {
         git clone https://github.com/LinearTapeFileSystem/ltfs.git
         cd ltfs
         ./autogen.sh
-        ./configure
+        ./configure --disable-dependency-tracking
         make -j\$(nproc)
         make install
         ldconfig
