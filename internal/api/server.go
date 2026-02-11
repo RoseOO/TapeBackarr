@@ -346,6 +346,11 @@ func (s *Server) setupRoutes() {
 			r.Get("/", s.handleListDatabaseBackups)
 			r.Post("/backup", s.handleBackupDatabase)
 			r.Post("/restore", s.handleRestoreDatabaseBackup)
+			r.Group(func(r chi.Router) {
+				r.Use(s.adminOnlyMiddleware)
+				r.Get("/download", s.handleDownloadDatabase)
+				r.Post("/upload", s.handleUploadDatabase)
+			})
 		})
 
 		// Encryption keys (admin only for management, all authenticated users can list)
@@ -4365,6 +4370,172 @@ func (s *Server) handleRestoreDatabaseBackup(w http.ResponseWriter, r *http.Requ
 	s.respondJSON(w, http.StatusOK, map[string]string{
 		"status":    "restored",
 		"dest_path": destPath + "/tapebackarr.db",
+	})
+}
+
+// handleDownloadDatabase creates a snapshot of the database and sends it as a file download
+func (s *Server) handleDownloadDatabase(w http.ResponseWriter, r *http.Request) {
+	// Create a temporary directory for the backup copy
+	tempDir, err := os.MkdirTemp("", "tapebackarr-db-download-*")
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to create temp directory")
+		return
+	}
+	defer os.RemoveAll(tempDir)
+
+	backupPath := filepath.Join(tempDir, "tapebackarr.db")
+
+	// Use SQLite VACUUM INTO to create a consistent snapshot
+	if _, err := s.db.Exec("VACUUM INTO ?", backupPath); err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to create database snapshot: "+err.Error())
+		return
+	}
+
+	// Open the backup file for streaming
+	f, err := os.Open(backupPath)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to open database snapshot")
+		return
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to stat database snapshot")
+		return
+	}
+
+	// Set response headers for file download
+	timestamp := time.Now().Format("20060102-150405")
+	filename := fmt.Sprintf("tapebackarr-backup-%s.db", timestamp)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size()))
+
+	// Stream the file to the client
+	io.Copy(w, f)
+
+	// Log the download
+	s.db.Exec(`INSERT INTO audit_logs (action, resource_type, resource_id, details) VALUES (?, ?, ?, ?)`,
+		"database_download", "database", 0, fmt.Sprintf("Database downloaded: %s (%d bytes)", filename, info.Size()))
+}
+
+// handleUploadDatabase accepts a database file upload and replaces the current database
+func (s *Server) handleUploadDatabase(w http.ResponseWriter, r *http.Request) {
+	// Limit upload size to 500MB
+	const maxUploadSize = 500 << 20
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
+
+	// Parse multipart form
+	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
+		s.respondError(w, http.StatusBadRequest, "file too large or invalid upload")
+		return
+	}
+
+	file, header, err := r.FormFile("database")
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "no database file provided")
+		return
+	}
+	defer file.Close()
+
+	// Create temp file to store the upload
+	tempDir, err := os.MkdirTemp("", "tapebackarr-db-upload-*")
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to create temp directory")
+		return
+	}
+	defer os.RemoveAll(tempDir)
+
+	tempPath := filepath.Join(tempDir, "uploaded.db")
+	out, err := os.Create(tempPath)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to create temp file")
+		return
+	}
+
+	written, err := io.Copy(out, file)
+	out.Close()
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to save uploaded file")
+		return
+	}
+
+	// Validate that the uploaded file is a valid SQLite database
+	testDB, err := database.New(tempPath)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "uploaded file is not a valid SQLite database")
+		return
+	}
+	testDB.Close()
+
+	// Get the current database path
+	dbPath := s.db.Path
+	if dbPath == "" {
+		s.respondError(w, http.StatusInternalServerError, "could not determine current database path")
+		return
+	}
+
+	// Create a backup of the current database before replacing
+	backupPath := dbPath + ".pre-restore-backup"
+	if _, err := s.db.Exec("VACUUM INTO ?", backupPath); err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to create safety backup: "+err.Error())
+		return
+	}
+
+	// Close the current database connection
+	s.db.Close()
+
+	// Replace the database file
+	if err := os.Rename(tempPath, dbPath); err != nil {
+		// Try to reopen the original database
+		newDB, reopenErr := database.New(dbPath)
+		if reopenErr == nil {
+			s.db = newDB
+		}
+		s.respondError(w, http.StatusInternalServerError, "failed to replace database: "+err.Error())
+		return
+	}
+
+	// Reopen the database
+	newDB, err := database.New(dbPath)
+	if err != nil {
+		// Attempt to restore from the safety backup
+		os.Rename(backupPath, dbPath)
+		newDB, reopenErr := database.New(dbPath)
+		if reopenErr == nil {
+			s.db = newDB
+		}
+		s.respondError(w, http.StatusInternalServerError, "failed to open restored database: "+err.Error())
+		return
+	}
+
+	// Run migrations on the restored database
+	if err := newDB.Migrate(); err != nil {
+		// Restore from backup
+		newDB.Close()
+		os.Rename(backupPath, dbPath)
+		origDB, reopenErr := database.New(dbPath)
+		if reopenErr == nil {
+			s.db = origDB
+		}
+		s.respondError(w, http.StatusInternalServerError, "restored database failed migration: "+err.Error())
+		return
+	}
+
+	s.db = newDB
+
+	// Log the upload
+	s.db.Exec(`INSERT INTO audit_logs (action, resource_type, resource_id, details) VALUES (?, ?, ?, ?)`,
+		"database_upload", "database", 0, fmt.Sprintf("Database restored from upload: %s (%d bytes)", header.Filename, written))
+
+	// Clean up the safety backup
+	os.Remove(backupPath)
+
+	s.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"status":  "restored",
+		"message": "Database restored successfully from uploaded file",
+		"size":    written,
 	})
 }
 

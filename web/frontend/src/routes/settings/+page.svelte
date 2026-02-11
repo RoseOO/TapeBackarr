@@ -17,6 +17,9 @@
   let dbBackupTapes: any[] = [];
   let dbBackupRunning = false;
   let restarting = false;
+  let dbDownloading = false;
+  let dbUploading = false;
+  let dbUploadFile: File | null = null;
 
   const tabs = [
     { id: 'server', label: 'Server', icon: '🖥️' },
@@ -90,6 +93,47 @@
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  }
+
+  async function handleDbDownload() {
+    dbDownloading = true;
+    error = '';
+    try {
+      await api.downloadDatabase();
+      showSuccess('Database backup downloaded successfully');
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to download database';
+    } finally {
+      dbDownloading = false;
+    }
+  }
+
+  function handleDbFileSelect(event: Event) {
+    const input = event.target as HTMLInputElement;
+    if (input.files && input.files.length > 0) {
+      dbUploadFile = input.files[0];
+    }
+  }
+
+  async function handleDbUpload() {
+    if (!dbUploadFile) {
+      error = 'Please select a database file to upload';
+      return;
+    }
+    if (!confirm('Are you sure you want to restore the database from the uploaded file? This will replace ALL current data. A safety backup will be created automatically.')) {
+      return;
+    }
+    dbUploading = true;
+    error = '';
+    try {
+      await api.uploadDatabase(dbUploadFile);
+      showSuccess('Database restored successfully from uploaded file. You may need to reload the page.');
+      dbUploadFile = null;
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to upload database';
+    } finally {
+      dbUploading = false;
+    }
   }
 
   async function handleSave() {
@@ -305,6 +349,29 @@
                 </div>
               </div>
             {/if}
+          </div>
+
+          <h3>Download / Upload Database</h3>
+          <p class="section-desc">Download a copy of the database to your computer, or restore from a previously downloaded backup file. Admin access required.</p>
+
+          <div class="db-backup-action">
+            <div class="form-row">
+              <div class="form-group">
+                <label>Download Backup</label>
+                <button class="btn btn-secondary" on:click={handleDbDownload} disabled={dbDownloading}>
+                  {dbDownloading ? '⏳ Downloading...' : '⬇️ Download Database'}
+                </button>
+                <small>Downloads a snapshot of the current database to your browser.</small>
+              </div>
+              <div class="form-group">
+                <label for="db-upload-file">Upload &amp; Restore</label>
+                <input type="file" id="db-upload-file" accept=".db,.sqlite,.sqlite3" on:change={handleDbFileSelect} />
+                <button class="btn btn-danger" on:click={handleDbUpload} disabled={dbUploading || !dbUploadFile} style="margin-top: 0.5rem;">
+                  {dbUploading ? '⏳ Uploading...' : '⬆️ Upload & Restore Database'}
+                </button>
+                <small>Upload a previously downloaded database file to replace the current database. A safety backup is created automatically.</small>
+              </div>
+            </div>
           </div>
 
           <h3>Backup History</h3>
