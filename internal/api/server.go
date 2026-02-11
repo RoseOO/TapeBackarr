@@ -4413,7 +4413,13 @@ func (s *Server) handleDownloadDatabase(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size()))
 
 	// Stream the file to the client
-	io.Copy(w, f)
+	if _, err := io.Copy(w, f); err != nil {
+		// Headers already sent, can only log the error
+		if s.logger != nil {
+			s.logger.Error("failed to stream database download", map[string]interface{}{"error": err.Error()})
+		}
+		return
+	}
 
 	// Log the download
 	s.db.Exec(`INSERT INTO audit_logs (action, resource_type, resource_id, details) VALUES (?, ?, ?, ?)`,
@@ -4501,7 +4507,11 @@ func (s *Server) handleUploadDatabase(w http.ResponseWriter, r *http.Request) {
 	newDB, err := database.New(dbPath)
 	if err != nil {
 		// Attempt to restore from the safety backup
-		os.Rename(backupPath, dbPath)
+		if renameErr := os.Rename(backupPath, dbPath); renameErr != nil {
+			if s.logger != nil {
+				s.logger.Error("failed to restore safety backup after failed reopen", map[string]interface{}{"error": renameErr.Error()})
+			}
+		}
 		newDB, reopenErr := database.New(dbPath)
 		if reopenErr == nil {
 			s.db = newDB
@@ -4514,7 +4524,11 @@ func (s *Server) handleUploadDatabase(w http.ResponseWriter, r *http.Request) {
 	if err := newDB.Migrate(); err != nil {
 		// Restore from backup
 		newDB.Close()
-		os.Rename(backupPath, dbPath)
+		if renameErr := os.Rename(backupPath, dbPath); renameErr != nil {
+			if s.logger != nil {
+				s.logger.Error("failed to restore safety backup after failed migration", map[string]interface{}{"error": renameErr.Error()})
+			}
+		}
 		origDB, reopenErr := database.New(dbPath)
 		if reopenErr == nil {
 			s.db = origDB

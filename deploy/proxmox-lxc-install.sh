@@ -423,15 +423,11 @@ main() {
         else
             CT_ID="$next_id"
         fi
-        # Validate the chosen ID is not already in use
-        if pct status "$CT_ID" &> /dev/null; then
-            msg_error "Container ID $CT_ID already exists"
-        fi
-    else
-        # CT_ID was set via environment variable; validate it
-        if pct status "$CT_ID" &> /dev/null; then
-            msg_error "Container ID $CT_ID already exists"
-        fi
+    fi
+
+    # Validate the chosen ID is not already in use
+    if pct status "$CT_ID" &> /dev/null; then
+        msg_error "Container ID $CT_ID already exists"
     fi
     msg_ok "Using container ID: $CT_ID"
     
