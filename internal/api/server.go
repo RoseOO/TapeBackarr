@@ -1300,9 +1300,9 @@ func (s *Server) handleCreateTape(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Store NULL instead of empty string for barcode to avoid UNIQUE constraint violations
-	var barcodeParam interface{}
+	var barcodeParam *string
 	if req.Barcode != "" {
-		barcodeParam = req.Barcode
+		barcodeParam = &req.Barcode
 	}
 
 	result, err := s.db.Exec(`
