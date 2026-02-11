@@ -41,7 +41,36 @@ COPY web/frontend/ ./
 RUN npm run build
 
 # ============================================================================
-# Stage 3: Production image
+# Stage 3: Build LTFS from source (not available via apt)
+# ============================================================================
+FROM debian:bookworm-slim AS ltfs-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    automake \
+    autoconf \
+    libtool \
+    pkg-config \
+    make \
+    gcc \
+    g++ \
+    libfuse-dev \
+    libicu-dev \
+    libxml2-dev \
+    uuid-dev \
+    libsgutils2-dev \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone https://github.com/LinearTapeFileSystem/ltfs.git /tmp/ltfs \
+    && cd /tmp/ltfs \
+    && ./autogen.sh \
+    && ./configure \
+    && make -j"$(nproc)" \
+    && make install DESTDIR=/ltfs-install
+
+# ============================================================================
+# Stage 4: Production image
 # ============================================================================
 FROM debian:bookworm-slim
 
@@ -54,8 +83,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     sg3-utils \
     lsscsi \
     pigz \
+    fuse \
+    libfuse2 \
+    libicu72 \
+    libxml2 \
+    libsgutils2-2 \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# Copy LTFS binaries and libraries from builder
+COPY --from=ltfs-builder /ltfs-install/usr/local/ /usr/local/
+RUN ldconfig
 
 # Create non-root user (but note: tape access may require root or tape group)
 RUN groupadd -r tapebackarr && useradd -r -g tapebackarr tapebackarr

@@ -56,10 +56,36 @@ substep() {
 # Install dependencies
 step "Installing system dependencies..."
 apt-get update -qq
-apt-get install -y -qq mt-st mtx tar mbuffer sg3-utils lsscsi pigz fuse libfuse2 ltfs 2>/dev/null || {
+apt-get install -y -qq mt-st mtx tar mbuffer sg3-utils lsscsi pigz fuse libfuse2 2>/dev/null || {
     substep "Some optional packages may not be available"
-    substep "LTFS (ltfs) package may need to be installed from vendor or built from source"
 }
+
+# Build and install LTFS from source (not available via apt)
+step "Building LTFS from source (this may take a few minutes)..."
+if command -v mkltfs &> /dev/null && command -v ltfs &> /dev/null; then
+    substep "LTFS tools already installed, skipping build"
+else
+    apt-get install -y -qq git automake autoconf libtool pkg-config libfuse-dev libicu-dev libxml2-dev uuid-dev libsgutils2-dev 2>/dev/null || {
+        substep "Could not install LTFS build dependencies"
+        substep "LTFS (mkltfs, ltfs, ltfsck) will need to be built manually from https://github.com/LinearTapeFileSystem/ltfs"
+    }
+    if command -v autoconf &> /dev/null; then
+        (
+            cd /tmp
+            git clone https://github.com/LinearTapeFileSystem/ltfs.git
+            cd ltfs
+            ./autogen.sh
+            ./configure
+            make -j"$(nproc)"
+            make install
+            ldconfig
+            cd /tmp
+            rm -rf ltfs
+        ) && substep "LTFS installed from source" || {
+            substep "LTFS build failed — you may need to build manually from https://github.com/LinearTapeFileSystem/ltfs"
+        }
+    fi
+fi
 
 # Create directories
 step "Creating directories..."

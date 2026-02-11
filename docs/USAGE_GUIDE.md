@@ -408,6 +408,22 @@ sudo mount -t nfs server:/export/path /mnt/nfs/restore
 
 TapeBackarr supports LTFS (Linear Tape File System), which allows tapes to be used like regular filesystems with drag-and-drop file access.
 
+### Supported Drives
+
+LTFS requires **LTO-5 or later** tape drives (LTO-5 introduced the dual-partition capability that LTFS depends on). The following drive vendors are supported:
+
+| Vendor | LTFS Backend | Notes |
+|--------|-------------|-------|
+| IBM | `lin_tape` or `sg` | IBM drives can use either the proprietary lin_tape or generic sg backend |
+| HP / HPE | `sg` | Uses the Linux SCSI Generic (sg) backend |
+| Tandberg / Overland-Tandberg | `sg` | Fully supported including LTO-5 HH models |
+| Quantum | `sg` | Uses the Linux SCSI Generic (sg) backend |
+| Other LTO vendors | `sg` | Most LTO drives work with the sg backend |
+
+> **Overland-Tandberg LTO-5 HH**: This drive is fully supported. LTFS uses the SCSI Generic (`sg`) backend which works with Tandberg/Overland-Tandberg drives out of the box. The open-source [LinearTapeFileSystem/ltfs](https://github.com/LinearTapeFileSystem/ltfs) project should be built with `--enable-sg` (default) for these drives.
+
+TapeBackarr automatically detects your drive vendor and LTO generation and shows compatibility status on the **LTFS** page.
+
 ### LTFS vs Raw Format
 
 | Feature | Raw (tar) | LTFS |
