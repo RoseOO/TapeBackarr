@@ -420,6 +420,23 @@ func (s *Service) calculateFingerprint(key []byte) string {
 	return hex.EncodeToString(hash[:])
 }
 
+// GetKeyRawBytes retrieves the raw key bytes for a given key ID.
+// This is used for hardware encryption where the raw AES-256 key must be
+// sent to the tape drive firmware.
+func (s *Service) GetKeyRawBytes(ctx context.Context, keyID int64) ([]byte, error) {
+	key, err := s.GetKey(ctx, keyID)
+	if err != nil {
+		return nil, err
+	}
+
+	keyBytes, err := base64.StdEncoding.DecodeString(key.KeyData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode key data: %w", err)
+	}
+
+	return keyBytes, nil
+}
+
 // splitIntoChunks splits a string into chunks of specified size
 func splitIntoChunks(s string, chunkSize int) []string {
 	var chunks []string

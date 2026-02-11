@@ -614,6 +614,24 @@ export async function retensionDrive(driveId: number) {
   });
 }
 
+// Hardware Encryption
+export async function getHardwareEncryption(driveId: number) {
+  return fetchApi(`/drives/${driveId}/hardware-encryption`);
+}
+
+export async function setHardwareEncryption(driveId: number, encryptionKeyId: number) {
+  return fetchApi(`/drives/${driveId}/hardware-encryption`, {
+    method: 'POST',
+    body: JSON.stringify({ encryption_key_id: encryptionKeyId }),
+  });
+}
+
+export async function clearHardwareEncryption(driveId: number) {
+  return fetchApi(`/drives/${driveId}/hardware-encryption`, {
+    method: 'DELETE',
+  });
+}
+
 export async function getLibrary(id: number) {
   return fetchApi(`/libraries/${id}`);
 }

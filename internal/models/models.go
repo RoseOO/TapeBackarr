@@ -114,6 +114,17 @@ func CanUseLTFS(ltoType string) bool {
 	return gen >= LTFSMinLTOGeneration
 }
 
+// HWEncryptionMinLTOGeneration is the minimum LTO generation that supports
+// hardware encryption. LTO-4 introduced AES-256-GCM encryption in drive firmware.
+const HWEncryptionMinLTOGeneration = 4
+
+// CanUseHardwareEncryption reports whether the given LTO type supports
+// drive-level hardware encryption. Hardware encryption requires LTO-4 or later.
+func CanUseHardwareEncryption(ltoType string) bool {
+	gen := ltoGeneration(ltoType)
+	return gen >= HWEncryptionMinLTOGeneration
+}
+
 // LTFSBackend describes which LTFS tape backend driver a vendor's drives use.
 type LTFSBackend string
 

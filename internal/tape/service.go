@@ -1166,3 +1166,143 @@ func extractSgLogsColonValue(line string) int64 {
 	}
 	return 0
 }
+
+// HardwareEncryptionStatus represents the current hardware encryption state of a tape drive.
+// LTO-4 and later drives support AES-256-GCM encryption at the drive firmware level.
+type HardwareEncryptionStatus struct {
+	Supported bool   `json:"supported"`
+	Enabled   bool   `json:"enabled"`
+	Algorithm string `json:"algorithm,omitempty"` // e.g. "AES-256-GCM"
+	Mode      string `json:"mode"`               // "on", "mixed", "off", "rawread"
+	Error     string `json:"error,omitempty"`
+}
+
+// SetHardwareEncryption enables hardware AES-256-GCM encryption on the tape drive
+// using the stenc utility. keyData is the raw 256-bit key (32 bytes).
+// The key is passed via a temporary file that is securely removed after use.
+func (s *Service) SetHardwareEncryption(ctx context.Context, keyData []byte) error {
+	if len(keyData) != 32 {
+		return fmt.Errorf("hardware encryption requires a 256-bit (32-byte) key, got %d bytes", len(keyData))
+	}
+
+	// Write key to a temporary file with restricted permissions (stenc reads from a key file)
+	tmpDir := os.TempDir()
+	keyFilePath := filepath.Join(tmpDir, fmt.Sprintf("tapebackarr-hwenc-%d.key", time.Now().UnixNano()))
+	tmpFile, err := os.OpenFile(keyFilePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return fmt.Errorf("failed to create temporary key file: %w", err)
+	}
+	defer os.Remove(keyFilePath)
+
+	if _, err := tmpFile.Write(keyData); err != nil {
+		tmpFile.Close()
+		return fmt.Errorf("failed to write key to temporary file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("failed to close temporary key file: %w", err)
+	}
+
+	opCtx, cancel := context.WithTimeout(ctx, DefaultOperationTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(opCtx, "stenc", "-f", s.devicePath, "-e", "on", "-k", keyFilePath, "-a", "1")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if opCtx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("set hardware encryption timed out after %v: %w", DefaultOperationTimeout, ErrOperationTimeout)
+		}
+		return fmt.Errorf("failed to set hardware encryption: %s", string(output))
+	}
+
+	return nil
+}
+
+// ClearHardwareEncryption disables hardware encryption on the tape drive.
+func (s *Service) ClearHardwareEncryption(ctx context.Context) error {
+	opCtx, cancel := context.WithTimeout(ctx, DefaultOperationTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(opCtx, "stenc", "-f", s.devicePath, "-e", "off")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if opCtx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("clear hardware encryption timed out after %v: %w", DefaultOperationTimeout, ErrOperationTimeout)
+		}
+		return fmt.Errorf("failed to clear hardware encryption: %s", string(output))
+	}
+
+	return nil
+}
+
+// GetHardwareEncryptionStatus returns the current hardware encryption status of the drive.
+func (s *Service) GetHardwareEncryptionStatus(ctx context.Context) (*HardwareEncryptionStatus, error) {
+	status := &HardwareEncryptionStatus{
+		Mode: "off",
+	}
+
+	opCtx, cancel := context.WithTimeout(ctx, DefaultOperationTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(opCtx, "stenc", "-f", s.devicePath, "--detail")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if opCtx.Err() == context.DeadlineExceeded {
+			status.Error = fmt.Sprintf("hardware encryption status timed out after %v", DefaultOperationTimeout)
+			return status, ErrOperationTimeout
+		}
+		// stenc not installed or drive doesn't support encryption
+		outputStr := string(output)
+		if strings.Contains(outputStr, "not found") || strings.Contains(outputStr, "No such file") {
+			status.Error = "stenc utility not installed"
+			return status, nil
+		}
+		status.Error = fmt.Sprintf("failed to get hardware encryption status: %s", outputStr)
+		return status, nil
+	}
+
+	s.parseHardwareEncryptionStatus(string(output), status)
+	return status, nil
+}
+
+// parseHardwareEncryptionStatus parses stenc --detail output into a HardwareEncryptionStatus.
+func (s *Service) parseHardwareEncryptionStatus(output string, status *HardwareEncryptionStatus) {
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		lower := strings.ToLower(line)
+
+		if strings.Contains(lower, "encryption") && strings.Contains(lower, "capable") {
+			status.Supported = !strings.Contains(lower, "not capable")
+		}
+		if strings.Contains(lower, "drive encryption") || strings.Contains(lower, "encryption mode") {
+			// Extract the value portion after the colon or last equals
+			var value string
+			if idx := strings.LastIndex(lower, ":"); idx >= 0 {
+				value = strings.TrimSpace(lower[idx+1:])
+			} else if idx := strings.LastIndex(lower, "="); idx >= 0 {
+				value = strings.TrimSpace(lower[idx+1:])
+			} else {
+				// No delimiter found; skip mode detection for this line
+				continue
+			}
+
+			switch {
+			case strings.Contains(value, "mixed"):
+				status.Enabled = true
+				status.Mode = "mixed"
+			case strings.Contains(value, "raw"):
+				status.Enabled = false
+				status.Mode = "rawread"
+			case strings.Contains(value, "off") || strings.Contains(value, "disabled"):
+				status.Enabled = false
+				status.Mode = "off"
+			case strings.Contains(value, "on") || strings.Contains(value, "encrypt"):
+				status.Enabled = true
+				status.Mode = "on"
+			}
+		}
+		if strings.Contains(lower, "algorithm") && strings.Contains(lower, "aes") {
+			status.Algorithm = "AES-256-GCM"
+		}
+	}
+}

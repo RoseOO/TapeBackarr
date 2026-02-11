@@ -1,6 +1,7 @@
 package tape
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -614,5 +615,139 @@ func TestErrOperationTimeoutExists(t *testing.T) {
 	}
 	if ErrOperationTimeout.Error() != "tape operation timed out" {
 		t.Errorf("unexpected error message: %q", ErrOperationTimeout.Error())
+	}
+}
+
+func TestParseHardwareEncryptionStatus(t *testing.T) {
+	svc := NewService("/dev/nst0", 65536)
+
+	tests := []struct {
+		name          string
+		output        string
+		wantSupported bool
+		wantEnabled   bool
+		wantMode      string
+		wantAlgorithm string
+	}{
+		{
+			name: "encryption on with AES",
+			output: `Drive encryption capable
+Drive encryption mode: encrypt on
+Algorithm: AES-256-GCM
+`,
+			wantSupported: true,
+			wantEnabled:   true,
+			wantMode:      "on",
+			wantAlgorithm: "AES-256-GCM",
+		},
+		{
+			name: "encryption off",
+			output: `Drive encryption capable
+Drive encryption mode: off
+`,
+			wantSupported: true,
+			wantEnabled:   false,
+			wantMode:      "off",
+		},
+		{
+			name: "mixed mode",
+			output: `Drive encryption capable
+Encryption mode: mixed
+Algorithm: AES-256-GCM
+`,
+			wantSupported: true,
+			wantEnabled:   true,
+			wantMode:      "mixed",
+			wantAlgorithm: "AES-256-GCM",
+		},
+		{
+			name: "not capable",
+			output: `Drive encryption not capable
+`,
+			wantSupported: false,
+			wantEnabled:   false,
+			wantMode:      "off",
+		},
+		{
+			name:          "empty output",
+			output:        "",
+			wantSupported: false,
+			wantEnabled:   false,
+			wantMode:      "off",
+		},
+		{
+			name: "rawread mode",
+			output: `Drive encryption capable
+Drive encryption mode: raw read
+`,
+			wantSupported: true,
+			wantEnabled:   false,
+			wantMode:      "rawread",
+		},
+		{
+			name: "disabled mode",
+			output: `Drive encryption capable
+Drive encryption: disabled
+`,
+			wantSupported: true,
+			wantEnabled:   false,
+			wantMode:      "off",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status := &HardwareEncryptionStatus{Mode: "off"}
+			svc.parseHardwareEncryptionStatus(tt.output, status)
+			if status.Supported != tt.wantSupported {
+				t.Errorf("Supported = %v, want %v", status.Supported, tt.wantSupported)
+			}
+			if status.Enabled != tt.wantEnabled {
+				t.Errorf("Enabled = %v, want %v", status.Enabled, tt.wantEnabled)
+			}
+			if status.Mode != tt.wantMode {
+				t.Errorf("Mode = %q, want %q", status.Mode, tt.wantMode)
+			}
+			if tt.wantAlgorithm != "" && status.Algorithm != tt.wantAlgorithm {
+				t.Errorf("Algorithm = %q, want %q", status.Algorithm, tt.wantAlgorithm)
+			}
+		})
+	}
+}
+
+func TestSetHardwareEncryptionInvalidKeySize(t *testing.T) {
+	svc := NewService("/dev/nst0", 65536)
+
+	// Too short
+	err := svc.SetHardwareEncryption(context.Background(), make([]byte, 16))
+	if err == nil {
+		t.Error("expected error for 16-byte key")
+	}
+
+	// Too long
+	err = svc.SetHardwareEncryption(context.Background(), make([]byte, 64))
+	if err == nil {
+		t.Error("expected error for 64-byte key")
+	}
+
+	// Empty
+	err = svc.SetHardwareEncryption(context.Background(), []byte{})
+	if err == nil {
+		t.Error("expected error for empty key")
+	}
+}
+
+func TestHardwareEncryptionStatusDefaults(t *testing.T) {
+	status := &HardwareEncryptionStatus{
+		Mode: "off",
+	}
+	if status.Supported {
+		t.Error("expected Supported to be false by default")
+	}
+	if status.Enabled {
+		t.Error("expected Enabled to be false by default")
+	}
+	if status.Mode != "off" {
+		t.Errorf("expected Mode to be 'off', got %q", status.Mode)
 	}
 }
