@@ -1293,6 +1293,10 @@ func TestMoveFile(t *testing.T) {
 		if string(got) != string(content) {
 			t.Errorf("content mismatch: got %q, want %q", got, content)
 		}
+
+		if _, err := os.Stat(src); !os.IsNotExist(err) {
+			t.Error("source file should have been removed")
+		}
 	})
 
 	t.Run("nonexistent source", func(t *testing.T) {
