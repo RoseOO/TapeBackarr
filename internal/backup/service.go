@@ -2790,8 +2790,9 @@ func (s *Service) finishTape(p finishTapeParams) error {
 		}
 	}
 
-	// Track hardware encryption key on tape if applicable
-	if p.hwEncrypted && p.hwEncryptionKeyID != nil {
+	// Track hardware encryption key on tape if applicable (only if sw encryption
+	// is not already tracked, to avoid overwriting the sw encryption fingerprint)
+	if p.hwEncrypted && p.hwEncryptionKeyID != nil && !(p.encrypted && p.encryptionKeyID != nil) {
 		var keyFingerprint, keyName string
 		if err := s.db.QueryRow("SELECT key_fingerprint, name FROM encryption_keys WHERE id = ?", *p.hwEncryptionKeyID).Scan(&keyFingerprint, &keyName); err != nil {
 			s.logger.Warn("Failed to look up hw encryption key for tape tracking", map[string]interface{}{
