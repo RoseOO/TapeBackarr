@@ -2851,6 +2851,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		SELECT j.id, j.name, j.source_id, s.name as source_name, j.pool_id, p.name as pool_name,
 		       j.backup_type, j.schedule_cron, j.retention_days, j.enabled,
 		       j.encryption_enabled, j.encryption_key_id,
+		       COALESCE(j.hw_encryption_enabled, 0), j.hw_encryption_key_id,
 		       COALESCE(j.compression, 'none') as compression,
 		       j.last_run_at, j.next_run_at
 		FROM backup_jobs j
@@ -2872,26 +2873,29 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Scan(&j.ID, &j.Name, &j.SourceID, &sourceName, &j.PoolID, &poolName,
 			&j.BackupType, &j.ScheduleCron, &j.RetentionDays, &j.Enabled,
 			&j.EncryptionEnabled, &j.EncryptionKeyID,
+			&j.HwEncryptionEnabled, &j.HwEncryptionKeyID,
 			&compression,
 			&j.LastRunAt, &j.NextRunAt); err != nil {
 			continue
 		}
 		job := map[string]interface{}{
-			"id":                 j.ID,
-			"name":               j.Name,
-			"source_id":          j.SourceID,
-			"source_name":        sourceName,
-			"pool_id":            j.PoolID,
-			"pool_name":          poolName,
-			"backup_type":        j.BackupType,
-			"schedule_cron":      j.ScheduleCron,
-			"retention_days":     j.RetentionDays,
-			"enabled":            j.Enabled,
-			"encryption_enabled": j.EncryptionEnabled,
-			"encryption_key_id":  j.EncryptionKeyID,
-			"compression":        compression,
-			"last_run_at":        j.LastRunAt,
-			"next_run_at":        j.NextRunAt,
+			"id":                    j.ID,
+			"name":                  j.Name,
+			"source_id":             j.SourceID,
+			"source_name":           sourceName,
+			"pool_id":               j.PoolID,
+			"pool_name":             poolName,
+			"backup_type":           j.BackupType,
+			"schedule_cron":         j.ScheduleCron,
+			"retention_days":        j.RetentionDays,
+			"enabled":               j.Enabled,
+			"encryption_enabled":    j.EncryptionEnabled,
+			"encryption_key_id":     j.EncryptionKeyID,
+			"hw_encryption_enabled": j.HwEncryptionEnabled,
+			"hw_encryption_key_id":  j.HwEncryptionKeyID,
+			"compression":           compression,
+			"last_run_at":           j.LastRunAt,
+			"next_run_at":           j.NextRunAt,
 		}
 		jobs = append(jobs, job)
 	}
@@ -2901,14 +2905,15 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name            string `json:"name"`
-		SourceID        int64  `json:"source_id"`
-		PoolID          int64  `json:"pool_id"`
-		BackupType      string `json:"backup_type"`
-		ScheduleCron    string `json:"schedule_cron"`
-		RetentionDays   int    `json:"retention_days"`
-		EncryptionKeyID *int64 `json:"encryption_key_id"`
-		Compression     string `json:"compression"`
+		Name              string `json:"name"`
+		SourceID          int64  `json:"source_id"`
+		PoolID            int64  `json:"pool_id"`
+		BackupType        string `json:"backup_type"`
+		ScheduleCron      string `json:"schedule_cron"`
+		RetentionDays     int    `json:"retention_days"`
+		EncryptionKeyID   *int64 `json:"encryption_key_id"`
+		HwEncryptionKeyID *int64 `json:"hw_encryption_key_id"`
+		Compression       string `json:"compression"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.respondError(w, http.StatusBadRequest, "invalid request body")
@@ -2923,7 +2928,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Determine encryption settings
+	// Determine software encryption settings
 	encryptionEnabled := false
 	if req.EncryptionKeyID != nil && *req.EncryptionKeyID > 0 {
 		// Validate the key exists
@@ -2933,6 +2938,18 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		encryptionEnabled = true
+	}
+
+	// Determine hardware encryption settings
+	hwEncryptionEnabled := false
+	if req.HwEncryptionKeyID != nil && *req.HwEncryptionKeyID > 0 {
+		// Validate the key exists
+		_, err := s.encryptionService.GetKey(r.Context(), *req.HwEncryptionKeyID)
+		if err != nil {
+			s.respondError(w, http.StatusBadRequest, "hardware encryption key not found")
+			return
+		}
+		hwEncryptionEnabled = true
 	}
 
 	compression := req.Compression
@@ -2949,9 +2966,11 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := s.db.Exec(`
-		INSERT INTO backup_jobs (name, source_id, pool_id, backup_type, schedule_cron, retention_days, enabled, encryption_enabled, encryption_key_id, compression)
-		VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
-	`, req.Name, req.SourceID, req.PoolID, req.BackupType, req.ScheduleCron, req.RetentionDays, encryptionEnabled, req.EncryptionKeyID, compression)
+		INSERT INTO backup_jobs (name, source_id, pool_id, backup_type, schedule_cron, retention_days, enabled,
+			encryption_enabled, encryption_key_id, hw_encryption_enabled, hw_encryption_key_id, compression)
+		VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+	`, req.Name, req.SourceID, req.PoolID, req.BackupType, req.ScheduleCron, req.RetentionDays,
+		encryptionEnabled, req.EncryptionKeyID, hwEncryptionEnabled, req.HwEncryptionKeyID, compression)
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -3200,9 +3219,15 @@ func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 	// Get job details
 	var job models.BackupJob
 	err = s.db.QueryRow(`
-		SELECT id, name, source_id, pool_id, backup_type, retention_days, encryption_enabled, encryption_key_id, compression
+		SELECT id, name, source_id, pool_id, backup_type, retention_days,
+			encryption_enabled, encryption_key_id,
+			COALESCE(hw_encryption_enabled, 0), hw_encryption_key_id,
+			compression
 		FROM backup_jobs WHERE id = ?
-	`, id).Scan(&job.ID, &job.Name, &job.SourceID, &job.PoolID, &job.BackupType, &job.RetentionDays, &job.EncryptionEnabled, &job.EncryptionKeyID, &job.Compression)
+	`, id).Scan(&job.ID, &job.Name, &job.SourceID, &job.PoolID, &job.BackupType, &job.RetentionDays,
+		&job.EncryptionEnabled, &job.EncryptionKeyID,
+		&job.HwEncryptionEnabled, &job.HwEncryptionKeyID,
+		&job.Compression)
 	if err != nil {
 		s.respondError(w, http.StatusNotFound, "job not found")
 		return
@@ -3505,9 +3530,15 @@ func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 	// Get job details
 	var job models.BackupJob
 	err = s.db.QueryRow(`
-		SELECT id, name, source_id, pool_id, backup_type, retention_days, encryption_enabled, encryption_key_id, compression
+		SELECT id, name, source_id, pool_id, backup_type, retention_days,
+			encryption_enabled, encryption_key_id,
+			COALESCE(hw_encryption_enabled, 0), hw_encryption_key_id,
+			compression
 		FROM backup_jobs WHERE id = ?
-	`, id).Scan(&job.ID, &job.Name, &job.SourceID, &job.PoolID, &job.BackupType, &job.RetentionDays, &job.EncryptionEnabled, &job.EncryptionKeyID, &job.Compression)
+	`, id).Scan(&job.ID, &job.Name, &job.SourceID, &job.PoolID, &job.BackupType, &job.RetentionDays,
+		&job.EncryptionEnabled, &job.EncryptionKeyID,
+		&job.HwEncryptionEnabled, &job.HwEncryptionKeyID,
+		&job.Compression)
 	if err != nil {
 		s.respondError(w, http.StatusNotFound, "job not found")
 		return
@@ -3653,6 +3684,7 @@ func (s *Server) handleListBackupSets(w http.ResponseWriter, r *http.Request) {
 		SELECT bs.id, bs.job_id, j.name as job_name, bs.tape_id, t.label as tape_label,
 		       bs.backup_type, bs.start_time, bs.end_time, bs.status, bs.file_count, bs.total_bytes,
 		       COALESCE(bs.encrypted, 0) as encrypted, bs.encryption_key_id,
+		       COALESCE(bs.hw_encrypted, 0) as hw_encrypted, bs.hw_encryption_key_id,
 		       COALESCE(bs.compressed, 0) as compressed, COALESCE(bs.compression_type, 'none') as compression_type,
 		       tp.name as pool_name
 		FROM backup_sets bs
@@ -3684,32 +3716,37 @@ func (s *Server) handleListBackupSets(w http.ResponseWriter, r *http.Request) {
 		var jobName, tapeLabel *string
 		var encrypted bool
 		var encryptionKeyID *int64
+		var hwEncrypted bool
+		var hwEncryptionKeyID *int64
 		var compressed bool
 		var compressionType string
 		var poolName *string
 		if err := rows.Scan(&bs.ID, &bs.JobID, &jobName, &bs.TapeID, &tapeLabel,
 			&bs.BackupType, &bs.StartTime, &bs.EndTime, &bs.Status, &bs.FileCount, &bs.TotalBytes,
 			&encrypted, &encryptionKeyID,
+			&hwEncrypted, &hwEncryptionKeyID,
 			&compressed, &compressionType, &poolName); err != nil {
 			continue
 		}
 		set := map[string]interface{}{
-			"id":                bs.ID,
-			"job_id":            bs.JobID,
-			"job_name":          jobName,
-			"tape_id":           bs.TapeID,
-			"tape_label":        tapeLabel,
-			"backup_type":       bs.BackupType,
-			"start_time":        bs.StartTime,
-			"end_time":          bs.EndTime,
-			"status":            bs.Status,
-			"file_count":        bs.FileCount,
-			"total_bytes":       bs.TotalBytes,
-			"encrypted":         encrypted,
-			"encryption_key_id": encryptionKeyID,
-			"compressed":        compressed,
-			"compression_type":  compressionType,
-			"pool_name":         poolName,
+			"id":                    bs.ID,
+			"job_id":                bs.JobID,
+			"job_name":              jobName,
+			"tape_id":               bs.TapeID,
+			"tape_label":            tapeLabel,
+			"backup_type":           bs.BackupType,
+			"start_time":            bs.StartTime,
+			"end_time":              bs.EndTime,
+			"status":                bs.Status,
+			"file_count":            bs.FileCount,
+			"total_bytes":           bs.TotalBytes,
+			"encrypted":             encrypted,
+			"encryption_key_id":     encryptionKeyID,
+			"hw_encrypted":          hwEncrypted,
+			"hw_encryption_key_id":  hwEncryptionKeyID,
+			"compressed":            compressed,
+			"compression_type":      compressionType,
+			"pool_name":             poolName,
 		}
 		sets = append(sets, set)
 	}
