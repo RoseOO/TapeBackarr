@@ -1185,12 +1185,13 @@ func (s *Service) SetHardwareEncryption(ctx context.Context, keyData []byte) err
 		return fmt.Errorf("hardware encryption requires a 256-bit (32-byte) key, got %d bytes", len(keyData))
 	}
 
-	// Write key to a temporary file (stenc reads from a key file)
-	tmpFile, err := os.CreateTemp("", "tapebackarr-hwenc-*.key")
+	// Write key to a temporary file with restricted permissions (stenc reads from a key file)
+	tmpDir := os.TempDir()
+	keyFilePath := filepath.Join(tmpDir, fmt.Sprintf("tapebackarr-hwenc-%d.key", time.Now().UnixNano()))
+	tmpFile, err := os.OpenFile(keyFilePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to create temporary key file: %w", err)
 	}
-	keyFilePath := tmpFile.Name()
 	defer os.Remove(keyFilePath)
 
 	if _, err := tmpFile.Write(keyData); err != nil {
@@ -1199,10 +1200,6 @@ func (s *Service) SetHardwareEncryption(ctx context.Context, keyData []byte) err
 	}
 	if err := tmpFile.Close(); err != nil {
 		return fmt.Errorf("failed to close temporary key file: %w", err)
-	}
-	// Restrict permissions to owner only
-	if err := os.Chmod(keyFilePath, 0600); err != nil {
-		return fmt.Errorf("failed to set key file permissions: %w", err)
 	}
 
 	opCtx, cancel := context.WithTimeout(ctx, DefaultOperationTimeout)
