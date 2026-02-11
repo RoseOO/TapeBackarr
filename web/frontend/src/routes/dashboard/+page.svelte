@@ -26,6 +26,7 @@
     loaded_tape_encrypted: boolean;
     loaded_tape_enc_key_fingerprint: string;
     loaded_tape_compression: string;
+    loaded_tape_format_type: string;
     pool_storage: PoolStorageStats[];
     total_files_cataloged: number;
     total_sources: number;
@@ -290,6 +291,11 @@
         <div class="loaded-tape-info">
           <h3>Loaded Tape</h3>
           <div class="tape-detail"><strong>Label:</strong> {stats.loaded_tape}</div>
+          {#if stats.loaded_tape_format_type === 'ltfs'}
+            <span class="badge badge-info">📂 LTFS</span>
+          {:else if stats.loaded_tape_format_type}
+            <span class="badge badge-secondary">📼 TapeBackarr</span>
+          {/if}
           {#if stats.loaded_tape_encrypted}
             <span class="badge badge-warning">🔒 Encrypted</span>
           {/if}

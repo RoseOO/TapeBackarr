@@ -62,6 +62,7 @@ type TapeLabelData struct {
 	Timestamp                int64  `json:"timestamp"`
 	EncryptionKeyFingerprint string `json:"encryption_key_fingerprint,omitempty"`
 	CompressionType          string `json:"compression_type,omitempty"`
+	FormatType               string `json:"format_type,omitempty"` // "raw" or "ltfs"
 }
 
 // TapeContentEntry represents a single file entry from tape contents listing

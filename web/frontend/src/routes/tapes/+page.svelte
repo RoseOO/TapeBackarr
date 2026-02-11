@@ -595,6 +595,7 @@
           </th>
           <th>Label</th>
           <th>Type</th>
+          <th>Format</th>
           <th>UUID</th>
           <th>Barcode</th>
           <th>Pool</th>
@@ -614,6 +615,13 @@
             </td>
             <td><strong>{tape.label}</strong></td>
             <td>{tape.lto_type || '-'}</td>
+            <td>
+              {#if tape.format_type === 'ltfs'}
+                <span class="badge badge-info">LTFS</span>
+              {:else}
+                <span class="badge badge-secondary">Raw</span>
+              {/if}
+            </td>
             <td class="uuid-cell" title={tape.uuid || ''}>{tape.uuid && tape.uuid.length >= 8 ? tape.uuid.substring(0, 8) + '...' : (tape.uuid || '-')}</td>
             <td>{tape.barcode || '-'}</td>
             <td>{tape.pool_name || '-'}</td>
