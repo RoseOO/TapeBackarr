@@ -368,6 +368,61 @@ func TestTapeLabelDataFields(t *testing.T) {
 	}
 }
 
+func TestTapeLabelDataFormatType(t *testing.T) {
+	tests := []struct {
+		name       string
+		formatType string
+		wantEmpty  bool
+	}{
+		{"raw format", "raw", false},
+		{"ltfs format", "ltfs", false},
+		{"empty format defaults to zero value", "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			label := TapeLabelData{
+				Label:      "TAPE-001",
+				UUID:       "uuid-123",
+				FormatType: tt.formatType,
+			}
+			if tt.wantEmpty && label.FormatType != "" {
+				t.Errorf("expected empty FormatType, got %q", label.FormatType)
+			}
+			if !tt.wantEmpty && label.FormatType != tt.formatType {
+				t.Errorf("expected FormatType %q, got %q", tt.formatType, label.FormatType)
+			}
+		})
+	}
+}
+
+func TestTapeLabelDataFormatTypeJSON(t *testing.T) {
+	label := TapeLabelData{
+		Label:      "TAPE-001",
+		UUID:       "uuid-123",
+		FormatType: "ltfs",
+	}
+
+	data, err := json.Marshal(label)
+	if err != nil {
+		t.Fatalf("failed to marshal: %v", err)
+	}
+
+	if !strings.Contains(string(data), `"format_type":"ltfs"`) {
+		t.Errorf("JSON should contain format_type field, got: %s", string(data))
+	}
+
+	// Verify omitempty: empty format_type should not appear in JSON
+	label.FormatType = ""
+	data, err = json.Marshal(label)
+	if err != nil {
+		t.Fatalf("failed to marshal: %v", err)
+	}
+	if strings.Contains(string(data), `"format_type"`) {
+		t.Errorf("JSON should omit empty format_type field, got: %s", string(data))
+	}
+}
+
 func TestLabelCacheOperations(t *testing.T) {
 	cache := NewLabelCache()
 

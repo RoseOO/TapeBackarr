@@ -968,6 +968,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		LoadedTapeEncrypted   bool               `json:"loaded_tape_encrypted"`
 		LoadedTapeEncKeyFP    string             `json:"loaded_tape_enc_key_fingerprint"`
 		LoadedTapeCompression string             `json:"loaded_tape_compression"`
+		LoadedTapeFormatType  string             `json:"loaded_tape_format_type"`
 		PoolStorage           []PoolStorageStats `json:"pool_storage"`
 		TotalFilesCataloged   int64              `json:"total_files_cataloged"`
 		TotalSources          int                `json:"total_sources"`
@@ -1039,6 +1040,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 					if cached.Label.CompressionType != "" {
 						stats.LoadedTapeCompression = cached.Label.CompressionType
 					}
+					stats.LoadedTapeFormatType = cached.Label.FormatType
 				}
 			} else {
 				// Cache miss - read label and cache it
@@ -1058,6 +1060,18 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 					cache.Set(s.tapeService.DevicePath(), labelData, true)
 				}
 			}
+		}
+
+		// Look up format_type from DB if we identified the loaded tape
+		if stats.LoadedTapeUUID != "" && stats.LoadedTapeFormatType == "" {
+			var dbFormatType string
+			if err := s.db.QueryRow("SELECT format_type FROM tapes WHERE uuid = ?", stats.LoadedTapeUUID).Scan(&dbFormatType); err == nil {
+				stats.LoadedTapeFormatType = dbFormatType
+			}
+		}
+		// Default to "raw" if we have a loaded tape but couldn't determine format
+		if stats.LoadedTape != "" && stats.LoadedTapeFormatType == "" {
+			stats.LoadedTapeFormatType = string(models.TapeFormatRaw)
 		}
 	} else {
 		stats.DriveStatus = "offline"
@@ -1580,10 +1594,11 @@ func (s *Server) handleLabelTape(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get tape UUID and pool
+	// Get tape UUID, pool, and format type
 	var tapeUUID string
 	var poolID *int64
-	err = s.db.QueryRow("SELECT uuid, pool_id FROM tapes WHERE id = ?", id).Scan(&tapeUUID, &poolID)
+	var formatType string
+	err = s.db.QueryRow("SELECT uuid, pool_id, format_type FROM tapes WHERE id = ?", id).Scan(&tapeUUID, &poolID, &formatType)
 	if err != nil {
 		s.respondError(w, http.StatusNotFound, "tape not found")
 		return
@@ -1606,7 +1621,13 @@ func (s *Server) handleLabelTape(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	if devicePath != "" {
+	// LTFS-formatted tapes must not receive a raw label write — writing raw
+	// data to the beginning of an LTFS tape destroys the LTFS partition labels
+	// and makes the tape unmountable. For LTFS tapes we update the database
+	// and optionally auto-eject, but never write raw data to the tape.
+	isLTFS := formatType == string(models.TapeFormatLTFS)
+
+	if devicePath != "" && !isLTFS {
 		driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
 
 		if s.eventBus != nil {
@@ -1712,7 +1733,28 @@ func (s *Server) handleLabelTape(w http.ResponseWriter, r *http.Request) {
 				})
 			}
 		}
-	} else {
+	} else if devicePath != "" && isLTFS {
+		// LTFS tape: skip raw label write to avoid corrupting LTFS partition labels
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "info",
+				Category: "tape",
+				Title:    "LTFS Tape Label",
+				Message:  fmt.Sprintf("Tape is LTFS formatted — skipping raw label write to preserve LTFS partition labels. Label '%s' will be tracked in software only.", req.Label),
+				Details:  map[string]interface{}{"label": req.Label, "uuid": tapeUUID, "format_type": "ltfs"},
+			})
+		}
+
+		// Auto-eject after labeling if requested
+		if req.AutoEject {
+			driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+			if err := driveSvc.Eject(ctx); err != nil {
+				s.logger.Warn("Failed to auto-eject tape after labeling", map[string]interface{}{
+					"error": err.Error(),
+				})
+			}
+		}
+	} else if !isLTFS {
 		if s.eventBus != nil {
 			s.eventBus.Publish(SystemEvent{
 				Type:     "info",
@@ -1740,6 +1782,16 @@ func (s *Server) handleLabelTape(w http.ResponseWriter, r *http.Request) {
 				Category: "tape",
 				Title:    "Label Written",
 				Message:  fmt.Sprintf("Label '%s' written to physical tape", req.Label),
+			})
+		}
+	} else {
+		// LTFS tape without drive: software-only tracking
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "info",
+				Category: "tape",
+				Title:    "LTFS Tape Label",
+				Message:  fmt.Sprintf("Tape is LTFS formatted — label '%s' tracked in software only.", req.Label),
 			})
 		}
 	}
