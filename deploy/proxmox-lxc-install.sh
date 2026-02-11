@@ -300,7 +300,7 @@ install_tapebackarr() {
         apt-get update -qq
         apt-get upgrade -y -qq
         apt-get install -y -qq wget curl git mt-st mtx tar mbuffer sg3-utils lsscsi pigz fuse libfuse2 \
-            automake autoconf libtool pkg-config libfuse-dev libicu-dev libxml2-dev uuid-dev libsgutils2-dev libsnmp-dev
+            automake autoconf libtool pkg-config make libfuse-dev libicu-dev libxml2-dev uuid-dev libsgutils2-dev libsnmp-dev
     "
     msg_ok "Dependencies installed"
     
