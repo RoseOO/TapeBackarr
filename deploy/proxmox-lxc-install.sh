@@ -307,6 +307,7 @@ install_tapebackarr() {
     # Build and install LTFS from source (not available via apt)
     msg_info "Building LTFS from source..."
     pct exec "$ct_id" -- bash -c "
+        set -e
         cd /tmp
         git clone https://github.com/LinearTapeFileSystem/ltfs.git
         cd ltfs

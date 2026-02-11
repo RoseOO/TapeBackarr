@@ -87,7 +87,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libfuse2 \
     libicu72 \
     libxml2 \
-    libsgutils2-1.46-2 \
+    libsgutils2-2 \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
