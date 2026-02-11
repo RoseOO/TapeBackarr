@@ -242,6 +242,9 @@ func (s *Server) setupRoutes() {
 			r.Get("/{id}/alerts", s.handleDriveAlerts)
 			r.Post("/{id}/clean", s.handleDriveClean)
 			r.Post("/{id}/retension", s.handleDriveRetension)
+			r.Get("/{id}/hardware-encryption", s.handleGetDriveHardwareEncryption)
+			r.Post("/{id}/hardware-encryption", s.handleSetDriveHardwareEncryption)
+			r.Delete("/{id}/hardware-encryption", s.handleClearDriveHardwareEncryption)
 		})
 
 		// Backup Sources
@@ -2496,6 +2499,154 @@ func (s *Server) handleDriveRetension(w http.ResponseWriter, r *http.Request) {
 
 	s.auditLog(r, "retension", "tape_drive", driveID, "Tape retension pass executed")
 	s.respondJSON(w, http.StatusOK, map[string]string{"status": "retensioned"})
+}
+
+func (s *Server) handleGetDriveHardwareEncryption(w http.ResponseWriter, r *http.Request) {
+	driveID, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid drive id")
+		return
+	}
+
+	var devicePath string
+	err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", driveID).Scan(&devicePath)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "drive not found or not enabled")
+		return
+	}
+
+	ctx := r.Context()
+	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+
+	status, err := driveSvc.GetHardwareEncryptionStatus(ctx)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to get hardware encryption status: "+err.Error())
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) handleSetDriveHardwareEncryption(w http.ResponseWriter, r *http.Request) {
+	driveID, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid drive id")
+		return
+	}
+
+	var req struct {
+		EncryptionKeyID int64 `json:"encryption_key_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.EncryptionKeyID == 0 {
+		s.respondError(w, http.StatusBadRequest, "encryption_key_id is required")
+		return
+	}
+
+	var devicePath string
+	err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", driveID).Scan(&devicePath)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "drive not found or not enabled")
+		return
+	}
+
+	// Get the raw key bytes from the encryption key management system
+	ctx := r.Context()
+	keyBytes, err := s.encryptionService.GetKeyRawBytes(ctx, req.EncryptionKeyID)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "encryption key not found: "+err.Error())
+		return
+	}
+
+	// Send the key to the drive firmware
+	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+	if err := driveSvc.SetHardwareEncryption(ctx, keyBytes); err != nil {
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "error",
+				Category: "encryption",
+				Title:    "Hardware Encryption Failed",
+				Message:  fmt.Sprintf("Failed to enable hardware encryption on drive: %s", err.Error()),
+			})
+		}
+		s.respondError(w, http.StatusInternalServerError, "failed to set hardware encryption: "+err.Error())
+		return
+	}
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "success",
+			Category: "encryption",
+			Title:    "Hardware Encryption Enabled",
+			Message:  fmt.Sprintf("Hardware encryption enabled on drive %d with key ID %d", driveID, req.EncryptionKeyID),
+		})
+	}
+
+	claims := r.Context().Value("claims").(*auth.Claims)
+	s.db.Exec(`
+		INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details)
+		VALUES (?, ?, ?, ?, ?)
+	`, claims.UserID, "enable_hw_encryption", "tape_drive", driveID,
+		fmt.Sprintf("Enabled hardware encryption with key ID %d", req.EncryptionKeyID))
+
+	s.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"message":           "Hardware encryption enabled on drive",
+		"drive_id":          driveID,
+		"encryption_key_id": req.EncryptionKeyID,
+	})
+}
+
+func (s *Server) handleClearDriveHardwareEncryption(w http.ResponseWriter, r *http.Request) {
+	driveID, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid drive id")
+		return
+	}
+
+	var devicePath string
+	err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", driveID).Scan(&devicePath)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "drive not found or not enabled")
+		return
+	}
+
+	ctx := r.Context()
+	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+
+	if err := driveSvc.ClearHardwareEncryption(ctx); err != nil {
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "error",
+				Category: "encryption",
+				Title:    "Clear Hardware Encryption Failed",
+				Message:  fmt.Sprintf("Failed to disable hardware encryption: %s", err.Error()),
+			})
+		}
+		s.respondError(w, http.StatusInternalServerError, "failed to clear hardware encryption: "+err.Error())
+		return
+	}
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "success",
+			Category: "encryption",
+			Title:    "Hardware Encryption Disabled",
+			Message:  fmt.Sprintf("Hardware encryption disabled on drive %d", driveID),
+		})
+	}
+
+	claims := r.Context().Value("claims").(*auth.Claims)
+	s.db.Exec(`
+		INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details)
+		VALUES (?, ?, ?, ?, ?)
+	`, claims.UserID, "disable_hw_encryption", "tape_drive", driveID, "Disabled hardware encryption")
+
+	s.respondJSON(w, http.StatusOK, map[string]string{
+		"message": "Hardware encryption disabled on drive",
+	})
 }
 
 // createDriveAlertIfNew creates an alert if no unresolved alert with the same category exists for this drive

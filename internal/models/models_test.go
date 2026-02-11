@@ -106,6 +106,34 @@ func TestCanUseLTFS(t *testing.T) {
 	}
 }
 
+func TestCanUseHardwareEncryption(t *testing.T) {
+	tests := []struct {
+		name    string
+		ltoType string
+		want    bool
+	}{
+		{"LTO-1 not supported", "LTO-1", false},
+		{"LTO-2 not supported", "LTO-2", false},
+		{"LTO-3 not supported", "LTO-3", false},
+		{"LTO-4 supported", "LTO-4", true},
+		{"LTO-5 supported", "LTO-5", true},
+		{"LTO-6 supported", "LTO-6", true},
+		{"LTO-7 supported", "LTO-7", true},
+		{"LTO-8 supported", "LTO-8", true},
+		{"LTO-9 supported", "LTO-9", true},
+		{"LTO-10 supported", "LTO-10", true},
+		{"empty string", "", false},
+		{"invalid string", "DAT-72", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CanUseHardwareEncryption(tt.ltoType); got != tt.want {
+				t.Errorf("CanUseHardwareEncryption(%q) = %v, want %v", tt.ltoType, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLTFSVendorLookup(t *testing.T) {
 	tests := []struct {
 		name        string
