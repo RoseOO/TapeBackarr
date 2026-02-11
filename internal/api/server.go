@@ -1623,7 +1623,8 @@ func (s *Server) handleLabelTape(w http.ResponseWriter, r *http.Request) {
 
 	// LTFS-formatted tapes must not receive a raw label write — writing raw
 	// data to the beginning of an LTFS tape destroys the LTFS partition labels
-	// and makes the tape unmountable. For LTFS tapes we only update the database.
+	// and makes the tape unmountable. For LTFS tapes we update the database
+	// and optionally auto-eject, but never write raw data to the tape.
 	isLTFS := formatType == string(models.TapeFormatLTFS)
 
 	if devicePath != "" && !isLTFS {
