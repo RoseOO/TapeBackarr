@@ -1403,6 +1403,21 @@ func (s *Service) GetEncryptionKey(ctx context.Context, keyID int64) (string, er
 	return keyData, nil
 }
 
+// GetHwEncryptionKeyBytes retrieves the raw 32-byte key for hardware encryption.
+// The key is stored as base64 in the database and decoded to raw bytes suitable
+// for passing to the tape drive firmware via SetHardwareEncryption.
+func (s *Service) GetHwEncryptionKeyBytes(ctx context.Context, keyID int64) ([]byte, error) {
+	keyData, err := s.GetEncryptionKey(ctx, keyID)
+	if err != nil {
+		return nil, err
+	}
+	keyBytes, err := base64.StdEncoding.DecodeString(keyData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode hardware encryption key: %w", err)
+	}
+	return keyBytes, nil
+}
+
 // Compile-time check to ensure encryption package is used
 var _ = encryption.AlgorithmAES256GCM
 var _ = base64.StdEncoding
@@ -1965,6 +1980,8 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 	// Determine encryption and compression settings
 	var encrypted bool
 	var encryptionKeyID *int64
+	var hwEncrypted bool
+	var hwEncryptionKeyID *int64
 	var compressed bool
 	var compressionType models.CompressionType
 	// CompressionLTO means "let the LTO drive handle compression" — no software
@@ -1986,6 +2003,42 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		encrypted = true
 		encryptionKeyID = job.EncryptionKeyID
 	}
+
+	// Set up hardware encryption on the drive if the job has it enabled
+	if job.HwEncryptionEnabled && job.HwEncryptionKeyID != nil {
+		s.updateProgress(job.ID, "encryption", "Setting up hardware encryption on drive...")
+		hwKeyBytes, err := s.GetHwEncryptionKeyBytes(ctx, *job.HwEncryptionKeyID)
+		if err != nil {
+			s.updateProgress(job.ID, "failed", "Hardware encryption key not found: "+err.Error())
+			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "hardware encryption key not found: "+err.Error())
+			return nil, fmt.Errorf("failed to get hardware encryption key: %w", err)
+		}
+		if err := driveSvc.SetHardwareEncryption(ctx, hwKeyBytes); err != nil {
+			s.updateProgress(job.ID, "failed", "Failed to set hardware encryption: "+err.Error())
+			s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, "failed to set hardware encryption: "+err.Error())
+			return nil, fmt.Errorf("failed to set hardware encryption on drive: %w", err)
+		}
+		hwEncrypted = true
+		hwEncryptionKeyID = job.HwEncryptionKeyID
+		s.logger.Info("Hardware encryption enabled for backup job", map[string]interface{}{
+			"job_id":               job.ID,
+			"hw_encryption_key_id": *job.HwEncryptionKeyID,
+		})
+		// Ensure hardware encryption is cleared after backup completes
+		defer func() {
+			clearCtx, clearCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer clearCancel()
+			if clearErr := driveSvc.ClearHardwareEncryption(clearCtx); clearErr != nil {
+				s.logger.Warn("Failed to clear hardware encryption after backup", map[string]interface{}{
+					"error":  clearErr.Error(),
+					"job_id": job.ID,
+				})
+			} else {
+				s.logger.Info("Hardware encryption cleared after backup", map[string]interface{}{"job_id": job.ID})
+			}
+		}()
+	}
+
 	if useCompression {
 		compressed = true
 		compressionType = job.Compression
@@ -2093,7 +2146,9 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 			driveSvc: driveSvc, files: files, totalBytes: totalBytes,
 			actualTapeBytes: actualTapeBytes,
 			backupType:      backupType, encrypted: encrypted,
-			encryptionKeyID: encryptionKeyID, compressed: compressed,
+			encryptionKeyID: encryptionKeyID,
+			hwEncrypted:     hwEncrypted, hwEncryptionKeyID: hwEncryptionKeyID,
+			compressed:      compressed,
 			compressionType: compressionType, startTime: startTime,
 			checksums: fileChecksums,
 		}); err != nil {
@@ -2196,7 +2251,9 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 					files: batch, totalBytes: batchBytes,
 					actualTapeBytes: actualBatchBytes,
 					backupType:      backupType, encrypted: encrypted,
-					encryptionKeyID: encryptionKeyID, compressed: compressed,
+					encryptionKeyID: encryptionKeyID,
+					hwEncrypted:     hwEncrypted, hwEncryptionKeyID: hwEncryptionKeyID,
+					compressed:      compressed,
 					compressionType: compressionType, startTime: startTime,
 					spanningSetID: spanningSetID, sequenceNumber: seqNum,
 					checksums: fileChecksums,
@@ -2433,20 +2490,22 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 	})
 
 	return &models.BackupSet{
-		ID:              backupSetID,
-		JobID:           job.ID,
-		TapeID:          tapeID,
-		BackupType:      backupType,
-		FormatType:      models.TapeFormatType(tapeFormatType),
-		StartTime:       startTime,
-		EndTime:         &endTime,
-		Status:          models.BackupSetStatusCompleted,
-		FileCount:       int64(len(files)),
-		TotalBytes:      totalBytes,
-		Encrypted:       encrypted,
-		EncryptionKeyID: encryptionKeyID,
-		Compressed:      compressed,
-		CompressionType: compressionType,
+		ID:                backupSetID,
+		JobID:             job.ID,
+		TapeID:            tapeID,
+		BackupType:        backupType,
+		FormatType:        models.TapeFormatType(tapeFormatType),
+		StartTime:         startTime,
+		EndTime:           &endTime,
+		Status:            models.BackupSetStatusCompleted,
+		FileCount:         int64(len(files)),
+		TotalBytes:        totalBytes,
+		Encrypted:         encrypted,
+		EncryptionKeyID:   encryptionKeyID,
+		HwEncrypted:       hwEncrypted,
+		HwEncryptionKeyID: hwEncryptionKeyID,
+		Compressed:        compressed,
+		CompressionType:   compressionType,
 	}, nil
 }
 
@@ -2482,6 +2541,8 @@ type finishTapeParams struct {
 	backupType         models.BackupType
 	encrypted          bool
 	encryptionKeyID    *int64
+	hwEncrypted        bool
+	hwEncryptionKeyID  *int64
 	compressed         bool
 	compressionType    models.CompressionType
 	startTime          time.Time
@@ -2580,6 +2641,7 @@ func (s *Service) finishTape(p finishTapeParams) error {
 		FileCount:       int64(len(p.files)),
 		TotalBytes:      p.totalBytes,
 		Encrypted:       p.encrypted,
+		HwEncrypted:     p.hwEncrypted,
 		Compressed:      p.compressed,
 		CompressionType: string(p.compressionType),
 		Files:           make([]tape.TOCFileEntry, 0, len(p.files)),
@@ -2625,10 +2687,14 @@ func (s *Service) finishTape(p finishTapeParams) error {
 	s.db.Exec(`
 		UPDATE backup_sets SET 
 			end_time = ?, status = ?, file_count = ?, total_bytes = ?,
-			encrypted = ?, encryption_key_id = ?, compressed = ?, compression_type = ?
+			encrypted = ?, encryption_key_id = ?,
+			hw_encrypted = ?, hw_encryption_key_id = ?,
+			compressed = ?, compression_type = ?
 		WHERE id = ?
 	`, endTime, models.BackupSetStatusCompleted, len(p.files), p.totalBytes,
-		p.encrypted, p.encryptionKeyID, p.compressed, p.compressionType, p.backupSetID)
+		p.encrypted, p.encryptionKeyID,
+		p.hwEncrypted, p.hwEncryptionKeyID,
+		p.compressed, p.compressionType, p.backupSetID)
 
 	// Compute and save per-file block_offset in catalog entries. Files are
 	// written sequentially as a tar stream, so the offset of each file is the
@@ -2717,6 +2783,25 @@ func (s *Service) finishTape(p finishTapeParams) error {
 		} else if keyFingerprint != "" {
 			if _, err := s.db.Exec("UPDATE tapes SET encryption_key_fingerprint = ?, encryption_key_name = ? WHERE id = ?", keyFingerprint, keyName, p.tapeID); err != nil {
 				s.logger.Warn("Failed to update tape encryption tracking", map[string]interface{}{
+					"tape_id": p.tapeID,
+					"error":   err.Error(),
+				})
+			}
+		}
+	}
+
+	// Track hardware encryption key on tape if applicable (only if sw encryption
+	// is not already tracked, to avoid overwriting the sw encryption fingerprint)
+	if p.hwEncrypted && p.hwEncryptionKeyID != nil && !(p.encrypted && p.encryptionKeyID != nil) {
+		var keyFingerprint, keyName string
+		if err := s.db.QueryRow("SELECT key_fingerprint, name FROM encryption_keys WHERE id = ?", *p.hwEncryptionKeyID).Scan(&keyFingerprint, &keyName); err != nil {
+			s.logger.Warn("Failed to look up hw encryption key for tape tracking", map[string]interface{}{
+				"hw_encryption_key_id": *p.hwEncryptionKeyID,
+				"error":                err.Error(),
+			})
+		} else if keyFingerprint != "" {
+			if _, err := s.db.Exec("UPDATE tapes SET encryption_key_fingerprint = ?, encryption_key_name = ? WHERE id = ?", keyFingerprint, keyName, p.tapeID); err != nil {
+				s.logger.Warn("Failed to update tape hw encryption tracking", map[string]interface{}{
 					"tape_id": p.tapeID,
 					"error":   err.Error(),
 				})

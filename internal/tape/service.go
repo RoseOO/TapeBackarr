@@ -868,6 +868,7 @@ type TOCBackupSet struct {
 	FileCount       int64          `json:"file_count"`
 	TotalBytes      int64          `json:"total_bytes"`
 	Encrypted       bool           `json:"encrypted"`
+	HwEncrypted     bool           `json:"hw_encrypted,omitempty"`
 	Compressed      bool           `json:"compressed"`
 	CompressionType string         `json:"compression_type,omitempty"`
 	Files           []TOCFileEntry `json:"files"`

@@ -1963,3 +1963,131 @@ func TestStreamToTapeLTFSEncryptedEmptyFiles(t *testing.T) {
 		t.Errorf("expected 0 bytes, got %d", n)
 	}
 }
+
+func TestGetHwEncryptionKeyBytes(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	db, err := database.New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("failed to migrate database: %v", err)
+	}
+
+	svc := &Service{db: db}
+
+	// Insert a 32-byte key encoded as base64
+	rawKey := make([]byte, 32)
+	for i := range rawKey {
+		rawKey[i] = byte(i)
+	}
+	b64Key := base64.StdEncoding.EncodeToString(rawKey)
+
+	_, err = db.Exec(`INSERT INTO encryption_keys (name, algorithm, key_data, key_fingerprint) VALUES (?, ?, ?, ?)`,
+		"hw-test-key", "aes-256-gcm", b64Key, "testfingerprint")
+	if err != nil {
+		t.Fatalf("failed to insert encryption key: %v", err)
+	}
+
+	ctx := context.Background()
+
+	// Test successful retrieval
+	keyBytes, err := svc.GetHwEncryptionKeyBytes(ctx, 1)
+	if err != nil {
+		t.Fatalf("GetHwEncryptionKeyBytes failed: %v", err)
+	}
+	if len(keyBytes) != 32 {
+		t.Errorf("expected 32 bytes, got %d", len(keyBytes))
+	}
+	for i, b := range keyBytes {
+		if b != byte(i) {
+			t.Errorf("byte %d: expected %d, got %d", i, i, b)
+			break
+		}
+	}
+
+	// Test key not found
+	_, err = svc.GetHwEncryptionKeyBytes(ctx, 999)
+	if err == nil {
+		t.Error("expected error for non-existent key, got nil")
+	}
+}
+
+func TestHwEncryptionFieldsInDB(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	db, err := database.New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("failed to migrate database: %v", err)
+	}
+
+	// Insert prerequisite records
+	_, err = db.Exec("INSERT INTO tape_pools (name) VALUES ('test-pool')")
+	if err != nil {
+		t.Fatalf("failed to insert pool: %v", err)
+	}
+	_, err = db.Exec("INSERT INTO tapes (uuid, barcode, label, pool_id, status, capacity_bytes, used_bytes) VALUES ('uuid1', 'T001', 'T001', 1, 'active', 1500000000000, 0)")
+	if err != nil {
+		t.Fatalf("failed to insert tape: %v", err)
+	}
+	_, err = db.Exec("INSERT INTO backup_sources (name, source_type, path) VALUES ('test-src', 'local', '/tmp')")
+	if err != nil {
+		t.Fatalf("failed to insert source: %v", err)
+	}
+
+	// Insert a key
+	b64Key := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	_, err = db.Exec(`INSERT INTO encryption_keys (name, algorithm, key_data, key_fingerprint) VALUES (?, ?, ?, ?)`,
+		"hw-key", "aes-256-gcm", b64Key, "fp123")
+	if err != nil {
+		t.Fatalf("failed to insert encryption key: %v", err)
+	}
+
+	// Test backup_jobs with hw encryption fields
+	_, err = db.Exec(`INSERT INTO backup_jobs (name, source_id, pool_id, backup_type, schedule_cron, retention_days, 
+		hw_encryption_enabled, hw_encryption_key_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"hw-enc-job", 1, 1, "full", "", 30, true, 1)
+	if err != nil {
+		t.Fatalf("failed to insert job with hw encryption: %v", err)
+	}
+
+	var job models.BackupJob
+	err = db.QueryRow(`SELECT id, name, COALESCE(hw_encryption_enabled, 0), hw_encryption_key_id FROM backup_jobs WHERE name = ?`,
+		"hw-enc-job").Scan(&job.ID, &job.Name, &job.HwEncryptionEnabled, &job.HwEncryptionKeyID)
+	if err != nil {
+		t.Fatalf("failed to read job: %v", err)
+	}
+	if !job.HwEncryptionEnabled {
+		t.Error("expected hw_encryption_enabled to be true")
+	}
+	if job.HwEncryptionKeyID == nil || *job.HwEncryptionKeyID != 1 {
+		t.Errorf("expected hw_encryption_key_id to be 1, got %v", job.HwEncryptionKeyID)
+	}
+
+	// Test backup_sets with hw encryption fields
+	_, err = db.Exec(`INSERT INTO backup_sets (job_id, tape_id, backup_type, start_time, status,
+		hw_encrypted, hw_encryption_key_id) VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?)`,
+		1, 1, "full", "completed", true, 1)
+	if err != nil {
+		t.Fatalf("failed to insert backup set with hw encryption: %v", err)
+	}
+
+	var bs models.BackupSet
+	err = db.QueryRow(`SELECT id, COALESCE(hw_encrypted, 0), hw_encryption_key_id FROM backup_sets WHERE job_id = ?`,
+		1).Scan(&bs.ID, &bs.HwEncrypted, &bs.HwEncryptionKeyID)
+	if err != nil {
+		t.Fatalf("failed to read backup set: %v", err)
+	}
+	if !bs.HwEncrypted {
+		t.Error("expected hw_encrypted to be true")
+	}
+	if bs.HwEncryptionKeyID == nil || *bs.HwEncryptionKeyID != 1 {
+		t.Errorf("expected hw_encryption_key_id to be 1, got %v", bs.HwEncryptionKeyID)
+	}
+}

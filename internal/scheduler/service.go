@@ -71,7 +71,9 @@ func (s *Service) Stop() {
 func (s *Service) loadJobs() error {
 	rows, err := s.db.Query(`
 		SELECT id, name, source_id, pool_id, backup_type, schedule_cron, retention_days, enabled,
-		       encryption_enabled, encryption_key_id, compression
+		       encryption_enabled, encryption_key_id,
+		       COALESCE(hw_encryption_enabled, 0), hw_encryption_key_id,
+		       compression
 		FROM backup_jobs WHERE enabled = 1 AND schedule_cron IS NOT NULL AND schedule_cron != ''
 	`)
 	if err != nil {
@@ -82,7 +84,9 @@ func (s *Service) loadJobs() error {
 	for rows.Next() {
 		var job models.BackupJob
 		if err := rows.Scan(&job.ID, &job.Name, &job.SourceID, &job.PoolID, &job.BackupType, &job.ScheduleCron, &job.RetentionDays, &job.Enabled,
-			&job.EncryptionEnabled, &job.EncryptionKeyID, &job.Compression); err != nil {
+			&job.EncryptionEnabled, &job.EncryptionKeyID,
+			&job.HwEncryptionEnabled, &job.HwEncryptionKeyID,
+			&job.Compression); err != nil {
 			s.logger.Warn("Failed to scan job", map[string]interface{}{"error": err.Error()})
 			continue
 		}

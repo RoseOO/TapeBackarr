@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -306,14 +307,18 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 	var startBlock int64
 	var encrypted bool
 	var encryptionKeyID *int64
+	var hwEncrypted bool
+	var hwEncryptionKeyID *int64
 	var compressed bool
 	var compressionType string
 	err := s.db.QueryRow(`
 		SELECT tape_id, COALESCE(start_block, 0), COALESCE(encrypted, 0), encryption_key_id,
+		       COALESCE(hw_encrypted, 0), hw_encryption_key_id,
 		       COALESCE(compressed, 0), COALESCE(compression_type, 'none')
 		FROM backup_sets 
 		WHERE id = ?
-	`, req.BackupSetID).Scan(&tapeID, &startBlock, &encrypted, &encryptionKeyID, &compressed, &compressionType)
+	`, req.BackupSetID).Scan(&tapeID, &startBlock, &encrypted, &encryptionKeyID,
+		&hwEncrypted, &hwEncryptionKeyID, &compressed, &compressionType)
 	if err != nil {
 		return nil, fmt.Errorf("backup set not found: %w", err)
 	}
@@ -343,6 +348,33 @@ func (s *Service) Restore(ctx context.Context, req *RestoreRequest) (*RestoreRes
 
 	// Create a drive-specific tape service for all tape operations
 	driveSvc := tape.NewServiceForDevice(devicePath, s.blockSize)
+
+	// Set up hardware encryption on drive if backup was hw-encrypted
+	if hwEncrypted && hwEncryptionKeyID != nil {
+		var hwKeyData string
+		if err := s.db.QueryRow("SELECT key_data FROM encryption_keys WHERE id = ?", *hwEncryptionKeyID).Scan(&hwKeyData); err != nil {
+			return nil, fmt.Errorf("hardware encryption key not found for hw-encrypted backup: %w", err)
+		}
+		hwKeyBytes, err := base64.StdEncoding.DecodeString(hwKeyData)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode hardware encryption key: %w", err)
+		}
+		if err := driveSvc.SetHardwareEncryption(ctx, hwKeyBytes); err != nil {
+			return nil, fmt.Errorf("failed to set hardware encryption for restore: %w", err)
+		}
+		s.logger.Info("Hardware encryption enabled for restore", map[string]interface{}{
+			"hw_encryption_key_id": *hwEncryptionKeyID,
+		})
+		defer func() {
+			clearCtx, clearCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer clearCancel()
+			if clearErr := driveSvc.ClearHardwareEncryption(clearCtx); clearErr != nil {
+				s.logger.Warn("Failed to clear hardware encryption after restore", map[string]interface{}{
+					"error": clearErr.Error(),
+				})
+			}
+		}()
+	}
 
 	// --- Step 2: Wait for a tape to be physically ready ---
 	s.logger.Info("Waiting for tape to be ready", map[string]interface{}{
