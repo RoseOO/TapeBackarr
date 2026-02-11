@@ -76,23 +76,69 @@ func IsAvailable() bool {
 // This erases all data on the tape. The optional label parameter sets the
 // volume name stored in the LTFS index (max 6 characters for LTO barcodes).
 //
-// Equivalent to: mkltfs -d /dev/nst0 [-n label]
+// The --force flag is used to ensure formatting proceeds without an
+// interactive confirmation prompt, which would cause the command to hang
+// or silently skip formatting when run non-interactively.
+//
+// After a successful format the tape is rewound so that subsequent mount
+// or check operations find the partition labels at the beginning of tape.
+//
+// Equivalent to: mkltfs -d /dev/nst0 --force [-n label]
 func (l *LTFSService) Format(ctx context.Context, label string) error {
-	args := []string{"-d", l.devicePath}
+	args := []string{"-d", l.devicePath, "--force"}
 	if label != "" {
 		args = append(args, "-n", label)
 	}
 
 	cmd := exec.CommandContext(ctx, "mkltfs", args...)
 	output, err := cmd.CombinedOutput()
+	outStr := strings.TrimSpace(string(output))
 	if err != nil {
-		return fmt.Errorf("mkltfs failed: %s: %w", strings.TrimSpace(string(output)), err)
+		return fmt.Errorf("mkltfs failed: %s: %w", outStr, err)
+	}
+
+	// Verify mkltfs output contains the success indicator.
+	// Without this check a non-interactive run that silently skips
+	// the actual format could be mistaken for success.
+	if !ltfsFormatSuccessful(outStr) {
+		return fmt.Errorf("mkltfs did not report success (possible confirmation prompt issue): %s", outStr)
+	}
+
+	// Rewind the tape so the head is at BOT before any subsequent
+	// mount or check operation reads the partition labels.
+	if err := l.rewindTape(ctx); err != nil {
+		return fmt.Errorf("post-format rewind failed: %w", err)
+	}
+
+	return nil
+}
+
+// ltfsFormatSuccessful returns true when the mkltfs combined output
+// contains the LTFS success message (LTFS15024I) or the human-readable
+// equivalent.  Both open-source and IBM LTFS emit one of these strings
+// on a successful format.
+func ltfsFormatSuccessful(output string) bool {
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "ltfs15024i") ||
+		strings.Contains(lower, "volume formatted successfully")
+}
+
+// rewindTape rewinds the tape to the beginning using the mt utility.
+func (l *LTFSService) rewindTape(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, "mt", "-f", l.devicePath, "rewind")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("rewind failed: %s: %w", strings.TrimSpace(string(output)), err)
 	}
 	return nil
 }
 
 // Mount mounts the LTFS tape at the configured mount point.
 // The mount point directory is created if it does not exist.
+//
+// If the mount fails because partition labels cannot be read (a common
+// symptom of a tape that was not fully formatted), the error message
+// includes guidance to reformat the tape.
 //
 // Equivalent to: ltfs /mnt/ltfs -o devname=/dev/nst0
 func (l *LTFSService) Mount(ctx context.Context) error {
@@ -104,9 +150,26 @@ func (l *LTFSService) Mount(ctx context.Context) error {
 	cmd := exec.CommandContext(ctx, "ltfs", l.mountPoint, "-o", "devname="+l.devicePath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("ltfs mount failed: %s: %w", strings.TrimSpace(string(output)), err)
+		outStr := strings.TrimSpace(string(output))
+		if isLabelReadFailure(outStr) {
+			return fmt.Errorf("ltfs mount failed: tape does not contain valid LTFS partition labels — "+
+				"reformat the tape with LTFS before mounting: %s: %w", outStr, err)
+		}
+		return fmt.Errorf("ltfs mount failed: %s: %w", outStr, err)
 	}
 	return nil
+}
+
+// isLabelReadFailure returns true when LTFS output indicates it could not
+// read partition labels, which typically means the tape was never properly
+// formatted with LTFS (e.g. mkltfs ran without --force and skipped the
+// actual format).
+func isLabelReadFailure(output string) bool {
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "cannot read volume") ||
+		strings.Contains(lower, "failed to read partition labels") ||
+		strings.Contains(lower, "failed to read label") ||
+		strings.Contains(lower, "cannot read ansi label")
 }
 
 // Unmount cleanly unmounts the LTFS tape. This writes the final index to the
@@ -350,7 +413,11 @@ func (l *LTFSService) RestoreFiles(ctx context.Context, destPath string, filePat
 }
 
 // Check runs ltfsck (LTFS consistency check) on the tape device.
-// This is useful for verifying tape integrity after unexpected unmounts.
+// This is useful for verifying tape integrity after unexpected unmounts
+// or after formatting.
+//
+// If the check fails because the tape has no valid LTFS labels, the error
+// message includes guidance to reformat the tape.
 func (l *LTFSService) Check(ctx context.Context) error {
 	if _, err := exec.LookPath("ltfsck"); err != nil {
 		return fmt.Errorf("ltfsck not found: %w", err)
@@ -359,7 +426,12 @@ func (l *LTFSService) Check(ctx context.Context) error {
 	cmd := exec.CommandContext(ctx, "ltfsck", l.devicePath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("ltfsck failed: %s: %w", strings.TrimSpace(string(output)), err)
+		outStr := strings.TrimSpace(string(output))
+		if isLabelReadFailure(outStr) {
+			return fmt.Errorf("ltfsck failed: tape does not contain valid LTFS partition labels — "+
+				"reformat the tape with LTFS: %s: %w", outStr, err)
+		}
+		return fmt.Errorf("ltfsck failed: %s: %w", outStr, err)
 	}
 	return nil
 }
@@ -367,10 +439,25 @@ func (l *LTFSService) Check(ctx context.Context) error {
 // FormatAndLabel formats the tape with LTFS and writes a TapeBackarr-compatible
 // metadata file to the root of the volume so the tape can be identified by both
 // LTFS tools and the TapeBackarr label system.
+//
+// After formatting, an ltfsck verification is performed to ensure the LTFS
+// structures were written correctly before attempting to mount the volume.
 func (l *LTFSService) FormatAndLabel(ctx context.Context, label string, uuid string, pool string) error {
 	// Format the tape with LTFS
 	if err := l.Format(ctx, label); err != nil {
 		return fmt.Errorf("LTFS format failed: %w", err)
+	}
+
+	// Verify the freshly formatted tape with ltfsck before mounting.
+	// This catches cases where mkltfs appeared to succeed but did not
+	// write valid partition labels (e.g. drive quirks, interrupted I/O).
+	if _, err := exec.LookPath("ltfsck"); err == nil {
+		cmd := exec.CommandContext(ctx, "ltfsck", l.devicePath)
+		verifyOut, verifyErr := cmd.CombinedOutput()
+		if verifyErr != nil {
+			return fmt.Errorf("LTFS post-format verification failed (ltfsck): %s: %w",
+				strings.TrimSpace(string(verifyOut)), verifyErr)
+		}
 	}
 
 	// Mount the freshly formatted tape
