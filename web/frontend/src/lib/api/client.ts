@@ -467,6 +467,63 @@ export async function backupDatabaseToTape(tapeId: number) {
   });
 }
 
+// Database Download/Upload
+export async function downloadDatabase() {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+  const headers: HeadersInit = {};
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+  const response = await fetch(`${API_BASE}/database-backup/download`, { headers });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Download failed' }));
+    throw new Error(error.error || 'Download failed');
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get('Content-Disposition');
+  let filename = 'tapebackarr-backup.db';
+  if (disposition) {
+    const match = disposition.match(/filename="?([^"]+)"?/);
+    if (match) filename = match[1];
+  }
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  window.URL.revokeObjectURL(url);
+  a.remove();
+}
+
+export async function uploadDatabase(file: File) {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+  const formData = new FormData();
+  formData.append('database', file);
+  const headers: HeadersInit = {};
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+  const response = await fetch(`${API_BASE}/database-backup/upload`, {
+    method: 'POST',
+    headers,
+    body: formData,
+  });
+  if (response.status === 401) {
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      window.location.href = '/login';
+    }
+    throw new Error('Unauthorized');
+  }
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Upload failed' }));
+    throw new Error(error.error || 'Upload failed');
+  }
+  return response.json();
+}
+
 // Generic API client for pages that need direct endpoint access
 export const api = {
   get: (endpoint: string) => fetchApi(endpoint),

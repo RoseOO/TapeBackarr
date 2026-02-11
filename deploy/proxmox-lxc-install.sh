@@ -412,8 +412,23 @@ main() {
     check_root
     check_proxmox
     
-    # Get container ID
-    CT_ID=$(get_next_ct_id)
+    # Prompt for container ID if not set via environment variable
+    if [[ -z "$CT_ID" ]]; then
+        local next_id
+        next_id=$(get_next_ct_id)
+        echo
+        read -p "Enter container ID to use [$next_id]: " user_ct_id
+        if [[ -n "$user_ct_id" ]]; then
+            CT_ID="$user_ct_id"
+        else
+            CT_ID="$next_id"
+        fi
+    fi
+
+    # Validate the chosen ID is not already in use
+    if pct status "$CT_ID" &> /dev/null; then
+        msg_error "Container ID $CT_ID already exists"
+    fi
     msg_ok "Using container ID: $CT_ID"
     
     # Select template

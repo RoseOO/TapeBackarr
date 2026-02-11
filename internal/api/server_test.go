@@ -1,8 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1065,5 +1068,177 @@ func TestSelectTapeFromPoolPrefersDriveLoaded(t *testing.T) {
 	}
 	if tapeLabel != "TapeB" {
 		t.Errorf("expected tape label 'TapeB', got %q", tapeLabel)
+	}
+}
+
+func TestHandleDownloadDatabase(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := database.New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("failed to migrate database: %v", err)
+	}
+
+	s := &Server{
+		router: chi.NewRouter(),
+		db:     db,
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/database-backup/download", nil)
+	rr := httptest.NewRecorder()
+	s.handleDownloadDatabase(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Check headers
+	contentType := rr.Header().Get("Content-Type")
+	if contentType != "application/octet-stream" {
+		t.Errorf("expected Content-Type application/octet-stream, got %q", contentType)
+	}
+
+	disposition := rr.Header().Get("Content-Disposition")
+	if !strings.Contains(disposition, "tapebackarr-backup-") {
+		t.Errorf("expected Content-Disposition to contain backup filename, got %q", disposition)
+	}
+	if !strings.Contains(disposition, ".db") {
+		t.Errorf("expected Content-Disposition to have .db extension, got %q", disposition)
+	}
+
+	// Verify the downloaded content is a valid SQLite database
+	if rr.Body.Len() == 0 {
+		t.Fatal("expected non-empty response body")
+	}
+
+	// SQLite files start with "SQLite format 3"
+	header := rr.Body.String()[:16]
+	if !strings.HasPrefix(header, "SQLite format 3") {
+		t.Error("downloaded file does not appear to be a valid SQLite database")
+	}
+}
+
+func TestHandleUploadDatabase(t *testing.T) {
+	// Create source database to serve as the "uploaded" file
+	srcDir := t.TempDir()
+	srcPath := filepath.Join(srcDir, "upload.db")
+	srcDB, err := database.New(srcPath)
+	if err != nil {
+		t.Fatalf("failed to create source database: %v", err)
+	}
+	if err := srcDB.Migrate(); err != nil {
+		t.Fatalf("failed to migrate source database: %v", err)
+	}
+	// Insert a marker to verify restore
+	srcDB.Exec("INSERT INTO audit_logs (action, resource_type, resource_id, details) VALUES ('test_marker', 'test', 0, 'uploaded db marker')")
+	srcDB.Close()
+
+	// Create the server's database
+	srvDir := t.TempDir()
+	srvPath := filepath.Join(srvDir, "server.db")
+	srvDB, err := database.New(srvPath)
+	if err != nil {
+		t.Fatalf("failed to create server database: %v", err)
+	}
+	defer func() {
+		// The server's db reference may have changed after upload
+	}()
+
+	if err := srvDB.Migrate(); err != nil {
+		t.Fatalf("failed to migrate server database: %v", err)
+	}
+
+	s := &Server{
+		router: chi.NewRouter(),
+		db:     srvDB,
+	}
+
+	// Read the source db file
+	srcData, err := os.ReadFile(srcPath)
+	if err != nil {
+		t.Fatalf("failed to read source db: %v", err)
+	}
+
+	// Create multipart form
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+	part, err := writer.CreateFormFile("database", "upload.db")
+	if err != nil {
+		t.Fatalf("failed to create form file: %v", err)
+	}
+	if _, err := io.Copy(part, bytes.NewReader(srcData)); err != nil {
+		t.Fatalf("failed to write form file: %v", err)
+	}
+	writer.Close()
+
+	req := httptest.NewRequest("POST", "/api/v1/database-backup/upload", &buf)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	s.handleUploadDatabase(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(rr.Body).Decode(&result); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if result["status"] != "restored" {
+		t.Errorf("expected status 'restored', got %q", result["status"])
+	}
+
+	// Verify the marker exists in the restored database
+	var marker string
+	err = s.db.QueryRow("SELECT details FROM audit_logs WHERE action = 'test_marker'").Scan(&marker)
+	if err != nil {
+		t.Fatalf("failed to find marker in restored database: %v", err)
+	}
+	if marker != "uploaded db marker" {
+		t.Errorf("expected marker 'uploaded db marker', got %q", marker)
+	}
+
+	s.db.Close()
+}
+
+func TestHandleUploadDatabaseInvalidFile(t *testing.T) {
+	srvDir := t.TempDir()
+	srvPath := filepath.Join(srvDir, "server.db")
+	srvDB, err := database.New(srvPath)
+	if err != nil {
+		t.Fatalf("failed to create server database: %v", err)
+	}
+	defer srvDB.Close()
+
+	if err := srvDB.Migrate(); err != nil {
+		t.Fatalf("failed to migrate server database: %v", err)
+	}
+
+	s := &Server{
+		router: chi.NewRouter(),
+		db:     srvDB,
+	}
+
+	// Create multipart form with invalid (non-SQLite) data
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+	part, err := writer.CreateFormFile("database", "bad.db")
+	if err != nil {
+		t.Fatalf("failed to create form file: %v", err)
+	}
+	part.Write([]byte("this is not a sqlite database"))
+	writer.Close()
+
+	req := httptest.NewRequest("POST", "/api/v1/database-backup/upload", &buf)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	s.handleUploadDatabase(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected status 400 for invalid database, got %d: %s", rr.Code, rr.Body.String())
 	}
 }

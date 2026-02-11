@@ -16,6 +16,7 @@ var migrationsFS embed.FS
 // DB wraps the SQLite database connection
 type DB struct {
 	*sql.DB
+	Path string
 }
 
 // New creates a new database connection
@@ -40,7 +41,7 @@ func New(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
-	return &DB{db}, nil
+	return &DB{db, dbPath}, nil
 }
 
 // Migrate runs database migrations
