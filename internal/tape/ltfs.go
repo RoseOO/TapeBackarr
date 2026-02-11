@@ -114,9 +114,9 @@ func (l *LTFSService) Format(ctx context.Context, label string) error {
 }
 
 // ltfsFormatSuccessful returns true when the mkltfs combined output
-// contains the LTFS success message (LTFS15024I) or the human-readable
-// equivalent.  Both open-source and IBM LTFS emit one of these strings
-// on a successful format.
+// contains the LTFS success message.  IBM LTFS emits the log code
+// "LTFS15024I" while some open-source builds use the plain text
+// "volume formatted successfully".  We check for both variants.
 func ltfsFormatSuccessful(output string) bool {
 	lower := strings.ToLower(output)
 	return strings.Contains(lower, "ltfs15024i") ||
@@ -451,13 +451,8 @@ func (l *LTFSService) FormatAndLabel(ctx context.Context, label string, uuid str
 	// Verify the freshly formatted tape with ltfsck before mounting.
 	// This catches cases where mkltfs appeared to succeed but did not
 	// write valid partition labels (e.g. drive quirks, interrupted I/O).
-	if _, err := exec.LookPath("ltfsck"); err == nil {
-		cmd := exec.CommandContext(ctx, "ltfsck", l.devicePath)
-		verifyOut, verifyErr := cmd.CombinedOutput()
-		if verifyErr != nil {
-			return fmt.Errorf("LTFS post-format verification failed (ltfsck): %s: %w",
-				strings.TrimSpace(string(verifyOut)), verifyErr)
-		}
+	if err := l.Check(ctx); err != nil {
+		return fmt.Errorf("LTFS post-format verification failed: %w", err)
 	}
 
 	// Mount the freshly formatted tape
