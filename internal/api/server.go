@@ -4577,6 +4577,36 @@ func (s *Server) handleDownloadDatabase(w http.ResponseWriter, r *http.Request) 
 		"database_download", "database", 0, fmt.Sprintf("Database downloaded: %s (%d bytes)", filename, info.Size()))
 }
 
+// moveFile moves a file from src to dst. It first attempts os.Rename, and if
+// that fails (e.g. cross-device link), it falls back to copy-then-remove.
+func moveFile(src, dst string) error {
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+
+	// Fallback: copy contents then remove the source.
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+
+	return os.Remove(src)
+}
+
 // handleUploadDatabase accepts a database file upload and replaces the current database
 func (s *Server) handleUploadDatabase(w http.ResponseWriter, r *http.Request) {
 	// Limit upload size to 500MB
@@ -4644,7 +4674,7 @@ func (s *Server) handleUploadDatabase(w http.ResponseWriter, r *http.Request) {
 	s.db.Close()
 
 	// Replace the database file
-	if err := os.Rename(tempPath, dbPath); err != nil {
+	if err := moveFile(tempPath, dbPath); err != nil {
 		// Try to reopen the original database
 		newDB, reopenErr := database.New(dbPath)
 		if reopenErr == nil {
