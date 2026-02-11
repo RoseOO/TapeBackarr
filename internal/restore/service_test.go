@@ -793,3 +793,48 @@ func TestResolveDriveDevicePathByIDDisabled(t *testing.T) {
 		t.Error("expected error for disabled drive")
 	}
 }
+
+func TestHwEncryptionFieldsInBackupSetForRestore(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	// Insert prerequisite records
+	_, err := db.Exec("INSERT INTO tape_pools (name, description, retention_days) VALUES (?, ?, ?)",
+		"test_pool", "Test pool", 30)
+	if err != nil {
+		t.Fatalf("failed to insert tape pool: %v", err)
+	}
+	_, err = db.Exec("INSERT INTO tapes (barcode, label, pool_id, status, capacity_bytes, used_bytes) VALUES (?, ?, ?, ?, ?, ?)",
+		"TEST001", "Test Tape", 1, "active", 1000000000, 0)
+	if err != nil {
+		t.Fatalf("failed to insert tape: %v", err)
+	}
+	_, err = db.Exec("INSERT INTO backup_sources (name, source_type, path, enabled) VALUES (?, ?, ?, ?)",
+		"test_source", "local", "/test/source", true)
+	if err != nil {
+		t.Fatalf("failed to insert backup source: %v", err)
+	}
+	_, err = db.Exec("INSERT INTO backup_jobs (name, source_id, pool_id, backup_type, schedule_cron, retention_days, enabled) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		"test_job", 1, 1, "full", "0 2 * * *", 30, true)
+	if err != nil {
+		t.Fatalf("failed to insert backup job: %v", err)
+	}
+
+	// Insert a backup set with hw_encrypted=1
+	_, err = db.Exec(`INSERT INTO backup_sets (job_id, tape_id, backup_type, start_time, status, hw_encrypted, hw_encryption_key_id) 
+		VALUES (?, ?, ?, datetime('now'), ?, ?, ?)`, 1, 1, "full", "completed", true, nil)
+	if err != nil {
+		t.Fatalf("failed to insert backup set: %v", err)
+	}
+
+	// Read back and verify hw encryption fields
+	var hwEncrypted bool
+	var hwEncryptionKeyID *int64
+	err = db.QueryRow(`SELECT COALESCE(hw_encrypted, 0), hw_encryption_key_id FROM backup_sets WHERE id = 1`).Scan(&hwEncrypted, &hwEncryptionKeyID)
+	if err != nil {
+		t.Fatalf("failed to read backup set: %v", err)
+	}
+	if !hwEncrypted {
+		t.Error("expected hw_encrypted to be true")
+	}
+}

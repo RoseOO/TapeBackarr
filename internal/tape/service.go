@@ -1174,7 +1174,7 @@ type HardwareEncryptionStatus struct {
 	Supported bool   `json:"supported"`
 	Enabled   bool   `json:"enabled"`
 	Algorithm string `json:"algorithm,omitempty"` // e.g. "AES-256-GCM"
-	Mode      string `json:"mode"`               // "on", "mixed", "off", "rawread"
+	Mode      string `json:"mode"`                // "on", "mixed", "off", "rawread"
 	Error     string `json:"error,omitempty"`
 }
 

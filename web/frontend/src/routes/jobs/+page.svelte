@@ -15,6 +15,8 @@
     enabled: boolean;
     encryption_enabled: boolean;
     encryption_key_id: number | null;
+    hw_encryption_enabled: boolean;
+    hw_encryption_key_id: number | null;
     last_run_at: string | null;
     next_run_at: string | null;
     compression: string;
@@ -102,6 +104,7 @@
     schedule_cron: '',
     retention_days: 30,
     encryption_key_id: null as number | null,
+    hw_encryption_key_id: null as number | null,
     compression: 'lto',
   };
 
@@ -160,6 +163,9 @@
       const payload: any = { ...formData };
       if (!payload.encryption_key_id) {
         delete payload.encryption_key_id;
+      }
+      if (!payload.hw_encryption_key_id) {
+        delete payload.hw_encryption_key_id;
       }
       await api.createJob(payload);
       showCreateModal = false;
@@ -241,6 +247,7 @@
       schedule_cron: '',
       retention_days: 30,
       encryption_key_id: null as number | null,
+      hw_encryption_key_id: null as number | null,
       compression: 'lto',
     };
   }
@@ -527,8 +534,12 @@
             </td>
             <td>
               {#if job.encryption_enabled}
-                <span class="badge badge-success">🔒 Encrypted</span>
-              {:else}
+                <span class="badge badge-success">🔒 SW Encrypted</span>
+              {/if}
+              {#if job.hw_encryption_enabled}
+                <span class="badge badge-success">🔐 HW Encrypted</span>
+              {/if}
+              {#if !job.encryption_enabled && !job.hw_encryption_enabled}
                 <span class="badge badge-secondary">None</span>
               {/if}
             </td>
@@ -617,14 +628,24 @@
           <input type="number" id="retention" bind:value={formData.retention_days} min="1" />
         </div>
         <div class="form-group">
-          <label for="encryption-key">Encryption</label>
+          <label for="encryption-key">Software Encryption</label>
           <select id="encryption-key" bind:value={formData.encryption_key_id}>
             <option value={null}>None (unencrypted)</option>
             {#each encryptionKeys as key}
               <option value={key.id}>🔒 {key.name} — Software (per-file)</option>
             {/each}
           </select>
-          <small>Software encryption encrypts each file with AES-256-GCM before writing to tape. For hardware encryption, enable it on the drive from the <a href="/encryption">Encryption</a> page.</small>
+          <small>Software encryption encrypts each file with AES-256-GCM before writing to tape.</small>
+        </div>
+        <div class="form-group">
+          <label for="hw-encryption-key">Hardware Encryption</label>
+          <select id="hw-encryption-key" bind:value={formData.hw_encryption_key_id}>
+            <option value={null}>None (no hardware encryption)</option>
+            {#each encryptionKeys as key}
+              <option value={key.id}>🔐 {key.name} — Hardware (drive-level)</option>
+            {/each}
+          </select>
+          <small>Hardware encryption uses the tape drive's built-in AES-256-GCM engine. Requires LTO-4+ drive. The key is managed per job and set on the drive automatically before each backup.</small>
         </div>
         <div class="form-group">
           <label for="compression">Compression</label>
@@ -753,8 +774,14 @@
         </div>
         {#if editJob.encryption_enabled}
           <div class="form-group">
-            <label>Encryption</label>
-            <div class="locked-field">🔒 Encrypted (cannot be changed after creation)</div>
+            <label>Software Encryption</label>
+            <div class="locked-field">🔒 SW Encrypted (cannot be changed after creation)</div>
+          </div>
+        {/if}
+        {#if editJob.hw_encryption_enabled}
+          <div class="form-group">
+            <label>Hardware Encryption</label>
+            <div class="locked-field">🔐 HW Encrypted (cannot be changed after creation)</div>
           </div>
         {/if}
         {#if editJob.compression && editJob.compression !== 'none'}
