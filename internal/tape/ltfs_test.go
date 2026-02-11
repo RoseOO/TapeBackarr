@@ -332,3 +332,101 @@ func TestEncryptedFileSuffix(t *testing.T) {
 		t.Errorf("unexpected encrypted file suffix: %s", EncryptedFileSuffix)
 	}
 }
+
+func TestLtfsFormatSuccessful(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{
+			name:   "success with LTFS15024I code",
+			output: "LTFS15024I LTFS volume formatted successfully.",
+			want:   true,
+		},
+		{
+			name:   "success message in multi-line output",
+			output: "LTFS15000I Starting mkltfs.\nLTFS15024I LTFS volume formatted successfully.\nDone.",
+			want:   true,
+		},
+		{
+			name:   "human readable success message",
+			output: "Volume formatted successfully",
+			want:   true,
+		},
+		{
+			name:   "empty output",
+			output: "",
+			want:   false,
+		},
+		{
+			name:   "error output without success indicator",
+			output: "LTFS15013E Cannot format: device is busy",
+			want:   false,
+		},
+		{
+			name:   "partial match should not succeed",
+			output: "LTFS15024 missing trailing I",
+			want:   false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ltfsFormatSuccessful(tt.output); got != tt.want {
+				t.Errorf("ltfsFormatSuccessful(%q) = %v, want %v", tt.output, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsLabelReadFailure(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{
+			name:   "cannot read volume",
+			output: "LTFS11009E Cannot read volume: failed to read partition labels.",
+			want:   true,
+		},
+		{
+			name:   "failed to read partition labels",
+			output: "LTFS11170E Failed to read label (-1012) from partition 0.",
+			want:   true,
+		},
+		{
+			name:   "cannot read ANSI label",
+			output: "LTFS11174E Cannot read ANSI label: read failed (-20801).",
+			want:   true,
+		},
+		{
+			name:   "unrelated error",
+			output: "LTFS30205I READ (0x08) returns -20801.",
+			want:   false,
+		},
+		{
+			name:   "empty output",
+			output: "",
+			want:   false,
+		},
+		{
+			name: "full mount failure output from issue",
+			output: `LTFS30205I READ (0x08) returns -20801.
+LTFS30263I READ returns End-of-Data (EOD) Detected (-20801) /dev/nst0.
+LTFS12049E Cannot read: backend call failed (-20801).
+LTFS11174E Cannot read ANSI label: read failed (-20801).
+LTFS11170E Failed to read label (-1012) from partition 0.
+LTFS11009E Cannot read volume: failed to read partition labels.
+LTFS14013E Cannot mount the volume from device.`,
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isLabelReadFailure(tt.output); got != tt.want {
+				t.Errorf("isLabelReadFailure(%q) = %v, want %v", tt.output, got, tt.want)
+			}
+		})
+	}
+}
