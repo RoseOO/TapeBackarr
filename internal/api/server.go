@@ -75,6 +75,7 @@ type Server struct {
 	eventBus              *EventBus
 	telegramService       *notifications.TelegramService
 	batchLabel            batchLabelState
+	notifiedUnknownTapes  sync.Map // Track unknown tapes that have been notified (key: tape UUID)
 }
 
 // NewServer creates a new API server
@@ -1277,6 +1278,33 @@ func (s *Server) handleCreateTape(w http.ResponseWriter, r *http.Request) {
 
 	id, _ := result.LastInsertId()
 
+	// Clear the unknown tape notification for this tape
+	// 1. Clear by the new UUID we just created
+	s.notifiedUnknownTapes.Delete(tapeUUID)
+	// 2. Clear by label (handles cases where original UUID is unknown)
+	s.notifiedUnknownTapes.Delete(req.Label)
+	// 3. Also check all drives for unknown tapes with matching label and clear their UUIDs
+	//    This handles the case where the physical tape had a different UUID
+	rows, err := s.db.Query("SELECT id, device_path FROM tape_drives WHERE enabled = 1")
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var driveID int64
+			var devicePath string
+			if err := rows.Scan(&driveID, &devicePath); err == nil {
+				// Check if this drive has cached label data matching our new tape
+				if mainCache := s.tapeService.GetLabelCache(); mainCache != nil {
+					if cached := mainCache.Get(devicePath, 5*time.Minute); cached != nil && cached.Label != nil {
+						if cached.Label.Label == req.Label && cached.Label.UUID != "" {
+							// Clear notification for the original UUID too
+							s.notifiedUnknownTapes.Delete(cached.Label.UUID)
+						}
+					}
+				}
+			}
+		}
+	}
+
 	if s.eventBus != nil {
 		s.eventBus.Publish(SystemEvent{
 			Type:     "success",
@@ -2031,18 +2059,28 @@ func (s *Server) handleListDrives(w http.ResponseWriter, r *http.Request) {
 						Timestamp: labelData.Timestamp,
 					}
 					if s.eventBus != nil {
-						s.eventBus.Publish(SystemEvent{
-							Type:     "warning",
-							Category: "tape",
-							Title:    "Unknown Tape Detected",
-							Message:  fmt.Sprintf("Tape '%s' (UUID: %s) is loaded in drive but not in database", labelData.Label, labelData.UUID),
-							Details: map[string]interface{}{
-								"label":    labelData.Label,
-								"uuid":     labelData.UUID,
-								"pool":     labelData.Pool,
-								"drive_id": d.ID,
-							},
-						})
+						// Only publish notification once per unknown tape using UUID as key
+						tapeKey := labelData.UUID
+						if tapeKey == "" {
+							tapeKey = labelData.Label
+						}
+						if _, alreadyNotified := s.notifiedUnknownTapes.LoadOrStore(tapeKey, true); !alreadyNotified {
+							// Generate deterministic event ID based on tape UUID/label
+							eventID := fmt.Sprintf("unknown-tape-%s", tapeKey)
+							s.eventBus.Publish(SystemEvent{
+								ID:       eventID,
+								Type:     "warning",
+								Category: "tape",
+								Title:    "Unknown Tape Detected",
+								Message:  fmt.Sprintf("Tape '%s' (UUID: %s) is loaded in drive but not in database", labelData.Label, labelData.UUID),
+								Details: map[string]interface{}{
+									"label":    labelData.Label,
+									"uuid":     labelData.UUID,
+									"pool":     labelData.Pool,
+									"drive_id": d.ID,
+								},
+							})
+						}
 					}
 				}
 			} else {
@@ -5002,6 +5040,9 @@ func (s *Server) handleFormatTape(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Reset tape in database to blank state
+	var tapeUUID, tapeLabel string
+	_ = s.db.QueryRow("SELECT uuid, label FROM tapes WHERE id = ?", id).Scan(&tapeUUID, &tapeLabel)
+	
 	_, err = s.db.Exec(`
 		UPDATE tapes SET status = 'blank', used_bytes = 0, write_count = 0,
 		       last_written_at = NULL, labeled_at = NULL, updated_at = CURRENT_TIMESTAMP
@@ -5010,6 +5051,14 @@ func (s *Server) handleFormatTape(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	// Clear unknown tape notification for this tape
+	if tapeUUID != "" {
+		s.notifiedUnknownTapes.Delete(tapeUUID)
+	}
+	if tapeLabel != "" {
+		s.notifiedUnknownTapes.Delete(tapeLabel)
 	}
 
 	if s.eventBus != nil {
@@ -5310,11 +5359,15 @@ func (s *Server) handleFormatTapeInDrive(w http.ResponseWriter, r *http.Request)
 		if _, err := s.db.Exec("UPDATE tapes SET status = 'blank', used_bytes = 0, labeled_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE uuid = ?", oldUUID); err != nil {
 			s.logger.Warn("Failed to update tape status by UUID after format", map[string]interface{}{"error": err.Error(), "uuid": oldUUID})
 		}
+		// Clear unknown tape notification for this UUID
+		s.notifiedUnknownTapes.Delete(oldUUID)
 	}
 	if oldLabel != "" {
 		if _, err := s.db.Exec("UPDATE tapes SET status = 'blank', used_bytes = 0, labeled_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE label = ?", oldLabel); err != nil {
 			s.logger.Warn("Failed to update tape status by label after format", map[string]interface{}{"error": err.Error(), "label": oldLabel})
 		}
+		// Clear unknown tape notification for this label
+		s.notifiedUnknownTapes.Delete(oldLabel)
 	}
 
 	// Publish event

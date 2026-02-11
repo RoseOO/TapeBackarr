@@ -1242,3 +1242,106 @@ func TestHandleUploadDatabaseInvalidFile(t *testing.T) {
 		t.Errorf("expected status 400 for invalid database, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestUnknownTapeNotificationDeduplication(t *testing.T) {
+	// Create a temp database with migrations applied
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := database.New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("failed to migrate database: %v", err)
+	}
+
+	// Create an event bus
+	eventBus := NewEventBus()
+
+	// Create a test server
+	s := &Server{
+		db:       db,
+		eventBus: eventBus,
+	}
+
+	// Subscribe to events
+	eventCh := eventBus.Subscribe()
+	defer eventBus.Unsubscribe(eventCh)
+
+	// Simulate publishing an unknown tape event with the same UUID twice
+	tapeUUID := "test-uuid-123"
+	tapeLabel := "TEST-TAPE-001"
+
+	// First event - should be published
+	tapeKey := tapeUUID
+	eventID := fmt.Sprintf("unknown-tape-%s", tapeKey)
+	if _, alreadyNotified := s.notifiedUnknownTapes.LoadOrStore(tapeKey, true); !alreadyNotified {
+		eventBus.Publish(SystemEvent{
+			ID:       eventID,
+			Type:     "warning",
+			Category: "tape",
+			Title:    "Unknown Tape Detected",
+			Message:  fmt.Sprintf("Tape '%s' (UUID: %s) is loaded in drive but not in database", tapeLabel, tapeUUID),
+		})
+	}
+
+	// Second event - should NOT be published (deduplicated)
+	if _, alreadyNotified := s.notifiedUnknownTapes.LoadOrStore(tapeKey, true); !alreadyNotified {
+		eventBus.Publish(SystemEvent{
+			ID:       eventID,
+			Type:     "warning",
+			Category: "tape",
+			Title:    "Unknown Tape Detected",
+			Message:  fmt.Sprintf("Tape '%s' (UUID: %s) is loaded in drive but not in database", tapeLabel, tapeUUID),
+		})
+		t.Error("Expected second event to be deduplicated, but it was published")
+	}
+
+	// Check that only one event was published
+	select {
+	case event := <-eventCh:
+		if event.ID != eventID {
+			t.Errorf("Expected event ID %s, got %s", eventID, event.ID)
+		}
+		if event.Type != "warning" {
+			t.Errorf("Expected event type 'warning', got %s", event.Type)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Error("Expected to receive an event, but none was published")
+	}
+
+	// Verify no second event was sent
+	select {
+	case <-eventCh:
+		t.Error("Expected no second event, but one was published")
+	case <-time.After(100 * time.Millisecond):
+		// Good - no second event
+	}
+
+	// Clear the notification tracking (simulating tape added to library)
+	s.notifiedUnknownTapes.Delete(tapeUUID)
+
+	// Now the same tape should trigger a notification again
+	if _, alreadyNotified := s.notifiedUnknownTapes.LoadOrStore(tapeKey, true); !alreadyNotified {
+		eventBus.Publish(SystemEvent{
+			ID:       eventID,
+			Type:     "warning",
+			Category: "tape",
+			Title:    "Unknown Tape Detected",
+			Message:  fmt.Sprintf("Tape '%s' (UUID: %s) is loaded in drive but not in database", tapeLabel, tapeUUID),
+		})
+	} else {
+		t.Error("Expected event to be published after clearing notification tracking, but it was deduplicated")
+	}
+
+	// Verify the event was published after clearing
+	select {
+	case event := <-eventCh:
+		if event.ID != eventID {
+			t.Errorf("Expected event ID %s, got %s", eventID, event.ID)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Error("Expected to receive an event after clearing, but none was published")
+	}
+}
