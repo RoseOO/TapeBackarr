@@ -69,7 +69,7 @@ cd /tmp
 git clone https://github.com/LinearTapeFileSystem/ltfs.git
 cd ltfs
 ./autogen.sh
-./configure
+./configure --disable-dependency-tracking
 make -j$(nproc)
 sudo make install
 sudo ldconfig

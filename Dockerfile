@@ -66,7 +66,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN git clone https://github.com/LinearTapeFileSystem/ltfs.git /tmp/ltfs \
     && cd /tmp/ltfs \
     && ./autogen.sh \
-    && ./configure \
+    && ./configure --disable-dependency-tracking \
     && make -j"$(nproc)" \
     && make install DESTDIR=/ltfs-install
 
