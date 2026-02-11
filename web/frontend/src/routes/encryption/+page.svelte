@@ -13,7 +13,26 @@
     updated_at: string;
   }
 
+  interface Drive {
+    id: number;
+    device_path: string;
+    display_name: string;
+    vendor: string;
+    model: string;
+    status: string;
+    enabled: boolean;
+  }
+
+  interface HwEncryptionStatus {
+    supported: boolean;
+    enabled: boolean;
+    algorithm: string;
+    mode: string;
+    error: string;
+  }
+
   let keys: EncryptionKey[] = [];
+  let drives: Drive[] = [];
   let loading = true;
   let error = '';
   let successMsg = '';
@@ -21,6 +40,13 @@
   let showImportModal = false;
   let showKeySheetModal = false;
   let newKeyBase64 = '';
+
+  // Hardware encryption state
+  let hwSelectedDriveId: number | null = null;
+  let hwSelectedKeyId: number | null = null;
+  let hwStatus: HwEncryptionStatus | null = null;
+  let hwLoading = false;
+  let hwError = '';
 
   let createForm = {
     name: '',
@@ -38,7 +64,7 @@
   $: isAdmin = $auth.user?.role === 'admin';
 
   onMount(async () => {
-    await loadKeys();
+    await Promise.all([loadKeys(), loadDrives()]);
   });
 
   async function loadKeys() {
@@ -51,6 +77,64 @@
       error = e instanceof Error ? e.message : 'Failed to load encryption keys';
     } finally {
       loading = false;
+    }
+  }
+
+  async function loadDrives() {
+    try {
+      const result = await api.getDrives();
+      drives = Array.isArray(result) ? result.filter((d: Drive) => d.enabled) : [];
+    } catch {
+      // Drives are optional for this page
+      drives = [];
+    }
+  }
+
+  async function loadHwStatus() {
+    if (!hwSelectedDriveId) {
+      hwStatus = null;
+      return;
+    }
+    hwLoading = true;
+    hwError = '';
+    try {
+      hwStatus = await api.getHardwareEncryption(hwSelectedDriveId);
+    } catch (e) {
+      hwError = e instanceof Error ? e.message : 'Failed to get hardware encryption status';
+      hwStatus = null;
+    } finally {
+      hwLoading = false;
+    }
+  }
+
+  async function handleEnableHwEncryption() {
+    if (!hwSelectedDriveId || !hwSelectedKeyId) return;
+    hwLoading = true;
+    hwError = '';
+    try {
+      await api.setHardwareEncryption(hwSelectedDriveId, hwSelectedKeyId);
+      showSuccess('Hardware encryption enabled on drive');
+      await loadHwStatus();
+    } catch (e) {
+      hwError = e instanceof Error ? e.message : 'Failed to enable hardware encryption';
+    } finally {
+      hwLoading = false;
+    }
+  }
+
+  async function handleDisableHwEncryption() {
+    if (!hwSelectedDriveId) return;
+    if (!confirm('Disable hardware encryption on this drive? Data written after this will be unencrypted.')) return;
+    hwLoading = true;
+    hwError = '';
+    try {
+      await api.clearHardwareEncryption(hwSelectedDriveId);
+      showSuccess('Hardware encryption disabled on drive');
+      await loadHwStatus();
+    } catch (e) {
+      hwError = e instanceof Error ? e.message : 'Failed to disable hardware encryption';
+    } finally {
+      hwLoading = false;
     }
   }
 
@@ -246,20 +330,109 @@
     </table>
   </div>
 
+  <!-- Hardware Encryption Section -->
+  {#if isAdmin && drives.length > 0}
+    <div class="card hw-encryption-card">
+      <h3>🔐 Hardware Encryption (LTO Drive)</h3>
+      <p class="section-desc">LTO-4 and later drives support AES-256-GCM encryption at the drive firmware level. Hardware encryption is transparent, operates at full tape speed, and does not require CPU resources. Keys from the key store above are used to set the drive encryption key.</p>
+
+      {#if hwError}
+        <div class="hw-error">{hwError}
+          <button class="dismiss-btn" on:click={() => hwError = ''}>×</button>
+        </div>
+      {/if}
+
+      <div class="hw-controls">
+        <div class="hw-row">
+          <div class="form-group">
+            <label for="hw-drive">Drive</label>
+            <select id="hw-drive" bind:value={hwSelectedDriveId} on:change={loadHwStatus}>
+              <option value={null}>Select a drive...</option>
+              {#each drives as drive}
+                <option value={drive.id}>{drive.display_name || drive.device_path} ({drive.vendor || 'Unknown'})</option>
+              {/each}
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="hw-key">Encryption Key</label>
+            <select id="hw-key" bind:value={hwSelectedKeyId}>
+              <option value={null}>Select a key...</option>
+              {#each keys as key}
+                <option value={key.id}>🔒 {key.name}</option>
+              {/each}
+            </select>
+          </div>
+          <div class="hw-actions">
+            <button class="btn btn-primary" on:click={handleEnableHwEncryption}
+              disabled={!hwSelectedDriveId || !hwSelectedKeyId || hwLoading}>
+              {hwLoading ? 'Working...' : 'Enable'}
+            </button>
+            <button class="btn btn-danger" on:click={handleDisableHwEncryption}
+              disabled={!hwSelectedDriveId || hwLoading}>
+              Disable
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {#if hwSelectedDriveId}
+        <div class="hw-status-panel">
+          <h4>Drive Encryption Status</h4>
+          {#if hwLoading}
+            <p>Checking status...</p>
+          {:else if hwStatus}
+            <div class="hw-status-grid">
+              <div class="hw-stat">
+                <span class="hw-label">Supported</span>
+                <span class="badge {hwStatus.supported ? 'badge-success' : 'badge-secondary'}">{hwStatus.supported ? 'Yes' : 'No'}</span>
+              </div>
+              <div class="hw-stat">
+                <span class="hw-label">Status</span>
+                <span class="badge {hwStatus.enabled ? 'badge-success' : 'badge-secondary'}">{hwStatus.enabled ? '🔒 Encryption On' : 'Off'}</span>
+              </div>
+              <div class="hw-stat">
+                <span class="hw-label">Mode</span>
+                <span class="badge badge-info">{hwStatus.mode}</span>
+              </div>
+              {#if hwStatus.algorithm}
+                <div class="hw-stat">
+                  <span class="hw-label">Algorithm</span>
+                  <span class="badge badge-info">{hwStatus.algorithm}</span>
+                </div>
+              {/if}
+              {#if hwStatus.error}
+                <div class="hw-stat hw-stat-wide">
+                  <span class="hw-label">Note</span>
+                  <span class="hw-note">{hwStatus.error}</span>
+                </div>
+              {/if}
+            </div>
+          {:else}
+            <p class="hw-hint">Select a drive above to check hardware encryption status.</p>
+          {/if}
+        </div>
+      {/if}
+    </div>
+  {/if}
+
   <div class="card info-card">
     <h3>About Encryption</h3>
     <div class="info-grid">
       <div class="info-item">
-        <span class="badge badge-info">AES-256-GCM</span>
-        <p>All keys use AES-256-GCM authenticated encryption, providing both confidentiality and integrity for your tape backups.</p>
+        <span class="badge badge-info">Software Encryption</span>
+        <p>Per-file AES-256-GCM encryption applied by TapeBackarr before writing to tape. Assign an encryption key to a backup job to use this mode.</p>
+      </div>
+      <div class="info-item">
+        <span class="badge badge-success">Hardware Encryption</span>
+        <p>LTO-4+ drives encrypt data at the firmware level at full tape speed with zero CPU overhead. Enable it on a drive above — all data written while active is encrypted.</p>
       </div>
       <div class="info-item">
         <span class="badge badge-warning">Key Safety</span>
         <p>Keys are shown only once when created. Use the Key Sheet feature to create a paper backup of all key fingerprints and recovery information.</p>
       </div>
       <div class="info-item">
-        <span class="badge badge-success">Usage</span>
-        <p>Assign encryption keys to backup jobs to automatically encrypt data written to tape. Keys in active use cannot be deleted.</p>
+        <span class="badge badge-info">AES-256-GCM</span>
+        <p>Both software and hardware encryption use AES-256-GCM, providing confidentiality and integrity for your tape backups.</p>
       </div>
     </div>
   </div>
@@ -486,5 +659,112 @@
     white-space: pre-wrap;
     word-break: break-all;
     border: 1px solid #eee;
+  }
+
+  /* Hardware Encryption Section */
+  .hw-encryption-card {
+    margin-top: 1.5rem;
+    border: 1px solid #d1e7dd;
+  }
+
+  .hw-encryption-card h3 {
+    margin: 0 0 0.5rem;
+  }
+
+  .section-desc {
+    font-size: 0.875rem;
+    color: #666;
+    margin: 0 0 1.25rem;
+    line-height: 1.5;
+  }
+
+  .hw-error {
+    background: #f8d7da;
+    color: #721c24;
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    margin-bottom: 1rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.875rem;
+  }
+
+  .dismiss-btn {
+    background: none;
+    border: none;
+    font-size: 1.25rem;
+    cursor: pointer;
+    color: inherit;
+    padding: 0 0.25rem;
+  }
+
+  .hw-controls {
+    margin-bottom: 1rem;
+  }
+
+  .hw-row {
+    display: flex;
+    gap: 1rem;
+    align-items: flex-end;
+    flex-wrap: wrap;
+  }
+
+  .hw-row .form-group {
+    flex: 1;
+    min-width: 180px;
+  }
+
+  .hw-actions {
+    display: flex;
+    gap: 0.5rem;
+    padding-bottom: 0.25rem;
+  }
+
+  .hw-status-panel {
+    background: #f9f9f9;
+    border: 1px solid #eee;
+    border-radius: 8px;
+    padding: 1rem;
+    margin-top: 0.5rem;
+  }
+
+  .hw-status-panel h4 {
+    margin: 0 0 0.75rem;
+    font-size: 0.95rem;
+  }
+
+  .hw-status-grid {
+    display: flex;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+  }
+
+  .hw-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+
+  .hw-stat-wide {
+    flex-basis: 100%;
+  }
+
+  .hw-label {
+    font-size: 0.8rem;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .hw-note {
+    font-size: 0.85rem;
+    color: #666;
+  }
+
+  .hw-hint {
+    color: #888;
+    font-size: 0.875rem;
+    margin: 0;
   }
 </style>

@@ -617,14 +617,14 @@
           <input type="number" id="retention" bind:value={formData.retention_days} min="1" />
         </div>
         <div class="form-group">
-          <label for="encryption-key">Encryption Key</label>
+          <label for="encryption-key">Encryption</label>
           <select id="encryption-key" bind:value={formData.encryption_key_id}>
             <option value={null}>None (unencrypted)</option>
             {#each encryptionKeys as key}
-              <option value={key.id}>🔒 {key.name}</option>
+              <option value={key.id}>🔒 {key.name} — Software (per-file)</option>
             {/each}
           </select>
-          <small>Select an encryption key to encrypt backups. <a href="/encryption">Manage keys</a></small>
+          <small>Software encryption encrypts each file with AES-256-GCM before writing to tape. For hardware encryption, enable it on the drive from the <a href="/encryption">Encryption</a> page.</small>
         </div>
         <div class="form-group">
           <label for="compression">Compression</label>
