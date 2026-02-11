@@ -1243,6 +1243,69 @@ func TestHandleUploadDatabaseInvalidFile(t *testing.T) {
 	}
 }
 
+func TestMoveFile(t *testing.T) {
+	t.Run("same directory", func(t *testing.T) {
+		dir := t.TempDir()
+		src := filepath.Join(dir, "src.txt")
+		dst := filepath.Join(dir, "dst.txt")
+		content := []byte("hello world")
+
+		if err := os.WriteFile(src, content, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := moveFile(src, dst); err != nil {
+			t.Fatalf("moveFile failed: %v", err)
+		}
+
+		got, err := os.ReadFile(dst)
+		if err != nil {
+			t.Fatalf("failed to read dst: %v", err)
+		}
+		if string(got) != string(content) {
+			t.Errorf("content mismatch: got %q, want %q", got, content)
+		}
+
+		if _, err := os.Stat(src); !os.IsNotExist(err) {
+			t.Error("source file should have been removed")
+		}
+	})
+
+	t.Run("different directories", func(t *testing.T) {
+		srcDir := t.TempDir()
+		dstDir := t.TempDir()
+		src := filepath.Join(srcDir, "src.txt")
+		dst := filepath.Join(dstDir, "dst.txt")
+		content := []byte("cross directory move")
+
+		if err := os.WriteFile(src, content, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := moveFile(src, dst); err != nil {
+			t.Fatalf("moveFile failed: %v", err)
+		}
+
+		got, err := os.ReadFile(dst)
+		if err != nil {
+			t.Fatalf("failed to read dst: %v", err)
+		}
+		if string(got) != string(content) {
+			t.Errorf("content mismatch: got %q, want %q", got, content)
+		}
+
+		if _, err := os.Stat(src); !os.IsNotExist(err) {
+			t.Error("source file should have been removed")
+		}
+	})
+
+	t.Run("nonexistent source", func(t *testing.T) {
+		dir := t.TempDir()
+		err := moveFile(filepath.Join(dir, "missing.txt"), filepath.Join(dir, "dst.txt"))
+		if err == nil {
+			t.Error("expected error for nonexistent source")
+		}
+	})
 func TestUnknownTapeNotificationDeduplication(t *testing.T) {
 	// Create a temp database with migrations applied
 	dbPath := filepath.Join(t.TempDir(), "test.db")
