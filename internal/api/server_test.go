@@ -1306,6 +1306,8 @@ func TestMoveFile(t *testing.T) {
 			t.Error("expected error for nonexistent source")
 		}
 	})
+}
+
 func TestUnknownTapeNotificationDeduplication(t *testing.T) {
 	// Create a temp database with migrations applied
 	dbPath := filepath.Join(t.TempDir(), "test.db")
@@ -1406,5 +1408,81 @@ func TestUnknownTapeNotificationDeduplication(t *testing.T) {
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Error("Expected to receive an event after clearing, but none was published")
+	}
+}
+
+func TestCreateTapeEmptyBarcode(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := database.New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("failed to migrate database: %v", err)
+	}
+
+	logger, err := logging.NewLogger("warn", "text", "")
+	if err != nil {
+		t.Fatalf("failed to create logger: %v", err)
+	}
+
+	tapeService := tape.NewService("/dev/null", 65536)
+	s := &Server{
+		router:      chi.NewRouter(),
+		db:          db,
+		tapeService: tapeService,
+		logger:      logger,
+	}
+
+	// Create first tape with empty barcode — should succeed
+	body1 := `{"label":"TAPE-001","pool_id":1,"capacity_bytes":12000000000000,"format_type":"raw"}`
+	req1 := httptest.NewRequest("POST", "/api/v1/tapes", strings.NewReader(body1))
+	rr1 := httptest.NewRecorder()
+	s.handleCreateTape(rr1, req1)
+
+	if rr1.Code != http.StatusCreated {
+		t.Fatalf("first tape creation failed: expected 201, got %d: %s", rr1.Code, rr1.Body.String())
+	}
+
+	// Create second tape with empty barcode — should also succeed (barcode stored as NULL)
+	body2 := `{"label":"TAPE-002","pool_id":1,"capacity_bytes":12000000000000,"format_type":"raw"}`
+	req2 := httptest.NewRequest("POST", "/api/v1/tapes", strings.NewReader(body2))
+	rr2 := httptest.NewRecorder()
+	s.handleCreateTape(rr2, req2)
+
+	if rr2.Code != http.StatusCreated {
+		t.Fatalf("second tape creation with empty barcode failed: expected 201, got %d: %s", rr2.Code, rr2.Body.String())
+	}
+
+	// Create third tape with an actual barcode — should succeed
+	body3 := `{"label":"TAPE-003","barcode":"ABC123","pool_id":1,"capacity_bytes":12000000000000,"format_type":"raw"}`
+	req3 := httptest.NewRequest("POST", "/api/v1/tapes", strings.NewReader(body3))
+	rr3 := httptest.NewRecorder()
+	s.handleCreateTape(rr3, req3)
+
+	if rr3.Code != http.StatusCreated {
+		t.Fatalf("third tape creation with barcode failed: expected 201, got %d: %s", rr3.Code, rr3.Body.String())
+	}
+
+	// Create fourth tape with duplicate barcode — should fail with 409
+	body4 := `{"label":"TAPE-004","barcode":"ABC123","pool_id":1,"capacity_bytes":12000000000000,"format_type":"raw"}`
+	req4 := httptest.NewRequest("POST", "/api/v1/tapes", strings.NewReader(body4))
+	rr4 := httptest.NewRecorder()
+	s.handleCreateTape(rr4, req4)
+
+	if rr4.Code != http.StatusConflict {
+		t.Fatalf("duplicate barcode should fail with 409, got %d: %s", rr4.Code, rr4.Body.String())
+	}
+
+	// Create fifth tape with duplicate label — should fail with 409
+	body5 := `{"label":"TAPE-001","pool_id":1,"capacity_bytes":12000000000000,"format_type":"raw"}`
+	req5 := httptest.NewRequest("POST", "/api/v1/tapes", strings.NewReader(body5))
+	rr5 := httptest.NewRecorder()
+	s.handleCreateTape(rr5, req5)
+
+	if rr5.Code != http.StatusConflict {
+		t.Fatalf("duplicate label should fail with 409, got %d: %s", rr5.Code, rr5.Body.String())
 	}
 }

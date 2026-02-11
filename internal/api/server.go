@@ -1218,6 +1218,7 @@ func (s *Server) handleCreateTape(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// If write_label is requested and a drive is specified, write to physical tape
+	physicallyLabeled := false
 	if req.WriteLabel && req.DriveID != nil {
 		var devicePath string
 		err := s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", *req.DriveID).Scan(&devicePath)
@@ -1228,63 +1229,86 @@ func (s *Server) handleCreateTape(w http.ResponseWriter, r *http.Request) {
 
 		ctx := r.Context()
 		driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+		canWrite := true
 
 		// Verify tape is loaded
 		loaded, err := driveSvc.IsTapeLoaded(ctx)
 		if err != nil || !loaded {
-			s.respondError(w, http.StatusConflict, "no tape loaded in drive - please insert a tape first")
-			return
+			canWrite = false
+			s.logger.Warn("No tape loaded in drive, creating tape record without physical label", map[string]interface{}{
+				"label":    req.Label,
+				"drive_id": *req.DriveID,
+			})
 		}
 
 		// Check write protection
-		status, err := driveSvc.GetStatus(ctx)
-		if err == nil && status.WriteProtect {
-			s.respondError(w, http.StatusConflict, "tape is write-protected")
-			return
+		if canWrite {
+			status, err := driveSvc.GetStatus(ctx)
+			if err == nil && status.WriteProtect {
+				canWrite = false
+				s.logger.Warn("Tape is write-protected, creating tape record without physical label", map[string]interface{}{
+					"label":    req.Label,
+					"drive_id": *req.DriveID,
+				})
+			}
 		}
 
 		// Check if tape already has data/label before writing
-		if existingLabel, err := driveSvc.ReadTapeLabel(ctx); err == nil && existingLabel != nil && existingLabel.Label != "" {
-			s.respondError(w, http.StatusConflict, fmt.Sprintf("tape already has a label: '%s' (UUID: %s). Format the tape first to re-label it.", existingLabel.Label, existingLabel.UUID))
-			return
-		}
-
-		// Write label to physical tape — use LTFS format if requested
-		if req.FormatType == string(models.TapeFormatLTFS) {
-			mountPoint := s.config.Tape.LTFSMountPoint
-			if mountPoint == "" {
-				mountPoint = tape.LTFSDefaultMountPoint
-			}
-			ltfsSvc := tape.NewLTFSService(devicePath, mountPoint)
-			if err := ltfsSvc.FormatAndLabel(ctx, req.Label, tapeUUID, poolName); err != nil {
-				s.logger.Warn("Failed to format tape as LTFS, continuing with software tracking", map[string]interface{}{
-					"error": err.Error(),
-					"label": req.Label,
-				})
-			}
-		} else {
-			if err := driveSvc.WriteTapeLabel(ctx, req.Label, tapeUUID, poolName); err != nil {
-				s.logger.Warn("Failed to write label to physical tape, continuing with software tracking", map[string]interface{}{
-					"error": err.Error(),
-					"label": req.Label,
-				})
+		if canWrite {
+			if existingLabel, err := driveSvc.ReadTapeLabel(ctx); err == nil && existingLabel != nil && existingLabel.Label != "" {
+				s.respondError(w, http.StatusConflict, fmt.Sprintf("tape already has a label: '%s' (UUID: %s). Format the tape first to re-label it.", existingLabel.Label, existingLabel.UUID))
+				return
 			}
 		}
 
-		// Auto-eject after labeling if requested
-		if req.AutoEject {
-			if err := driveSvc.Eject(ctx); err != nil {
-				s.logger.Warn("Failed to auto-eject tape after labeling", map[string]interface{}{
-					"error": err.Error(),
-				})
+		if canWrite {
+			// Write label to physical tape — use LTFS format if requested
+			if req.FormatType == string(models.TapeFormatLTFS) {
+				mountPoint := s.config.Tape.LTFSMountPoint
+				if mountPoint == "" {
+					mountPoint = tape.LTFSDefaultMountPoint
+				}
+				ltfsSvc := tape.NewLTFSService(devicePath, mountPoint)
+				if err := ltfsSvc.FormatAndLabel(ctx, req.Label, tapeUUID, poolName); err != nil {
+					s.logger.Warn("Failed to format tape as LTFS, continuing with software tracking", map[string]interface{}{
+						"error": err.Error(),
+						"label": req.Label,
+					})
+				} else {
+					physicallyLabeled = true
+				}
+			} else {
+				if err := driveSvc.WriteTapeLabel(ctx, req.Label, tapeUUID, poolName); err != nil {
+					s.logger.Warn("Failed to write label to physical tape, continuing with software tracking", map[string]interface{}{
+						"error": err.Error(),
+						"label": req.Label,
+					})
+				} else {
+					physicallyLabeled = true
+				}
+			}
+
+			// Auto-eject after labeling if requested
+			if req.AutoEject {
+				if err := driveSvc.Eject(ctx); err != nil {
+					s.logger.Warn("Failed to auto-eject tape after labeling", map[string]interface{}{
+						"error": err.Error(),
+					})
+				}
 			}
 		}
+	}
+
+	// Store NULL instead of empty string for barcode to avoid UNIQUE constraint violations
+	var barcodeParam interface{}
+	if req.Barcode != "" {
+		barcodeParam = req.Barcode
 	}
 
 	result, err := s.db.Exec(`
 		INSERT INTO tapes (uuid, barcode, label, pool_id, lto_type, status, capacity_bytes, format_type, labeled_at)
 		VALUES (?, ?, ?, ?, ?, 'blank', ?, ?, CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END)
-	`, tapeUUID, req.Barcode, req.Label, req.PoolID, req.LTOType, req.CapacityBytes, req.FormatType, req.WriteLabel)
+	`, tapeUUID, barcodeParam, req.Label, req.PoolID, req.LTOType, req.CapacityBytes, req.FormatType, physicallyLabeled)
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
 		return
