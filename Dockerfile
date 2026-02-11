@@ -59,6 +59,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxml2-dev \
     uuid-dev \
     libsgutils2-dev \
+    libsnmp-dev \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -88,6 +89,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libicu72 \
     libxml2 \
     libsgutils2-2 \
+    libsnmp40 \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 

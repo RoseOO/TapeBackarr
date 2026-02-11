@@ -65,7 +65,7 @@ step "Building LTFS from source (this may take a few minutes)..."
 if command -v mkltfs &> /dev/null && command -v ltfs &> /dev/null; then
     substep "LTFS tools already installed, skipping build"
 else
-    apt-get install -y -qq git automake autoconf libtool pkg-config libfuse-dev libicu-dev libxml2-dev uuid-dev libsgutils2-dev 2>/dev/null || {
+    apt-get install -y -qq git automake autoconf libtool pkg-config libfuse-dev libicu-dev libxml2-dev uuid-dev libsgutils2-dev libsnmp-dev 2>/dev/null || {
         substep "Could not install LTFS build dependencies"
         substep "LTFS (mkltfs, ltfs, ltfsck) will need to be built manually from https://github.com/LinearTapeFileSystem/ltfs"
     }
