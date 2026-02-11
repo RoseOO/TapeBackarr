@@ -299,9 +299,26 @@ install_tapebackarr() {
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
         apt-get upgrade -y -qq
-        apt-get install -y -qq wget curl git mt-st mtx tar mbuffer sg3-utils lsscsi pigz fuse libfuse2 ltfs
+        apt-get install -y -qq wget curl git mt-st mtx tar mbuffer sg3-utils lsscsi pigz fuse libfuse2 \
+            automake autoconf libtool pkg-config libfuse-dev libicu-dev libxml2-dev uuid-dev libsgutils2-dev
     "
     msg_ok "Dependencies installed"
+    
+    # Build and install LTFS from source (not available via apt)
+    msg_info "Building LTFS from source..."
+    pct exec "$ct_id" -- bash -c "
+        cd /tmp
+        git clone https://github.com/LinearTapeFileSystem/ltfs.git
+        cd ltfs
+        ./autogen.sh
+        ./configure
+        make -j\$(nproc)
+        make install
+        ldconfig
+        cd /tmp
+        rm -rf ltfs
+    "
+    msg_ok "LTFS installed from source"
     
     # Install Go
     msg_info "Installing Go..."

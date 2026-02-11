@@ -32,6 +32,7 @@ sudo ./deploy/install.sh
 
 The installer will:
 - Install system dependencies (mt-st, tar, mbuffer, mtx, pigz)
+- Build and install LTFS from source (mkltfs, ltfs, ltfsck)
 - Create directories and set permissions
 - Install the binary to `/opt/tapebackarr`
 - Generate a secure JWT secret
@@ -52,10 +53,30 @@ The installer will:
 
 ```bash
 sudo apt update
-sudo apt install -y mt-st tar mbuffer sg3-utils lsscsi mtx pigz
+sudo apt install -y mt-st tar mbuffer sg3-utils lsscsi mtx pigz fuse libfuse2
 ```
 
-### Step 2: Build from Source
+### Step 2: Build and Install LTFS from Source
+
+LTFS (Linear Tape File System) is not available via apt and must be built from source. This provides the `mkltfs`, `ltfs`, and `ltfsck` commands used for LTFS tape formatting and mounting.
+
+```bash
+# Install LTFS build dependencies
+sudo apt install -y git automake autoconf libtool pkg-config libfuse-dev libicu-dev libxml2-dev uuid-dev libsgutils2-dev
+
+# Clone, build, and install LTFS
+cd /tmp
+git clone https://github.com/LinearTapeFileSystem/ltfs.git
+cd ltfs
+./autogen.sh
+./configure
+make -j$(nproc)
+sudo make install
+sudo ldconfig
+cd /tmp && rm -rf ltfs
+```
+
+### Step 3: Build from Source
 
 ```bash
 # Clone
@@ -72,7 +93,7 @@ npm run build
 cd ../..
 ```
 
-### Step 3: Create Directories
+### Step 4: Create Directories
 
 ```bash
 sudo mkdir -p /opt/tapebackarr
@@ -81,7 +102,7 @@ sudo mkdir -p /var/lib/tapebackarr
 sudo mkdir -p /var/log/tapebackarr
 ```
 
-### Step 4: Install Files
+### Step 5: Install Files
 
 ```bash
 # Copy binary
@@ -98,7 +119,7 @@ sudo chmod 600 /etc/tapebackarr/config.json
 sudo cp deploy/tapebackarr.service /etc/systemd/system/
 ```
 
-### Step 5: Configure
+### Step 6: Configure
 
 Edit `/etc/tapebackarr/config.json`:
 
@@ -111,7 +132,7 @@ sudo nano /etc/tapebackarr/config.json
 - Configure your tape drive(s) in the `tape.drives` section
 - Update paths as needed
 
-### Step 6: Start the Service
+### Step 7: Start the Service
 
 ```bash
 sudo systemctl daemon-reload
@@ -119,7 +140,7 @@ sudo systemctl enable tapebackarr
 sudo systemctl start tapebackarr
 ```
 
-### Step 7: Verify
+### Step 8: Verify
 
 ```bash
 sudo systemctl status tapebackarr
@@ -309,8 +330,9 @@ If you prefer manual setup:
    pct enter 200
    
    # Inside container:
-   apt update && apt install -y wget curl git mt-st tar mbuffer lsscsi pigz
-   # ... follow manual installation steps
+   apt update && apt install -y wget curl git mt-st tar mbuffer lsscsi pigz fuse libfuse2
+   # Build LTFS from source (see Step 2 in Manual Installation above)
+   # ... follow remaining manual installation steps
    ```
 
 ### Tape Device Passthrough
