@@ -85,6 +85,130 @@ func LTOTypeFromDensity(densityCode string) (string, bool) {
 	return ltoType, ok
 }
 
+// ltoGeneration extracts the numeric generation from an LTO type string.
+// For example "LTO-5" returns 5. Returns 0 if the string is not a valid LTO type.
+func ltoGeneration(ltoType string) int {
+	ltoType = strings.TrimSpace(ltoType)
+	if !strings.HasPrefix(ltoType, "LTO-") {
+		return 0
+	}
+	n := 0
+	for _, c := range ltoType[4:] {
+		if c >= '0' && c <= '9' {
+			n = n*10 + int(c-'0')
+		} else {
+			return 0
+		}
+	}
+	return n
+}
+
+// LTFSMinLTOGeneration is the minimum LTO generation that supports LTFS.
+// LTO-5 introduced dual-partition capability which LTFS requires.
+const LTFSMinLTOGeneration = 5
+
+// CanUseLTFS reports whether the given LTO type supports the LTFS format.
+// LTFS requires LTO-5 or later due to the dual-partition feature.
+func CanUseLTFS(ltoType string) bool {
+	gen := ltoGeneration(ltoType)
+	return gen >= LTFSMinLTOGeneration
+}
+
+// LTFSBackend describes which LTFS tape backend driver a vendor's drives use.
+type LTFSBackend string
+
+const (
+	// LTFSBackendSG is the Linux SCSI Generic (sg) backend, used by most non-IBM drives.
+	LTFSBackendSG LTFSBackend = "sg"
+	// LTFSBackendLinTape is IBM's proprietary lin_tape driver for IBM drives.
+	LTFSBackendLinTape LTFSBackend = "lin_tape"
+)
+
+// LTFSVendorInfo describes LTFS compatibility for a tape drive vendor.
+type LTFSVendorInfo struct {
+	Vendor    string      `json:"vendor"`
+	Backend   LTFSBackend `json:"backend"`
+	Supported bool        `json:"supported"`
+	Notes     string      `json:"notes,omitempty"`
+}
+
+// ltfsVendorTable maps normalised vendor name prefixes to their LTFS info.
+// Vendor strings from sg_inq / sysfs are typically uppercase and padded.
+var ltfsVendorTable = []struct {
+	prefix string
+	info   LTFSVendorInfo
+}{
+	{"IBM", LTFSVendorInfo{Vendor: "IBM", Backend: LTFSBackendLinTape, Supported: true, Notes: "IBM drives can use either lin_tape or sg backend"}},
+	{"HP", LTFSVendorInfo{Vendor: "HP/HPE", Backend: LTFSBackendSG, Supported: true, Notes: ""}},
+	{"HPE", LTFSVendorInfo{Vendor: "HP/HPE", Backend: LTFSBackendSG, Supported: true, Notes: ""}},
+	{"TANDBERG", LTFSVendorInfo{Vendor: "Tandberg/Overland-Tandberg", Backend: LTFSBackendSG, Supported: true, Notes: "Tandberg LTO drives use the sg backend; fully supported including LTO-5 HH models"}},
+	{"OVERLAND", LTFSVendorInfo{Vendor: "Overland-Tandberg", Backend: LTFSBackendSG, Supported: true, Notes: "Overland-Tandberg drives use the sg backend; fully supported including LTO-5 HH models"}},
+	{"QUANTUM", LTFSVendorInfo{Vendor: "Quantum", Backend: LTFSBackendSG, Supported: true, Notes: ""}},
+}
+
+// LTFSVendorLookup returns LTFS compatibility information for a tape drive vendor.
+// The vendor string is matched case-insensitively against known prefixes.
+// If the vendor is not specifically recognised, a generic entry for the sg
+// backend is returned with Supported still set to true (most LTO drives work).
+func LTFSVendorLookup(vendor string) LTFSVendorInfo {
+	v := strings.ToUpper(strings.TrimSpace(vendor))
+	for _, entry := range ltfsVendorTable {
+		if strings.HasPrefix(v, entry.prefix) {
+			return entry.info
+		}
+	}
+	return LTFSVendorInfo{
+		Vendor:    vendor,
+		Backend:   LTFSBackendSG,
+		Supported: true,
+		Notes:     "Unknown vendor; the sg backend should work with most LTO drives",
+	}
+}
+
+// LTFSDriveCompat summarises LTFS compatibility for a specific drive.
+type LTFSDriveCompat struct {
+	Compatible bool        `json:"compatible"`
+	LTOType    string      `json:"lto_type,omitempty"`
+	Backend    LTFSBackend `json:"backend"`
+	Vendor     string      `json:"vendor,omitempty"`
+	Reason     string      `json:"reason,omitempty"`
+}
+
+// CheckLTFSCompat checks whether a drive identified by its vendor string and
+// detected LTO type is compatible with LTFS.
+func CheckLTFSCompat(vendor string, ltoType string) LTFSDriveCompat {
+	vi := LTFSVendorLookup(vendor)
+	compat := LTFSDriveCompat{
+		LTOType: ltoType,
+		Backend: vi.Backend,
+		Vendor:  vi.Vendor,
+	}
+
+	if ltoType == "" {
+		compat.Compatible = false
+		compat.Reason = "LTO type not detected; insert a tape to identify the drive generation"
+		return compat
+	}
+
+	if !CanUseLTFS(ltoType) {
+		compat.Compatible = false
+		compat.Reason = ltoType + " does not support LTFS; LTO-5 or later is required"
+		return compat
+	}
+
+	if !vi.Supported {
+		compat.Compatible = false
+		compat.Reason = "Vendor " + vendor + " is not known to support LTFS"
+		return compat
+	}
+
+	compat.Compatible = true
+	if vi.Notes != "" {
+		compat.Reason = vi.Notes
+	}
+	return compat
+}
+
 // UnknownTapeInfo represents a tape loaded in a drive that is not in the database
 type UnknownTapeInfo struct {
 	Label     string `json:"label"`

@@ -26,6 +26,14 @@
     created_at: string;
   }
 
+  interface DriveCompat {
+    compatible: boolean;
+    lto_type?: string;
+    backend: string;
+    vendor?: string;
+    reason?: string;
+  }
+
   interface LTFSStatus {
     available: boolean;
     enabled: boolean;
@@ -34,6 +42,7 @@
     message?: string;
     volume_info?: any;
     label?: LTFSLabel;
+    drive_compat?: DriveCompat;
   }
 
   let drives: Drive[] = [];
@@ -446,6 +455,44 @@
         <div style="margin-top: 1rem; padding: 1rem; background: var(--badge-warning-bg); color: var(--badge-warning-text); border-radius: 8px;">
           <strong>⚠️ LTFS Not Installed</strong>
           <p style="margin: 0.5rem 0 0;">Install LTFS tools (<code>mkltfs</code> and <code>ltfs</code>) to use LTFS features. See <a href="https://github.com/LinearTapeFileSystem/ltfs" target="_blank">github.com/LinearTapeFileSystem/ltfs</a> for installation instructions.</p>
+        </div>
+      {/if}
+
+      {#if ltfsStatus.drive_compat}
+        <h3 style="margin-top: 1.5rem;">Drive Compatibility</h3>
+        <div class="label-grid">
+          <div class="label-item">
+            <span class="label-key">LTFS Compatible</span>
+            <span class="label-value">
+              {#if ltfsStatus.drive_compat.compatible}
+                <span class="badge badge-success">✅ Compatible</span>
+              {:else}
+                <span class="badge badge-danger">❌ Not Compatible</span>
+              {/if}
+            </span>
+          </div>
+          {#if ltfsStatus.drive_compat.vendor}
+            <div class="label-item">
+              <span class="label-key">Vendor</span>
+              <span class="label-value">{ltfsStatus.drive_compat.vendor}</span>
+            </div>
+          {/if}
+          {#if ltfsStatus.drive_compat.lto_type}
+            <div class="label-item">
+              <span class="label-key">LTO Type</span>
+              <span class="label-value">{ltfsStatus.drive_compat.lto_type}</span>
+            </div>
+          {/if}
+          <div class="label-item">
+            <span class="label-key">Backend Driver</span>
+            <span class="label-value"><code>{ltfsStatus.drive_compat.backend}</code></span>
+          </div>
+          {#if ltfsStatus.drive_compat.reason}
+            <div class="label-item" style="grid-column: 1 / -1;">
+              <span class="label-key">Notes</span>
+              <span class="label-value">{ltfsStatus.drive_compat.reason}</span>
+            </div>
+          {/if}
         </div>
       {/if}
     {/if}

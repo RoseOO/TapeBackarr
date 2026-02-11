@@ -7765,7 +7765,7 @@ func (s *Server) handleLibraryTransfer(w http.ResponseWriter, r *http.Request) {
 // ─── LTFS Handlers ──────────────────────────────────────────────────────────
 
 // handleLTFSStatus returns the current LTFS status including availability,
-// mount state, and volume info.
+// mount state, volume info, and drive compatibility.
 func (s *Server) handleLTFSStatus(w http.ResponseWriter, r *http.Request) {
 	driveIDStr := r.URL.Query().Get("drive_id")
 
@@ -7782,14 +7782,19 @@ func (s *Server) handleLTFSStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get device path from drive_id or default
+	// Get device path (and optionally vendor) from drive_id or default
 	devicePath := s.config.Tape.DefaultDevice
+	var dbVendor string
 	if driveIDStr != "" {
 		driveID, err := strconv.ParseInt(driveIDStr, 10, 64)
 		if err == nil {
 			var drivePath string
-			if dbErr := s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", driveID).Scan(&drivePath); dbErr == nil {
+			var v *string
+			if dbErr := s.db.QueryRow("SELECT device_path, vendor FROM tape_drives WHERE id = ? AND enabled = 1", driveID).Scan(&drivePath, &v); dbErr == nil {
 				devicePath = drivePath
+				if v != nil {
+					dbVendor = *v
+				}
 			}
 		}
 	}
@@ -7811,6 +7816,26 @@ func (s *Server) handleLTFSStatus(w http.ResponseWriter, r *http.Request) {
 		if err == nil && label != nil {
 			result["label"] = label
 		}
+	}
+
+	// Add drive LTFS compatibility info
+	if devicePath != "" {
+		vendor := dbVendor
+		ltoType := ""
+
+		tapeSvc := tape.NewServiceForDevice(devicePath, 65536)
+		if vendor == "" {
+			if driveInfo, err := tapeSvc.GetDriveInfo(r.Context()); err == nil {
+				if v, ok := driveInfo["Vendor identification"]; ok {
+					vendor = v
+				}
+			}
+		}
+		if detectedType, err := tapeSvc.DetectTapeType(r.Context()); err == nil {
+			ltoType = detectedType
+		}
+
+		result["drive_compat"] = models.CheckLTFSCompat(vendor, ltoType)
 	}
 
 	s.respondJSON(w, http.StatusOK, result)

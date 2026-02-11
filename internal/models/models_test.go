@@ -77,3 +77,85 @@ func TestTapeFormatTypeDistinct(t *testing.T) {
 		t.Error("TapeFormatRaw and TapeFormatLTFS should be distinct values")
 	}
 }
+
+func TestCanUseLTFS(t *testing.T) {
+	tests := []struct {
+		name    string
+		ltoType string
+		want    bool
+	}{
+		{"LTO-1 not supported", "LTO-1", false},
+		{"LTO-2 not supported", "LTO-2", false},
+		{"LTO-3 not supported", "LTO-3", false},
+		{"LTO-4 not supported", "LTO-4", false},
+		{"LTO-5 supported", "LTO-5", true},
+		{"LTO-6 supported", "LTO-6", true},
+		{"LTO-7 supported", "LTO-7", true},
+		{"LTO-8 supported", "LTO-8", true},
+		{"LTO-9 supported", "LTO-9", true},
+		{"LTO-10 supported", "LTO-10", true},
+		{"empty string", "", false},
+		{"invalid string", "DAT-72", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CanUseLTFS(tt.ltoType); got != tt.want {
+				t.Errorf("CanUseLTFS(%q) = %v, want %v", tt.ltoType, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLTFSVendorLookup(t *testing.T) {
+	tests := []struct {
+		name        string
+		vendor      string
+		wantBackend LTFSBackend
+		wantSupport bool
+	}{
+		{"IBM drives", "IBM", LTFSBackendLinTape, true},
+		{"HP drives", "HP", LTFSBackendSG, true},
+		{"HPE drives", "HPE", LTFSBackendSG, true},
+		{"Tandberg drives", "TANDBERG", LTFSBackendSG, true},
+		{"Tandberg lowercase", "tandberg", LTFSBackendSG, true},
+		{"Overland drives", "OVERLAND", LTFSBackendSG, true},
+		{"Quantum drives", "QUANTUM", LTFSBackendSG, true},
+		{"Unknown vendor", "ACME", LTFSBackendSG, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := LTFSVendorLookup(tt.vendor)
+			if info.Backend != tt.wantBackend {
+				t.Errorf("LTFSVendorLookup(%q).Backend = %q, want %q", tt.vendor, info.Backend, tt.wantBackend)
+			}
+			if info.Supported != tt.wantSupport {
+				t.Errorf("LTFSVendorLookup(%q).Supported = %v, want %v", tt.vendor, info.Supported, tt.wantSupport)
+			}
+		})
+	}
+}
+
+func TestCheckLTFSCompat(t *testing.T) {
+	tests := []struct {
+		name       string
+		vendor     string
+		ltoType    string
+		wantCompat bool
+	}{
+		{"Tandberg LTO-5", "TANDBERG", "LTO-5", true},
+		{"Overland LTO-5", "OVERLAND", "LTO-5", true},
+		{"IBM LTO-7", "IBM", "LTO-7", true},
+		{"HP LTO-6", "HP", "LTO-6", true},
+		{"LTO-4 not compatible", "HP", "LTO-4", false},
+		{"no tape loaded", "HP", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := CheckLTFSCompat(tt.vendor, tt.ltoType)
+			if result.Compatible != tt.wantCompat {
+				t.Errorf("CheckLTFSCompat(%q, %q).Compatible = %v, want %v (reason: %s)",
+					tt.vendor, tt.ltoType, result.Compatible, tt.wantCompat, result.Reason)
+			}
+		})
+	}
+}
