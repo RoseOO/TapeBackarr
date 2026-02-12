@@ -697,6 +697,10 @@ export async function formatLTFS(driveId: number, label: string, uuid: string, p
   });
 }
 
+export async function getLTFSFormatStatus() {
+  return fetchApi('/ltfs/format/status');
+}
+
 export async function mountLTFS(driveId: number) {
   return fetchApi('/ltfs/mount', {
     method: 'POST',

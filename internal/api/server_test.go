@@ -1486,3 +1486,183 @@ func TestCreateTapeEmptyBarcode(t *testing.T) {
 		t.Fatalf("duplicate label should fail with 409, got %d: %s", rr5.Code, rr5.Body.String())
 	}
 }
+
+func TestLTFSFormatStatusEndpoint(t *testing.T) {
+s := &Server{
+router:   chi.NewRouter(),
+eventBus: NewEventBus(),
+}
+
+// Initially, no format is running
+req := httptest.NewRequest("GET", "/api/v1/ltfs/format/status", nil)
+rr := httptest.NewRecorder()
+s.handleLTFSFormatStatus(rr, req)
+
+if rr.Code != http.StatusOK {
+t.Fatalf("expected 200, got %d", rr.Code)
+}
+
+var status map[string]interface{}
+if err := json.Unmarshal(rr.Body.Bytes(), &status); err != nil {
+t.Fatalf("failed to parse response: %v", err)
+}
+
+if status["running"] != false {
+t.Errorf("expected running=false, got %v", status["running"])
+}
+if status["phase"] != "" {
+t.Errorf("expected empty phase, got %v", status["phase"])
+}
+
+// Simulate a running format
+s.ltfsFormat.mu.Lock()
+s.ltfsFormat.running = true
+s.ltfsFormat.phase = "formatting"
+s.ltfsFormat.message = "Formatting tape with LTFS..."
+s.ltfsFormat.driveID = 1
+s.ltfsFormat.label = "BKP001"
+s.ltfsFormat.started = time.Now()
+s.ltfsFormat.mu.Unlock()
+
+req2 := httptest.NewRequest("GET", "/api/v1/ltfs/format/status", nil)
+rr2 := httptest.NewRecorder()
+s.handleLTFSFormatStatus(rr2, req2)
+
+if rr2.Code != http.StatusOK {
+t.Fatalf("expected 200, got %d", rr2.Code)
+}
+
+var status2 map[string]interface{}
+if err := json.Unmarshal(rr2.Body.Bytes(), &status2); err != nil {
+t.Fatalf("failed to parse response: %v", err)
+}
+
+if status2["running"] != true {
+t.Errorf("expected running=true, got %v", status2["running"])
+}
+if status2["phase"] != "formatting" {
+t.Errorf("expected phase=formatting, got %v", status2["phase"])
+}
+if status2["label"] != "BKP001" {
+t.Errorf("expected label=BKP001, got %v", status2["label"])
+}
+if status2["message"] != "Formatting tape with LTFS..." {
+t.Errorf("expected message='Formatting tape with LTFS...', got %v", status2["message"])
+}
+if _, ok := status2["started"]; !ok {
+t.Error("expected started field to be present")
+}
+if _, ok := status2["elapsed_seconds"]; !ok {
+t.Error("expected elapsed_seconds field to be present")
+}
+
+// Simulate format completion
+s.ltfsFormat.mu.Lock()
+s.ltfsFormat.running = false
+s.ltfsFormat.phase = "complete"
+s.ltfsFormat.message = "Tape formatted with LTFS successfully"
+s.ltfsFormat.mu.Unlock()
+
+req3 := httptest.NewRequest("GET", "/api/v1/ltfs/format/status", nil)
+rr3 := httptest.NewRecorder()
+s.handleLTFSFormatStatus(rr3, req3)
+
+var status3 map[string]interface{}
+if err := json.Unmarshal(rr3.Body.Bytes(), &status3); err != nil {
+t.Fatalf("failed to parse response: %v", err)
+}
+
+if status3["running"] != false {
+t.Errorf("expected running=false after completion, got %v", status3["running"])
+}
+if status3["phase"] != "complete" {
+t.Errorf("expected phase=complete, got %v", status3["phase"])
+}
+
+// Simulate format failure
+s.ltfsFormat.mu.Lock()
+s.ltfsFormat.running = false
+s.ltfsFormat.phase = "failed"
+s.ltfsFormat.message = "LTFS format failed: mkltfs error"
+s.ltfsFormat.err = "LTFS format failed: mkltfs error"
+s.ltfsFormat.mu.Unlock()
+
+req4 := httptest.NewRequest("GET", "/api/v1/ltfs/format/status", nil)
+rr4 := httptest.NewRecorder()
+s.handleLTFSFormatStatus(rr4, req4)
+
+var status4 map[string]interface{}
+if err := json.Unmarshal(rr4.Body.Bytes(), &status4); err != nil {
+t.Fatalf("failed to parse response: %v", err)
+}
+
+if status4["phase"] != "failed" {
+t.Errorf("expected phase=failed, got %v", status4["phase"])
+}
+if status4["error"] != "LTFS format failed: mkltfs error" {
+t.Errorf("expected error message, got %v", status4["error"])
+}
+}
+
+func TestLTFSFormatStatusPhaseTransitions(t *testing.T) {
+s := &Server{
+eventBus: NewEventBus(),
+}
+
+phases := []string{"formatting", "verifying", "mounting", "labeling", "unmounting", "complete"}
+
+for _, phase := range phases {
+s.ltfsFormat.mu.Lock()
+s.ltfsFormat.phase = phase
+s.ltfsFormat.mu.Unlock()
+
+req := httptest.NewRequest("GET", "/api/v1/ltfs/format/status", nil)
+rr := httptest.NewRecorder()
+s.handleLTFSFormatStatus(rr, req)
+
+if rr.Code != http.StatusOK {
+t.Fatalf("phase %s: expected 200, got %d", phase, rr.Code)
+}
+
+var status map[string]interface{}
+if err := json.Unmarshal(rr.Body.Bytes(), &status); err != nil {
+t.Fatalf("phase %s: failed to parse response: %v", phase, err)
+}
+
+if status["phase"] != phase {
+t.Errorf("phase %s: expected phase=%s, got %v", phase, phase, status["phase"])
+}
+}
+}
+
+func TestLTFSFormatRejectsWhenAlreadyRunning(t *testing.T) {
+s := &Server{
+router:   chi.NewRouter(),
+eventBus: NewEventBus(),
+}
+
+// Simulate a running format
+s.ltfsFormat.mu.Lock()
+s.ltfsFormat.running = true
+s.ltfsFormat.phase = "formatting"
+s.ltfsFormat.mu.Unlock()
+
+body := `{"drive_id":1,"label":"TEST01","uuid":"abc-123","pool":"default","confirm":true}`
+req := httptest.NewRequest("POST", "/api/v1/ltfs/format", strings.NewReader(body))
+rr := httptest.NewRecorder()
+s.handleLTFSFormat(rr, req)
+
+if rr.Code != http.StatusConflict {
+t.Fatalf("expected 409 Conflict when format already running, got %d: %s", rr.Code, rr.Body.String())
+}
+
+var resp map[string]interface{}
+if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+t.Fatalf("failed to parse response: %v", err)
+}
+
+errMsg, ok := resp["error"].(string)
+if !ok || !strings.Contains(errMsg, "already in progress") {
+t.Errorf("expected error about already in progress, got: %v", resp["error"])
+}
+}
