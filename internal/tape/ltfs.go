@@ -18,6 +18,13 @@ import (
 // LTFSDefaultMountPoint is the default directory where LTFS tapes are mounted.
 const LTFSDefaultMountPoint = "/mnt/ltfs"
 
+// driveStabilizationDelay is the delay after a tape rewind completes to allow
+// the drive's internal mechanics to fully settle before performing read/write
+// operations. This prevents I/O errors that can occur if operations are attempted
+// while the drive is still stabilizing (e.g., head positioning, tension adjustment).
+// The 1-second delay is conservative and works across various LTO drive models.
+const driveStabilizationDelay = 1 * time.Second
+
 // LTFSMetadataFile is the filename written to the root of LTFS volumes for
 // TapeBackarr identification. Defined as a constant for consistency across
 // the codebase.
@@ -170,8 +177,8 @@ func (l *LTFSService) waitForRewindComplete(ctx context.Context) error {
 
 		if atBOT && !isRewinding {
 			// Tape has reached BOT and is no longer rewinding.
-			// Add a small delay to let the drive fully stabilize before returning.
-			time.Sleep(1 * time.Second)
+			// Add a delay to let the drive fully stabilize before returning.
+			time.Sleep(driveStabilizationDelay)
 			return nil
 		}
 
