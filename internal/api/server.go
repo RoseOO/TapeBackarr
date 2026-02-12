@@ -75,7 +75,21 @@ type Server struct {
 	eventBus              *EventBus
 	telegramService       *notifications.TelegramService
 	batchLabel            batchLabelState
+	ltfsFormat            ltfsFormatState
 	notifiedUnknownTapes  sync.Map // Track unknown tapes that have been notified (key: tape UUID)
+}
+
+// ltfsFormatState tracks a running LTFS format operation.
+type ltfsFormatState struct {
+	mu      sync.Mutex
+	running bool
+	cancel  context.CancelFunc
+	phase   string // "formatting", "verifying", "mounting", "labeling", "unmounting", "complete", "failed"
+	message string
+	driveID int64
+	label   string
+	err     string
+	started time.Time
 }
 
 // NewServer creates a new API server
@@ -300,6 +314,7 @@ func (s *Server) setupRoutes() {
 		r.Route("/api/v1/ltfs", func(r chi.Router) {
 			r.Get("/status", s.handleLTFSStatus)
 			r.Post("/format", s.handleLTFSFormat)
+			r.Get("/format/status", s.handleLTFSFormatStatus)
 			r.Post("/mount", s.handleLTFSMount)
 			r.Post("/unmount", s.handleLTFSUnmount)
 			r.Get("/browse", s.handleLTFSBrowse)
@@ -484,6 +499,19 @@ func (s *Server) auditLog(r *http.Request, action, resourceType string, resource
 	ipAddress := r.RemoteAddr
 	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
 		ipAddress = fwd
+	}
+	s.db.Exec(`
+		INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details, ip_address)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, userID, action, resourceType, resourceID, details, ipAddress)
+}
+
+// auditLogDirect records an audit log entry without an http.Request, used by
+// background goroutines that outlive the original request.
+func (s *Server) auditLogDirect(claims *auth.Claims, ipAddress, action, resourceType string, resourceID int64, details string) {
+	var userID int64
+	if claims != nil {
+		userID = claims.UserID
 	}
 	s.db.Exec(`
 		INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details, ip_address)
@@ -8190,7 +8218,11 @@ func (s *Server) handleLTFSStatus(w http.ResponseWriter, r *http.Request) {
 	s.respondJSON(w, http.StatusOK, result)
 }
 
-// handleLTFSFormat formats a tape with LTFS filesystem.
+// handleLTFSFormat starts an asynchronous LTFS format operation.
+// Formatting a tape with LTFS can take 40 minutes to two hours, so the
+// operation runs in a background goroutine and returns immediately. Progress
+// is published via the EventBus (SSE) and can be polled with
+// GET /api/v1/ltfs/format/status.
 func (s *Server) handleLTFSFormat(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DriveID int64  `json:"drive_id"`
@@ -8209,6 +8241,14 @@ func (s *Server) handleLTFSFormat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.ltfsFormat.mu.Lock()
+	if s.ltfsFormat.running {
+		s.ltfsFormat.mu.Unlock()
+		s.respondError(w, http.StatusConflict, "an LTFS format operation is already in progress")
+		return
+	}
+	s.ltfsFormat.mu.Unlock()
+
 	if !tape.IsAvailable() {
 		s.respondError(w, http.StatusServiceUnavailable, "LTFS software not installed")
 		return
@@ -8220,34 +8260,167 @@ func (s *Server) handleLTFSFormat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.ltfsFormat.mu.Lock()
+	// Re-check running under lock to prevent race between the earlier check and now.
+	if s.ltfsFormat.running {
+		s.ltfsFormat.mu.Unlock()
+		s.respondError(w, http.StatusConflict, "an LTFS format operation is already in progress")
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.ltfsFormat.running = true
+	s.ltfsFormat.cancel = cancel
+	s.ltfsFormat.phase = "formatting"
+	s.ltfsFormat.message = "Starting LTFS format..."
+	s.ltfsFormat.driveID = req.DriveID
+	s.ltfsFormat.label = req.Label
+	s.ltfsFormat.err = ""
+	s.ltfsFormat.started = time.Now()
+	s.ltfsFormat.mu.Unlock()
+
 	mountPoint := s.config.Tape.LTFSMountPoint
 	if mountPoint == "" {
 		mountPoint = tape.LTFSDefaultMountPoint
 	}
 
-	ctx := r.Context()
-	ltfsSvc := tape.NewLTFSService(devicePath, mountPoint)
+	// Capture audit info before the request context goes away.
+	auditClaims, _ := r.Context().Value("claims").(*auth.Claims)
+	auditRemote := r.RemoteAddr
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		auditRemote = fwd
+	}
 
 	if s.eventBus != nil {
 		s.eventBus.Publish(SystemEvent{
 			Type:     "info",
 			Category: "ltfs",
 			Title:    "LTFS Format Started",
-			Message:  fmt.Sprintf("Formatting tape with LTFS on drive %s (label: %s)", devicePath, req.Label),
+			Message:  fmt.Sprintf("Formatting tape with LTFS on drive %s (label: %s) — this may take up to 2 hours", devicePath, req.Label),
+			Details:  map[string]interface{}{"drive_id": req.DriveID, "label": req.Label, "phase": "formatting"},
 		})
 	}
 
-	if req.Label != "" && req.UUID != "" {
-		if err := ltfsSvc.FormatAndLabel(ctx, req.Label, req.UUID, req.Pool); err != nil {
-			s.respondError(w, http.StatusInternalServerError, "LTFS format failed: "+err.Error())
+	go s.runLTFSFormat(ctx, devicePath, mountPoint, req.DriveID, req.Label, req.UUID, req.Pool, auditClaims, auditRemote)
+
+	s.respondJSON(w, http.StatusAccepted, map[string]string{
+		"message": "LTFS format started — this may take up to 2 hours",
+		"status":  "formatting",
+	})
+}
+
+// runLTFSFormat executes the long-running LTFS format in the background.
+func (s *Server) runLTFSFormat(ctx context.Context, devicePath, mountPoint string, driveID int64, label, uuid, pool string, auditClaims *auth.Claims, auditRemote string) {
+	defer func() {
+		s.ltfsFormat.mu.Lock()
+		s.ltfsFormat.running = false
+		s.ltfsFormat.cancel = nil
+		s.ltfsFormat.mu.Unlock()
+	}()
+
+	setPhase := func(phase, message string) {
+		s.ltfsFormat.mu.Lock()
+		s.ltfsFormat.phase = phase
+		s.ltfsFormat.message = message
+		s.ltfsFormat.mu.Unlock()
+
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "info",
+				Category: "ltfs",
+				Title:    "LTFS Format Progress",
+				Message:  message,
+				Details:  map[string]interface{}{"drive_id": driveID, "label": label, "phase": phase},
+			})
+		}
+	}
+
+	setError := func(errMsg string) {
+		s.ltfsFormat.mu.Lock()
+		s.ltfsFormat.phase = "failed"
+		s.ltfsFormat.message = errMsg
+		s.ltfsFormat.err = errMsg
+		s.ltfsFormat.mu.Unlock()
+
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "error",
+				Category: "ltfs",
+				Title:    "LTFS Format Failed",
+				Message:  errMsg,
+				Details:  map[string]interface{}{"drive_id": driveID, "label": label, "phase": "failed"},
+			})
+		}
+	}
+
+	ltfsSvc := tape.NewLTFSService(devicePath, mountPoint)
+
+	if label != "" && uuid != "" {
+		// Full format-and-label flow with per-phase progress updates.
+		setPhase("formatting", fmt.Sprintf("Formatting tape with LTFS on %s — this is the longest step and may take up to 2 hours...", devicePath))
+
+		if err := ltfsSvc.Format(ctx, label); err != nil {
+			setError("LTFS format failed: " + err.Error())
+			return
+		}
+
+		setPhase("verifying", "Running post-format consistency check (ltfsck)...")
+
+		if err := ltfsSvc.Check(ctx); err != nil {
+			setError("LTFS post-format verification failed: " + err.Error())
+			return
+		}
+
+		setPhase("mounting", "Mounting LTFS volume...")
+
+		if err := ltfsSvc.Mount(ctx); err != nil {
+			setError("LTFS mount after format failed: " + err.Error())
+			return
+		}
+
+		setPhase("labeling", "Writing TapeBackarr metadata to tape...")
+
+		metaObj := tape.LTFSLabel{
+			Magic:     "TAPEBACKARR_LTFS",
+			Version:   1,
+			Label:     label,
+			UUID:      uuid,
+			Pool:      pool,
+			Format:    "ltfs",
+			CreatedAt: time.Now().Format(time.RFC3339),
+		}
+		metadata, err := json.MarshalIndent(metaObj, "", "  ")
+		if err != nil {
+			ltfsSvc.Unmount(ctx)
+			setError("Failed to marshal LTFS metadata: " + err.Error())
+			return
+		}
+
+		metadataPath := filepath.Join(mountPoint, tape.LTFSMetadataFile)
+		if err := os.WriteFile(metadataPath, metadata, 0644); err != nil {
+			ltfsSvc.Unmount(ctx)
+			setError("Failed to write metadata to LTFS: " + err.Error())
+			return
+		}
+
+		setPhase("unmounting", "Unmounting LTFS volume and finalizing...")
+
+		if err := ltfsSvc.Unmount(ctx); err != nil {
+			setError("LTFS unmount after labeling failed: " + err.Error())
 			return
 		}
 	} else {
-		if err := ltfsSvc.Format(ctx, req.Label); err != nil {
-			s.respondError(w, http.StatusInternalServerError, "LTFS format failed: "+err.Error())
+		setPhase("formatting", fmt.Sprintf("Formatting tape with LTFS on %s — this may take up to 2 hours...", devicePath))
+		if err := ltfsSvc.Format(ctx, label); err != nil {
+			setError("LTFS format failed: " + err.Error())
 			return
 		}
 	}
+
+	s.ltfsFormat.mu.Lock()
+	s.ltfsFormat.phase = "complete"
+	s.ltfsFormat.message = "Tape formatted with LTFS successfully"
+	s.ltfsFormat.err = ""
+	s.ltfsFormat.mu.Unlock()
 
 	if s.eventBus != nil {
 		s.eventBus.Publish(SystemEvent{
@@ -8255,13 +8428,35 @@ func (s *Server) handleLTFSFormat(w http.ResponseWriter, r *http.Request) {
 			Category: "ltfs",
 			Title:    "LTFS Format Complete",
 			Message:  fmt.Sprintf("Tape formatted with LTFS on drive %s", devicePath),
+			Details:  map[string]interface{}{"drive_id": driveID, "label": label, "phase": "complete"},
 		})
 	}
 
-	s.auditLog(r, "ltfs_format", "tape_drive", req.DriveID, fmt.Sprintf("Formatted tape with LTFS (label: %s)", req.Label))
-	s.respondJSON(w, http.StatusOK, map[string]string{
-		"message": "Tape formatted with LTFS successfully",
-	})
+	// Audit log — build a minimal request-like context for the audit helper.
+	s.auditLogDirect(auditClaims, auditRemote, "ltfs_format", "tape_drive", driveID, fmt.Sprintf("Formatted tape with LTFS (label: %s)", label))
+}
+
+// handleLTFSFormatStatus returns the current state of a running (or recently
+// completed) LTFS format operation.
+func (s *Server) handleLTFSFormatStatus(w http.ResponseWriter, r *http.Request) {
+	s.ltfsFormat.mu.Lock()
+	status := map[string]interface{}{
+		"running":  s.ltfsFormat.running,
+		"phase":    s.ltfsFormat.phase,
+		"message":  s.ltfsFormat.message,
+		"drive_id": s.ltfsFormat.driveID,
+		"label":    s.ltfsFormat.label,
+	}
+	if !s.ltfsFormat.started.IsZero() {
+		status["started"] = s.ltfsFormat.started.Format(time.RFC3339)
+		status["elapsed_seconds"] = int(time.Since(s.ltfsFormat.started).Seconds())
+	}
+	if s.ltfsFormat.err != "" {
+		status["error"] = s.ltfsFormat.err
+	}
+	s.ltfsFormat.mu.Unlock()
+
+	s.respondJSON(w, http.StatusOK, status)
 }
 
 // handleLTFSMount mounts an LTFS tape.

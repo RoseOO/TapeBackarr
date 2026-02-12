@@ -59,6 +59,10 @@
   let formatUUID = '';
   let formatPool = '';
   let formatting = false;
+  let formatPhase = '';
+  let formatMessage = '';
+  let formatElapsed = 0;
+  let formatPollInterval: ReturnType<typeof setInterval> | null = null;
 
   // File browser state
   let browseEntries: BrowseEntry[] = [];
@@ -97,10 +101,26 @@
       loadingDrives = false;
     }
     await refreshStatus();
+
+    // Resume progress polling if a format is already running
+    try {
+      const fmtStatus = await api.getLTFSFormatStatus();
+      if (fmtStatus.running) {
+        formatting = true;
+        formatPhase = fmtStatus.phase || 'formatting';
+        formatMessage = fmtStatus.message || '';
+        formatElapsed = fmtStatus.elapsed_seconds || 0;
+        showFormatModal = true;
+        startFormatPolling();
+      }
+    } catch {
+      // Ignore — format status endpoint may not be reachable
+    }
   });
 
   onDestroy(() => {
     if (successTimeout) clearTimeout(successTimeout);
+    if (formatPollInterval) clearInterval(formatPollInterval);
   });
 
   async function refreshStatus() {
@@ -161,17 +181,74 @@
   async function handleFormat() {
     if (!selectedDriveId) { error = 'Select a drive first'; return; }
     formatting = true;
+    formatPhase = 'formatting';
+    formatMessage = 'Starting LTFS format...';
+    formatElapsed = 0;
     error = '';
     try {
       await api.formatLTFS(selectedDriveId, formatLabel, formatUUID, formatPool, true);
-      successMsg = 'Tape formatted with LTFS successfully';
-      clearSuccess();
-      showFormatModal = false;
-      await refreshStatus();
+      // Format has been started asynchronously — poll for progress
+      startFormatPolling();
     } catch (e) {
       error = e instanceof Error ? e.message : 'Format failed';
-    } finally {
       formatting = false;
+      formatPhase = '';
+      formatMessage = '';
+    }
+  }
+
+  function startFormatPolling() {
+    if (formatPollInterval) clearInterval(formatPollInterval);
+    formatPollInterval = setInterval(async () => {
+      try {
+        const status = await api.getLTFSFormatStatus();
+        formatPhase = status.phase || '';
+        formatMessage = status.message || '';
+        formatElapsed = status.elapsed_seconds || 0;
+
+        if (!status.running && (status.phase === 'complete' || status.phase === 'failed')) {
+          if (formatPollInterval) { clearInterval(formatPollInterval); formatPollInterval = null; }
+          formatting = false;
+
+          if (status.phase === 'complete') {
+            successMsg = 'Tape formatted with LTFS successfully';
+            clearSuccess();
+            showFormatModal = false;
+            formatPhase = '';
+            formatMessage = '';
+            await refreshStatus();
+          } else {
+            error = status.error || status.message || 'Format failed';
+            formatPhase = '';
+            formatMessage = '';
+          }
+        }
+      } catch {
+        // Ignore transient poll errors
+      }
+    }, 3000);
+  }
+
+  function formatDuration(seconds: number): string {
+    if (seconds < 60) return `${seconds}s`;
+    const min = Math.floor(seconds / 60);
+    const sec = seconds % 60;
+    if (min < 60) return `${min}m ${sec}s`;
+    const hr = Math.floor(min / 60);
+    const remMin = min % 60;
+    return `${hr}h ${remMin}m`;
+  }
+
+  function phaseLabel(phase: string): string {
+    switch (phase) {
+      case 'formatting': return 'Formatting tape';
+      case 'verifying': return 'Verifying format';
+      case 'mounting': return 'Mounting volume';
+      case 'labeling': return 'Writing metadata';
+      case 'unmounting': return 'Finalizing';
+      case 'complete': return 'Complete';
+      case 'failed': return 'Failed';
+      default: return phase || 'Preparing';
     }
   }
 
@@ -604,32 +681,69 @@
 
 <!-- Format LTFS Modal -->
 {#if showFormatModal}
-  <div class="modal-overlay" on:click={() => showFormatModal = false}>
+  <div class="modal-overlay" on:click={() => { if (!formatting) showFormatModal = false; }}>
     <div class="modal" on:click|stopPropagation>
       <h2>🗑️ Format Tape with LTFS</h2>
-      <div style="padding: 0.75rem; background: var(--badge-danger-bg); color: var(--badge-danger-text); border-radius: 6px; margin-bottom: 1rem;">
-        <strong>⚠️ Warning:</strong> This will erase ALL data on the tape and format it with LTFS.
-      </div>
-      <div class="form-group">
-        <label for="fmt-label">Tape Label</label>
-        <input id="fmt-label" type="text" bind:value={formatLabel} placeholder="e.g. BKP001" maxlength="6" />
-        <small>Up to 6 characters (LTO barcode format)</small>
-      </div>
-      <div class="form-group">
-        <label for="fmt-uuid">UUID</label>
-        <input id="fmt-uuid" type="text" bind:value={formatUUID} readonly />
-        <span style="font-size: 0.75rem; color: var(--text-muted);">Auto-generated unique identifier</span>
-      </div>
-      <div class="form-group">
-        <label for="fmt-pool">Pool (optional)</label>
-        <input id="fmt-pool" type="text" bind:value={formatPool} placeholder="e.g. daily, weekly" />
-      </div>
-      <div class="modal-actions">
-        <button class="btn btn-secondary" on:click={() => showFormatModal = false} disabled={formatting}>Cancel</button>
-        <button class="btn btn-danger" on:click={handleFormat} disabled={formatting || !formatLabel}>
-          {formatting ? 'Formatting...' : '🗑️ Format with LTFS'}
-        </button>
-      </div>
+
+      {#if formatting}
+        <!-- Progress display during format -->
+        <div class="format-progress">
+          <div class="spinner"></div>
+          <div class="format-progress-info">
+            <strong>{phaseLabel(formatPhase)}</strong>
+            <p style="color: var(--text-muted); margin: 0.25rem 0 0; font-size: 0.9rem;">{formatMessage}</p>
+            {#if formatElapsed > 0}
+              <p style="color: var(--text-muted); margin: 0.25rem 0 0; font-size: 0.8rem;">
+                Elapsed: {formatDuration(formatElapsed)}
+              </p>
+            {/if}
+          </div>
+        </div>
+        <div class="format-phases">
+          <div class="format-phase" class:active={formatPhase === 'formatting'} class:done={['verifying','mounting','labeling','unmounting','complete'].includes(formatPhase)}>
+            <span class="phase-dot"></span> Formatting tape
+          </div>
+          <div class="format-phase" class:active={formatPhase === 'verifying'} class:done={['mounting','labeling','unmounting','complete'].includes(formatPhase)}>
+            <span class="phase-dot"></span> Verifying format
+          </div>
+          <div class="format-phase" class:active={formatPhase === 'mounting'} class:done={['labeling','unmounting','complete'].includes(formatPhase)}>
+            <span class="phase-dot"></span> Mounting volume
+          </div>
+          <div class="format-phase" class:active={formatPhase === 'labeling'} class:done={['unmounting','complete'].includes(formatPhase)}>
+            <span class="phase-dot"></span> Writing metadata
+          </div>
+          <div class="format-phase" class:active={formatPhase === 'unmounting'} class:done={formatPhase === 'complete'}>
+            <span class="phase-dot"></span> Finalizing
+          </div>
+        </div>
+        <p style="text-align: center; color: var(--text-muted); font-size: 0.8rem; margin-top: 1rem;">
+          ⏳ LTFS formatting can take 40 minutes to 2 hours — do not close this page
+        </p>
+      {:else}
+        <div style="padding: 0.75rem; background: var(--badge-danger-bg); color: var(--badge-danger-text); border-radius: 6px; margin-bottom: 1rem;">
+          <strong>⚠️ Warning:</strong> This will erase ALL data on the tape and format it with LTFS.
+        </div>
+        <div class="form-group">
+          <label for="fmt-label">Tape Label</label>
+          <input id="fmt-label" type="text" bind:value={formatLabel} placeholder="e.g. BKP001" maxlength="6" />
+          <small>Up to 6 characters (LTO barcode format)</small>
+        </div>
+        <div class="form-group">
+          <label for="fmt-uuid">UUID</label>
+          <input id="fmt-uuid" type="text" bind:value={formatUUID} readonly />
+          <span style="font-size: 0.75rem; color: var(--text-muted);">Auto-generated unique identifier</span>
+        </div>
+        <div class="form-group">
+          <label for="fmt-pool">Pool (optional)</label>
+          <input id="fmt-pool" type="text" bind:value={formatPool} placeholder="e.g. daily, weekly" />
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" on:click={() => showFormatModal = false}>Cancel</button>
+          <button class="btn btn-danger" on:click={handleFormat} disabled={!formatLabel}>
+            🗑️ Format with LTFS
+          </button>
+        </div>
+      {/if}
     </div>
   </div>
 {/if}
@@ -828,5 +942,75 @@
     padding: 0.1rem 0.3rem;
     border-radius: 3px;
     font-size: 0.8rem;
+  }
+
+  .format-progress {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1.5rem;
+    background: var(--bg-input);
+    border-radius: 8px;
+    margin-bottom: 1rem;
+  }
+
+  .format-progress .spinner {
+    flex-shrink: 0;
+    margin-bottom: 0;
+  }
+
+  .format-progress-info {
+    flex: 1;
+  }
+
+  .format-phases {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0 0.5rem;
+  }
+
+  .format-phase {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    opacity: 0.5;
+    transition: all 0.3s;
+  }
+
+  .format-phase.active {
+    color: var(--accent-primary);
+    font-weight: 600;
+    opacity: 1;
+  }
+
+  .format-phase.done {
+    color: var(--badge-success-text, #22c55e);
+    opacity: 0.8;
+  }
+
+  .phase-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    flex-shrink: 0;
+  }
+
+  .format-phase.active .phase-dot {
+    background: var(--accent-primary);
+    box-shadow: 0 0 6px var(--accent-primary);
+    animation: pulse-dot 1.5s infinite;
+  }
+
+  .format-phase.done .phase-dot {
+    background: var(--badge-success-text, #22c55e);
+  }
+
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
   }
 </style>
