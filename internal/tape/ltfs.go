@@ -18,6 +18,13 @@ import (
 // LTFSDefaultMountPoint is the default directory where LTFS tapes are mounted.
 const LTFSDefaultMountPoint = "/mnt/ltfs"
 
+// driveStabilizationDelay is the delay after a tape rewind completes to allow
+// the drive's internal mechanics to fully settle before performing read/write
+// operations. This prevents I/O errors that can occur if operations are attempted
+// while the drive is still stabilizing (e.g., head positioning, tension adjustment).
+// The 1-second delay is conservative and works across various LTO drive models.
+const driveStabilizationDelay = 1 * time.Second
+
 // LTFSMetadataFile is the filename written to the root of LTFS volumes for
 // TapeBackarr identification. Defined as a constant for consistency across
 // the codebase.
@@ -123,14 +130,63 @@ func ltfsFormatSuccessful(output string) bool {
 		strings.Contains(lower, "volume formatted successfully")
 }
 
-// rewindTape rewinds the tape to the beginning using the mt utility.
+// rewindTape rewinds the tape to the beginning using the mt utility and waits
+// for the rewind operation to complete. The mt rewind command can return before
+// the physical rewind is done, so this function polls the tape status to confirm
+// the tape has reached BOT (Beginning of Tape) before returning.
 func (l *LTFSService) rewindTape(ctx context.Context) error {
 	cmd := exec.CommandContext(ctx, "mt", "-f", l.devicePath, "rewind")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("rewind failed: %s: %w", strings.TrimSpace(string(output)), err)
 	}
-	return nil
+
+	// Wait for the rewind to complete by polling the tape status.
+	// The rewind command can return before the tape physically reaches BOT.
+	return l.waitForRewindComplete(ctx)
+}
+
+// waitForRewindComplete polls the tape status until the tape reaches BOT
+// (Beginning of Tape) and is no longer rewinding. This ensures the tape is
+// ready for subsequent operations like ltfsck or mount.
+func (l *LTFSService) waitForRewindComplete(ctx context.Context) error {
+	const maxAttempts = 30
+	const pollInterval = 2 * time.Second
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		// Check tape status
+		cmd := exec.CommandContext(ctx, "mt", "-f", l.devicePath, "status")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			// Status command failed, wait and retry
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		statusStr := strings.ToLower(string(output))
+
+		// Check if the tape is at BOT and not actively rewinding
+		atBOT := strings.Contains(statusStr, "bot") || strings.Contains(statusStr, "beginning of tape")
+		isRewinding := strings.Contains(statusStr, "rewinding")
+
+		if atBOT && !isRewinding {
+			// Tape has reached BOT and is no longer rewinding.
+			// Add a delay to let the drive fully stabilize before returning.
+			time.Sleep(driveStabilizationDelay)
+			return nil
+		}
+
+		// Not ready yet, wait and poll again
+		time.Sleep(pollInterval)
+	}
+
+	return fmt.Errorf("timeout waiting for tape rewind to complete after %d attempts", maxAttempts)
 }
 
 // Mount mounts the LTFS tape at the configured mount point.
