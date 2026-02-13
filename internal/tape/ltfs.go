@@ -245,11 +245,7 @@ func (l *LTFSService) reloadCartridge(ctx context.Context) error {
 	}
 
 	// Set the drive to variable block size mode. LTFS uses variable-length
-	// blocks, but some drives (notably Tandberg/Quantum LTO) retain stale
-	// fixed block size settings after mkltfs. Without this reset, ltfsck's
-	// full medium consistency check fails with SG_IO READ ioctl errors
-	// (EINVAL / -21700) because the drive tries to read with the wrong
-	// block size.
+	// blocks, but some drives retain a stale fixed block size after mkltfs.
 	cmd = exec.CommandContext(ctx, "mt", "-f", l.devicePath, "setblk", "0")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("setblk 0 after reload failed: %s: %w", strings.TrimSpace(string(output)), err)
