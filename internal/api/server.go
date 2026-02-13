@@ -1694,14 +1694,6 @@ func (s *Server) handleLabelTape(w http.ResponseWriter, r *http.Request) {
 
 	isLTFS := formatType == string(models.TapeFormatLTFS)
 
-	s.tapeOp.mu.Lock()
-	if s.tapeOp.running {
-		s.tapeOp.mu.Unlock()
-		s.respondError(w, http.StatusConflict, "a tape operation is already in progress")
-		return
-	}
-	s.tapeOp.mu.Unlock()
-
 	// Capture audit info before the request context goes away.
 	auditClaims, _ := r.Context().Value("claims").(*auth.Claims)
 	auditRemote := r.RemoteAddr
@@ -5175,14 +5167,6 @@ func (s *Server) handleFormatTape(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.tapeOp.mu.Lock()
-	if s.tapeOp.running {
-		s.tapeOp.mu.Unlock()
-		s.respondError(w, http.StatusConflict, "a tape operation is already in progress")
-		return
-	}
-	s.tapeOp.mu.Unlock()
-
 	// Check tape status - refuse to format exported tapes
 	var status string
 	err = s.db.QueryRow("SELECT status FROM tapes WHERE id = ?", id).Scan(&status)
@@ -5567,14 +5551,6 @@ func (s *Server) handleFormatTapeInDrive(w http.ResponseWriter, r *http.Request)
 		s.respondError(w, http.StatusBadRequest, "format operation must be confirmed")
 		return
 	}
-
-	s.tapeOp.mu.Lock()
-	if s.tapeOp.running {
-		s.tapeOp.mu.Unlock()
-		s.respondError(w, http.StatusConflict, "a tape operation is already in progress")
-		return
-	}
-	s.tapeOp.mu.Unlock()
 
 	var devicePath string
 	err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", driveID).Scan(&devicePath)
