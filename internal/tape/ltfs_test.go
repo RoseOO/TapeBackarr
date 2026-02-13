@@ -497,3 +497,49 @@ LTFS16021E Volume is inconsistent and was not corrected.: exit status 4`,
 		})
 	}
 }
+
+func TestIsDeviceBusy(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{
+			name:   "device or resource busy",
+			output: "/dev/nst0: Device or resource busy",
+			want:   true,
+		},
+		{
+			name:   "device busy lowercase",
+			output: "device busy",
+			want:   true,
+		},
+		{
+			name:   "device or resource busy in full error message",
+			output: "setblk 0 after reload failed: /dev/nst0: Device or resource busy: exit status 1",
+			want:   true,
+		},
+		{
+			name:   "empty output",
+			output: "",
+			want:   false,
+		},
+		{
+			name:   "unrelated error",
+			output: "no such device or address",
+			want:   false,
+		},
+		{
+			name:   "SG_IO error is not device busy",
+			output: "LTFS30200I Failed to execute SG_IO ioctl, opcode = 08 (22).",
+			want:   false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isDeviceBusy(tt.output); got != tt.want {
+				t.Errorf("isDeviceBusy(%q) = %v, want %v", tt.output, got, tt.want)
+			}
+		})
+	}
+}
