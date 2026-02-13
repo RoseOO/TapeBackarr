@@ -540,6 +540,63 @@ func (l *LTFSService) Check(ctx context.Context) error {
 	return nil
 }
 
+// ltfsckMaxRetries is the maximum number of cartridge-reload retries
+// attempted by CheckWithRetry when ltfsck fails due to transient SG_IO
+// ioctl errors. Some drives (notably Tandberg/Quantum LTO) need more
+// than one reload cycle for the firmware to fully clear cached state
+// after mkltfs.
+const ltfsckMaxRetries = 2
+
+// CheckWithRetry runs ltfsck and, if it fails due to transient SG_IO
+// ioctl errors, performs a cartridge reload and retries up to
+// ltfsckMaxRetries times. Some LTO drives (notably Tandberg/Quantum)
+// cache stale mode parameters that persist across a single cartridge
+// reload, causing SG_IO READ ioctl failures (EINVAL / -21700) during
+// the full medium consistency check. An additional reload cycle clears
+// the residual state.
+//
+// Non-transient failures (e.g. missing partition labels) are returned
+// immediately without retrying.
+func (l *LTFSService) CheckWithRetry(ctx context.Context) error {
+	var lastErr error
+	for attempt := 0; attempt <= ltfsckMaxRetries; attempt++ {
+		if attempt > 0 {
+			// Reload the cartridge before retrying to clear stale drive state.
+			if err := l.reloadCartridge(ctx); err != nil {
+				return fmt.Errorf("cartridge reload before ltfsck retry failed: %w", err)
+			}
+		}
+
+		lastErr = l.Check(ctx)
+		if lastErr == nil {
+			return nil
+		}
+
+		// Only retry on transient SG_IO ioctl errors. Label-read
+		// failures and other structural errors are not transient.
+		if !isSGIOError(lastErr.Error()) {
+			return lastErr
+		}
+	}
+	return lastErr
+}
+
+// isSGIOError returns true when the output contains indicators of a
+// transient SG_IO ioctl failure. These errors occur when the drive
+// firmware has stale cached state after mkltfs and are resolved by
+// ejecting and reloading the cartridge.
+//
+// Typical indicators:
+//   - "SG_IO ioctl" — the kernel-level SCSI generic ioctl failed
+//   - "ioctl error" — LTFS backend reports an ioctl-level failure
+//   - "-21700" — LTFS internal error code for an ioctl error
+func isSGIOError(output string) bool {
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "sg_io ioctl") ||
+		strings.Contains(lower, "ioctl error") ||
+		strings.Contains(lower, "-21700")
+}
+
 // FormatAndLabel formats the tape with LTFS and writes a TapeBackarr-compatible
 // metadata file to the root of the volume so the tape can be identified by both
 // LTFS tools and the TapeBackarr label system.
@@ -555,7 +612,9 @@ func (l *LTFSService) FormatAndLabel(ctx context.Context, label string, uuid str
 	// Verify the freshly formatted tape with ltfsck before mounting.
 	// This catches cases where mkltfs appeared to succeed but did not
 	// write valid partition labels (e.g. drive quirks, interrupted I/O).
-	if err := l.Check(ctx); err != nil {
+	// Uses CheckWithRetry because some drives need additional cartridge
+	// reload cycles to clear stale firmware state after mkltfs.
+	if err := l.CheckWithRetry(ctx); err != nil {
 		return fmt.Errorf("LTFS post-format verification failed: %w", err)
 	}
 
