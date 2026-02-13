@@ -87,8 +87,11 @@ func IsAvailable() bool {
 // interactive confirmation prompt, which would cause the command to hang
 // or silently skip formatting when run non-interactively.
 //
-// After a successful format the tape is rewound so that subsequent mount
-// or check operations find the partition labels at the beginning of tape.
+// After a successful format the tape cartridge is ejected and reloaded to
+// force the drive firmware to reinitialize its internal state (block size,
+// mode pages, partition map). A simple rewind is not sufficient because
+// some drives cache stale parameters that cause I/O errors when ltfsck or
+// ltfs mount tries to read the freshly written LTFS structures.
 //
 // Equivalent to: mkltfs -d /dev/nst0 --force [-n label]
 func (l *LTFSService) Format(ctx context.Context, label string) error {
@@ -111,10 +114,17 @@ func (l *LTFSService) Format(ctx context.Context, label string) error {
 		return fmt.Errorf("mkltfs did not report success (possible confirmation prompt issue): %s", outStr)
 	}
 
-	// Rewind the tape so the head is at BOT before any subsequent
-	// mount or check operation reads the partition labels.
-	if err := l.rewindTape(ctx); err != nil {
-		return fmt.Errorf("post-format rewind failed: %w", err)
+	// After mkltfs finishes, the tape drive's SG_IO state (block size,
+	// mode settings, partition pointers) may be inconsistent with what
+	// ltfsck or ltfs mount expects.  A simple rewind is not sufficient
+	// because the drive firmware caches the old mode parameters.
+	//
+	// Performing a full cartridge reload (rewoffl → load → rewind) forces
+	// the drive to re-initialize, clearing stale state that would
+	// otherwise cause SG_IO ioctl READ errors (EINVAL / -21700) during
+	// the subsequent ltfsck verification.
+	if err := l.reloadCartridge(ctx); err != nil {
+		return fmt.Errorf("post-format cartridge reload failed: %w", err)
 	}
 
 	return nil
@@ -187,6 +197,37 @@ func (l *LTFSService) waitForRewindComplete(ctx context.Context) error {
 	}
 
 	return fmt.Errorf("timeout waiting for tape rewind to complete after %d attempts", maxAttempts)
+}
+
+// reloadCartridge ejects and reloads the tape cartridge to force the drive
+// firmware to re-initialize its internal state (block size, mode pages,
+// partition map). This is necessary after mkltfs because some drives
+// (notably Tandberg/Quantum LTO) cache stale mode parameters that cause
+// SG_IO READ ioctl failures (EINVAL / error -21700) when ltfsck or ltfs
+// mount attempts to read the freshly written LTFS structures.
+//
+// Sequence: mt rewoffl → mt load → rewind + wait-for-BOT + stabilize.
+func (l *LTFSService) reloadCartridge(ctx context.Context) error {
+	// Rewind-offline ejects the tape.
+	cmd := exec.CommandContext(ctx, "mt", "-f", l.devicePath, "rewoffl")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("rewoffl failed: %s: %w", strings.TrimSpace(string(output)), err)
+	}
+
+	// Allow the drive mechanics to fully complete the eject before
+	// issuing the load. Without this pause some drives report "not
+	// ready" on the subsequent load command.
+	time.Sleep(3 * time.Second)
+
+	// Reload the cartridge so the drive re-reads partition labels from
+	// scratch with a clean internal state.
+	cmd = exec.CommandContext(ctx, "mt", "-f", l.devicePath, "load")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("load after rewoffl failed: %s: %w", strings.TrimSpace(string(output)), err)
+	}
+
+	// Rewind to BOT and wait for the tape to be fully settled.
+	return l.rewindTape(ctx)
 }
 
 // Mount mounts the LTFS tape at the configured mount point.
