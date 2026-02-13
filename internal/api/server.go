@@ -53,6 +53,22 @@ type batchLabelState struct {
 	message   string
 	completed int
 	failed    int
+	phase     string // per-tape phase: "waiting", "checking", "writing", "detecting", "saving", "ejecting"
+}
+
+// tapeOpState tracks a running single-tape format or label operation.
+type tapeOpState struct {
+	mu      sync.Mutex
+	running bool
+	cancel  context.CancelFunc
+	opType  string // "format" or "label"
+	phase   string // "checking", "erasing", "writing", "verifying", "ejecting", "updating", "complete", "failed"
+	message string
+	driveID int64
+	tapeID  int64
+	label   string
+	err     string
+	started time.Time
 }
 
 // Server represents the API server
@@ -76,6 +92,7 @@ type Server struct {
 	telegramService       *notifications.TelegramService
 	batchLabel            batchLabelState
 	ltfsFormat            ltfsFormatState
+	tapeOp                tapeOpState
 	notifiedUnknownTapes  sync.Map // Track unknown tapes that have been notified (key: tape UUID)
 }
 
@@ -226,6 +243,7 @@ func (s *Server) setupRoutes() {
 			r.Get("/batch-label/status", s.handleBatchLabelStatus)
 			r.Post("/batch-label/cancel", s.handleBatchLabelCancel)
 			r.Post("/batch-update", s.handleBatchUpdateTapes)
+			r.Get("/operation/status", s.handleTapeOpStatus)
 		})
 
 		// Tape Pools
@@ -1664,7 +1682,9 @@ func (s *Server) handleLabelTape(w http.ResponseWriter, r *http.Request) {
 
 	// Determine which drive to use
 	devicePath := ""
+	var driveID int64
 	if req.DriveID != nil {
+		driveID = *req.DriveID
 		err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", *req.DriveID).Scan(&devicePath)
 		if err != nil {
 			s.respondError(w, http.StatusBadRequest, "drive not found or not enabled")
@@ -1672,69 +1692,119 @@ func (s *Server) handleLabelTape(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	ctx := r.Context()
-
-	// LTFS-formatted tapes must not receive a raw label write — writing raw
-	// data to the beginning of an LTFS tape destroys the LTFS partition labels
-	// and makes the tape unmountable. For LTFS tapes we update the database
-	// and optionally auto-eject, but never write raw data to the tape.
 	isLTFS := formatType == string(models.TapeFormatLTFS)
+
+	s.tapeOp.mu.Lock()
+	if s.tapeOp.running {
+		s.tapeOp.mu.Unlock()
+		s.respondError(w, http.StatusConflict, "a tape operation is already in progress")
+		return
+	}
+	s.tapeOp.mu.Unlock()
+
+	// Capture audit info before the request context goes away.
+	auditClaims, _ := r.Context().Value("claims").(*auth.Claims)
+	auditRemote := r.RemoteAddr
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		auditRemote = fwd
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	s.tapeOp.mu.Lock()
+	if s.tapeOp.running {
+		s.tapeOp.mu.Unlock()
+		cancel()
+		s.respondError(w, http.StatusConflict, "a tape operation is already in progress")
+		return
+	}
+	s.tapeOp.running = true
+	s.tapeOp.cancel = cancel
+	s.tapeOp.opType = "label"
+	s.tapeOp.phase = "checking"
+	s.tapeOp.message = "Preparing label operation..."
+	s.tapeOp.driveID = driveID
+	s.tapeOp.tapeID = id
+	s.tapeOp.label = req.Label
+	s.tapeOp.err = ""
+	s.tapeOp.started = time.Now()
+	s.tapeOp.mu.Unlock()
+
+	go s.runLabelTape(ctx, id, req.Label, devicePath, driveID, tapeUUID, poolName, isLTFS, req.Force, req.AutoEject, auditClaims, auditRemote)
+
+	s.respondJSON(w, http.StatusAccepted, map[string]string{
+		"status":  "started",
+		"message": fmt.Sprintf("Label operation started for tape '%s'", req.Label),
+	})
+}
+
+// runLabelTape executes the label operation in the background with phase tracking.
+func (s *Server) runLabelTape(ctx context.Context, id int64, label, devicePath string, driveID int64, tapeUUID, poolName string, isLTFS, force, autoEject bool, auditClaims *auth.Claims, auditRemote string) {
+	defer func() {
+		s.tapeOp.mu.Lock()
+		s.tapeOp.running = false
+		s.tapeOp.cancel = nil
+		s.tapeOp.mu.Unlock()
+	}()
+
+	setPhase := func(phase, message string) {
+		s.tapeOp.mu.Lock()
+		s.tapeOp.phase = phase
+		s.tapeOp.message = message
+		s.tapeOp.mu.Unlock()
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "info",
+				Category: "tape",
+				Title:    "Label Progress",
+				Message:  message,
+				Details:  map[string]interface{}{"label": label, "device": devicePath, "phase": phase},
+			})
+		}
+	}
+
+	setError := func(errMsg string) {
+		s.tapeOp.mu.Lock()
+		s.tapeOp.phase = "failed"
+		s.tapeOp.message = errMsg
+		s.tapeOp.err = errMsg
+		s.tapeOp.mu.Unlock()
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "error",
+				Category: "tape",
+				Title:    "Label Failed",
+				Message:  errMsg,
+				Details:  map[string]interface{}{"label": label, "device": devicePath, "phase": "failed"},
+			})
+		}
+	}
 
 	if devicePath != "" && !isLTFS {
 		driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
 
-		if s.eventBus != nil {
-			s.eventBus.Publish(SystemEvent{
-				Type:     "info",
-				Category: "tape",
-				Title:    "Label Operation Started",
-				Message:  fmt.Sprintf("Writing label '%s' to tape on drive %s", req.Label, devicePath),
-				Details:  map[string]interface{}{"label": req.Label, "device": devicePath, "uuid": tapeUUID},
-			})
-		}
+		setPhase("checking", fmt.Sprintf("Checking tape in drive %s...", devicePath))
 
 		// Verify tape is loaded
 		loaded, err := driveSvc.IsTapeLoaded(ctx)
 		if err != nil || !loaded {
-			if s.eventBus != nil {
-				s.eventBus.Publish(SystemEvent{
-					Type:     "error",
-					Category: "tape",
-					Title:    "Label Operation Failed",
-					Message:  "No tape loaded in drive " + devicePath,
-				})
-			}
-			s.respondError(w, http.StatusConflict, "no tape loaded in drive")
+			setError("No tape loaded in drive " + devicePath)
 			return
 		}
 
-		if s.eventBus != nil {
-			s.eventBus.Publish(SystemEvent{
-				Type:     "info",
-				Category: "tape",
-				Title:    "Tape Detected",
-				Message:  fmt.Sprintf("Tape is loaded in drive %s, proceeding with label write", devicePath),
-			})
-		}
-
 		// Check if tape already has data/label before writing (unless force=true)
-		if !req.Force {
+		if !force {
+			setPhase("verifying", "Checking for existing label...")
 			if existingLabel, err := driveSvc.ReadTapeLabel(ctx); err == nil && existingLabel != nil && existingLabel.Label != "" {
-				if s.eventBus != nil {
-					s.eventBus.Publish(SystemEvent{
-						Type:     "warning",
-						Category: "tape",
-						Title:    "Label Conflict",
-						Message:  fmt.Sprintf("Tape already has label '%s' (UUID: %s). Use force to overwrite.", existingLabel.Label, existingLabel.UUID),
-					})
-				}
-				s.respondError(w, http.StatusConflict, fmt.Sprintf("tape already has a label: '%s' (UUID: %s). Use force=true or format the tape first.", existingLabel.Label, existingLabel.UUID))
+				setError(fmt.Sprintf("Tape already has label '%s' (UUID: %s). Use force to overwrite.", existingLabel.Label, existingLabel.UUID))
 				return
 			}
 		}
 
+		setPhase("writing", fmt.Sprintf("Writing label '%s' to tape...", label))
+
 		// Write label to tape with UUID and pool info
-		if err := driveSvc.WriteTapeLabel(ctx, req.Label, tapeUUID, poolName); err != nil {
+		if err := driveSvc.WriteTapeLabel(ctx, label, tapeUUID, poolName); err != nil {
 			if s.eventBus != nil {
 				s.eventBus.Publish(SystemEvent{
 					Type:     "warning",
@@ -1746,60 +1816,22 @@ func (s *Server) handleLabelTape(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("Failed to write label to physical tape, continuing with software tracking", map[string]interface{}{
 				"error": err.Error(),
 			})
-		} else if s.eventBus != nil {
-			s.eventBus.Publish(SystemEvent{
-				Type:     "success",
-				Category: "tape",
-				Title:    "Label Written",
-				Message:  fmt.Sprintf("Label '%s' written to physical tape on %s", req.Label, devicePath),
-			})
 		}
 
 		// Auto-eject after labeling if requested
-		if req.AutoEject {
-			if s.eventBus != nil {
-				s.eventBus.Publish(SystemEvent{
-					Type:     "info",
-					Category: "tape",
-					Title:    "Auto-Eject",
-					Message:  fmt.Sprintf("Ejecting tape from drive %s after labeling", devicePath),
-				})
-			}
+		if autoEject {
+			setPhase("ejecting", fmt.Sprintf("Ejecting tape from drive %s...", devicePath))
 			if err := driveSvc.Eject(ctx); err != nil {
-				if s.eventBus != nil {
-					s.eventBus.Publish(SystemEvent{
-						Type:     "warning",
-						Category: "tape",
-						Title:    "Auto-Eject Failed",
-						Message:  fmt.Sprintf("Failed to auto-eject tape: %s", err.Error()),
-					})
-				}
 				s.logger.Warn("Failed to auto-eject tape after labeling", map[string]interface{}{
 					"error": err.Error(),
-				})
-			} else if s.eventBus != nil {
-				s.eventBus.Publish(SystemEvent{
-					Type:     "success",
-					Category: "tape",
-					Title:    "Tape Ejected",
-					Message:  fmt.Sprintf("Tape ejected from drive %s", devicePath),
 				})
 			}
 		}
 	} else if devicePath != "" && isLTFS {
-		// LTFS tape: skip raw label write to avoid corrupting LTFS partition labels
-		if s.eventBus != nil {
-			s.eventBus.Publish(SystemEvent{
-				Type:     "info",
-				Category: "tape",
-				Title:    "LTFS Tape Label",
-				Message:  fmt.Sprintf("Tape is LTFS formatted — skipping raw label write to preserve LTFS partition labels. Label '%s' will be tracked in software only.", req.Label),
-				Details:  map[string]interface{}{"label": req.Label, "uuid": tapeUUID, "format_type": "ltfs"},
-			})
-		}
-
+		setPhase("writing", fmt.Sprintf("LTFS tape — updating software label to '%s'...", label))
 		// Auto-eject after labeling if requested
-		if req.AutoEject {
+		if autoEject {
+			setPhase("ejecting", "Ejecting LTFS tape...")
 			driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
 			if err := driveSvc.Eject(ctx); err != nil {
 				s.logger.Warn("Failed to auto-eject tape after labeling", map[string]interface{}{
@@ -1808,67 +1840,41 @@ func (s *Server) handleLabelTape(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else if !isLTFS {
-		if s.eventBus != nil {
-			s.eventBus.Publish(SystemEvent{
-				Type:     "info",
-				Category: "tape",
-				Title:    "Label Operation Started",
-				Message:  fmt.Sprintf("Writing label '%s' to tape (default drive)", req.Label),
-			})
-		}
-		// Use default tape service
-		if err := s.tapeService.WriteTapeLabel(ctx, req.Label, tapeUUID, poolName); err != nil {
-			if s.eventBus != nil {
-				s.eventBus.Publish(SystemEvent{
-					Type:     "warning",
-					Category: "tape",
-					Title:    "Physical Label Write Failed",
-					Message:  fmt.Sprintf("Could not write label to tape: %s. Continuing with software tracking.", err.Error()),
-				})
-			}
+		setPhase("writing", fmt.Sprintf("Writing label '%s' to tape (default drive)...", label))
+		if err := s.tapeService.WriteTapeLabel(ctx, label, tapeUUID, poolName); err != nil {
 			s.logger.Warn("Failed to write label to physical tape, continuing with software tracking", map[string]interface{}{
 				"error": err.Error(),
 			})
-		} else if s.eventBus != nil {
-			s.eventBus.Publish(SystemEvent{
-				Type:     "success",
-				Category: "tape",
-				Title:    "Label Written",
-				Message:  fmt.Sprintf("Label '%s' written to physical tape", req.Label),
-			})
 		}
 	} else {
-		// LTFS tape without drive: software-only tracking
-		if s.eventBus != nil {
-			s.eventBus.Publish(SystemEvent{
-				Type:     "info",
-				Category: "tape",
-				Title:    "LTFS Tape Label",
-				Message:  fmt.Sprintf("Tape is LTFS formatted — label '%s' tracked in software only.", req.Label),
-			})
-		}
+		setPhase("writing", fmt.Sprintf("LTFS tape — tracking label '%s' in software...", label))
 	}
 
+	setPhase("updating", "Updating database...")
+
 	// Update database
-	_, err = s.db.Exec("UPDATE tapes SET label = ?, labeled_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?", req.Label, id)
-	if err != nil {
-		s.respondError(w, http.StatusInternalServerError, err.Error())
+	if _, err := s.db.Exec("UPDATE tapes SET label = ?, labeled_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?", label, id); err != nil {
+		setError("Failed to update database: " + err.Error())
 		return
 	}
+
+	s.tapeOp.mu.Lock()
+	s.tapeOp.phase = "complete"
+	s.tapeOp.message = fmt.Sprintf("Tape labeled as '%s'", label)
+	s.tapeOp.err = ""
+	s.tapeOp.mu.Unlock()
 
 	if s.eventBus != nil {
 		s.eventBus.Publish(SystemEvent{
 			Type:     "success",
 			Category: "tape",
 			Title:    "Tape Labeled",
-			Message:  fmt.Sprintf("Tape labeled as '%s' (UUID: %s)", req.Label, tapeUUID),
-			Details:  map[string]interface{}{"label": req.Label, "uuid": tapeUUID, "pool": poolName},
+			Message:  fmt.Sprintf("Tape labeled as '%s' (UUID: %s)", label, tapeUUID),
+			Details:  map[string]interface{}{"label": label, "uuid": tapeUUID, "pool": poolName},
 		})
 	}
 
-	s.auditLog(r, "label", "tape", id, fmt.Sprintf("Labelled tape as '%s'", req.Label))
-
-	s.respondJSON(w, http.StatusOK, map[string]string{"status": "labeled"})
+	s.auditLogDirect(auditClaims, auditRemote, "label", "tape", id, fmt.Sprintf("Labelled tape as '%s'", label))
 }
 
 // Pool handlers
@@ -5144,7 +5150,9 @@ func generateUUID() string {
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
-// handleFormatTape erases/formats a tape, removing all data including labels
+// handleFormatTape erases/formats a tape, removing all data including labels.
+// The operation runs asynchronously and progress can be polled via
+// GET /api/v1/tapes/operation/status.
 func (s *Server) handleFormatTape(w http.ResponseWriter, r *http.Request) {
 	id, err := s.getIDParam(r)
 	if err != nil {
@@ -5167,6 +5175,14 @@ func (s *Server) handleFormatTape(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.tapeOp.mu.Lock()
+	if s.tapeOp.running {
+		s.tapeOp.mu.Unlock()
+		s.respondError(w, http.StatusConflict, "a tape operation is already in progress")
+		return
+	}
+	s.tapeOp.mu.Unlock()
+
 	// Check tape status - refuse to format exported tapes
 	var status string
 	err = s.db.QueryRow("SELECT status FROM tapes WHERE id = ?", id).Scan(&status)
@@ -5179,6 +5195,10 @@ func (s *Server) handleFormatTape(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get tape label for display
+	var tapeLabel string
+	_ = s.db.QueryRow("SELECT label FROM tapes WHERE id = ?", id).Scan(&tapeLabel)
+
 	// Get drive device path
 	var devicePath string
 	err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", req.DriveID).Scan(&devicePath)
@@ -5187,83 +5207,115 @@ func (s *Server) handleFormatTape(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := r.Context()
-	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+	ctx, cancel := context.WithCancel(context.Background())
 
-	if s.eventBus != nil {
-		s.eventBus.Publish(SystemEvent{
-			Type:     "info",
-			Category: "tape",
-			Title:    "Format Operation Started",
-			Message:  fmt.Sprintf("Formatting tape (id=%d) on drive %s — all data will be erased", id, devicePath),
-			Details:  map[string]interface{}{"tape_id": id, "device": devicePath},
-		})
+	s.tapeOp.mu.Lock()
+	if s.tapeOp.running {
+		s.tapeOp.mu.Unlock()
+		cancel()
+		s.respondError(w, http.StatusConflict, "a tape operation is already in progress")
+		return
+	}
+	s.tapeOp.running = true
+	s.tapeOp.cancel = cancel
+	s.tapeOp.opType = "format"
+	s.tapeOp.phase = "checking"
+	s.tapeOp.message = "Checking tape status..."
+	s.tapeOp.driveID = req.DriveID
+	s.tapeOp.tapeID = id
+	s.tapeOp.label = tapeLabel
+	s.tapeOp.err = ""
+	s.tapeOp.started = time.Now()
+	s.tapeOp.mu.Unlock()
+
+	go s.runFormatTape(ctx, id, req.DriveID, devicePath)
+
+	s.respondJSON(w, http.StatusAccepted, map[string]string{
+		"status":  "started",
+		"message": fmt.Sprintf("Format operation started on drive %s", devicePath),
+	})
+}
+
+// runFormatTape executes the format operation in the background with phase tracking.
+func (s *Server) runFormatTape(ctx context.Context, tapeID int64, driveID int64, devicePath string) {
+	defer func() {
+		s.tapeOp.mu.Lock()
+		s.tapeOp.running = false
+		s.tapeOp.cancel = nil
+		s.tapeOp.mu.Unlock()
+	}()
+
+	setPhase := func(phase, message string) {
+		s.tapeOp.mu.Lock()
+		s.tapeOp.phase = phase
+		s.tapeOp.message = message
+		s.tapeOp.mu.Unlock()
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "info",
+				Category: "tape",
+				Title:    "Format Progress",
+				Message:  message,
+				Details:  map[string]interface{}{"tape_id": tapeID, "device": devicePath, "phase": phase},
+			})
+		}
 	}
 
-	// Verify tape is loaded
-	loaded, err := driveSvc.IsTapeLoaded(ctx)
-	if err != nil || !loaded {
+	setError := func(errMsg string) {
+		s.tapeOp.mu.Lock()
+		s.tapeOp.phase = "failed"
+		s.tapeOp.message = errMsg
+		s.tapeOp.err = errMsg
+		s.tapeOp.mu.Unlock()
 		if s.eventBus != nil {
 			s.eventBus.Publish(SystemEvent{
 				Type:     "error",
 				Category: "tape",
 				Title:    "Format Failed",
-				Message:  "No tape loaded in drive " + devicePath,
+				Message:  errMsg,
+				Details:  map[string]interface{}{"tape_id": tapeID, "device": devicePath, "phase": "failed"},
 			})
 		}
-		s.respondError(w, http.StatusConflict, "no tape loaded in drive")
+	}
+
+	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+
+	setPhase("checking", fmt.Sprintf("Checking tape in drive %s...", devicePath))
+
+	// Verify tape is loaded
+	loaded, err := driveSvc.IsTapeLoaded(ctx)
+	if err != nil || !loaded {
+		setError("No tape loaded in drive " + devicePath)
 		return
 	}
 
 	// Check write protection
 	driveStatus, err := driveSvc.GetStatus(ctx)
 	if err == nil && driveStatus.WriteProtect {
-		if s.eventBus != nil {
-			s.eventBus.Publish(SystemEvent{
-				Type:     "error",
-				Category: "tape",
-				Title:    "Format Failed",
-				Message:  "Tape is write-protected — cannot format",
-			})
-		}
-		s.respondError(w, http.StatusConflict, "tape is write-protected")
+		setError("Tape is write-protected — cannot format")
 		return
 	}
 
-	if s.eventBus != nil {
-		s.eventBus.Publish(SystemEvent{
-			Type:     "info",
-			Category: "tape",
-			Title:    "Erasing Tape",
-			Message:  fmt.Sprintf("Running erase command on drive %s...", devicePath),
-		})
-	}
+	setPhase("erasing", fmt.Sprintf("Erasing tape on drive %s — this may take several minutes...", devicePath))
 
 	// Erase the tape
 	if err := driveSvc.EraseTape(ctx); err != nil {
-		if s.eventBus != nil {
-			s.eventBus.Publish(SystemEvent{
-				Type:     "error",
-				Category: "tape",
-				Title:    "Format Failed",
-				Message:  fmt.Sprintf("Erase command failed: %s", err.Error()),
-			})
-		}
-		s.respondError(w, http.StatusInternalServerError, "failed to format tape: "+err.Error())
+		setError(fmt.Sprintf("Erase command failed: %s", err.Error()))
 		return
 	}
 
+	setPhase("updating", "Updating database...")
+
 	// Reset tape in database to blank state
 	var tapeUUID, tapeLabel string
-	_ = s.db.QueryRow("SELECT uuid, label FROM tapes WHERE id = ?", id).Scan(&tapeUUID, &tapeLabel)
-	
-	_, err = s.db.Exec(`
+	_ = s.db.QueryRow("SELECT uuid, label FROM tapes WHERE id = ?", tapeID).Scan(&tapeUUID, &tapeLabel)
+
+	if _, err := s.db.Exec(`
 		UPDATE tapes SET status = 'blank', used_bytes = 0, write_count = 0,
 		       last_written_at = NULL, labeled_at = NULL, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, id)
-	if err != nil {
-		s.respondError(w, http.StatusInternalServerError, err.Error())
+	`, tapeID); err != nil {
+		setError("Failed to update database: " + err.Error())
 		return
 	}
 
@@ -5275,17 +5327,44 @@ func (s *Server) handleFormatTape(w http.ResponseWriter, r *http.Request) {
 		s.notifiedUnknownTapes.Delete(tapeLabel)
 	}
 
+	s.tapeOp.mu.Lock()
+	s.tapeOp.phase = "complete"
+	s.tapeOp.message = "Tape formatted and reset to blank state"
+	s.tapeOp.err = ""
+	s.tapeOp.mu.Unlock()
+
 	if s.eventBus != nil {
 		s.eventBus.Publish(SystemEvent{
 			Type:     "success",
 			Category: "tape",
 			Title:    "Tape Formatted",
-			Message:  fmt.Sprintf("Tape (id=%d) has been formatted and reset to blank state on drive %s", id, devicePath),
-			Details:  map[string]interface{}{"tape_id": id, "device": devicePath},
+			Message:  fmt.Sprintf("Tape (id=%d) has been formatted and reset to blank state on drive %s", tapeID, devicePath),
+			Details:  map[string]interface{}{"tape_id": tapeID, "device": devicePath},
 		})
 	}
+}
 
-	s.respondJSON(w, http.StatusOK, map[string]string{"status": "formatted"})
+// handleTapeOpStatus returns the current state of a running tape format/label operation.
+func (s *Server) handleTapeOpStatus(w http.ResponseWriter, r *http.Request) {
+	s.tapeOp.mu.Lock()
+	status := map[string]interface{}{
+		"running":  s.tapeOp.running,
+		"op_type":  s.tapeOp.opType,
+		"phase":    s.tapeOp.phase,
+		"message":  s.tapeOp.message,
+		"drive_id": s.tapeOp.driveID,
+		"tape_id":  s.tapeOp.tapeID,
+		"label":    s.tapeOp.label,
+	}
+	if !s.tapeOp.started.IsZero() {
+		status["started"] = s.tapeOp.started.Format(time.RFC3339)
+		status["elapsed_seconds"] = int(time.Since(s.tapeOp.started).Seconds())
+	}
+	if s.tapeOp.err != "" {
+		status["error"] = s.tapeOp.err
+	}
+	s.tapeOp.mu.Unlock()
+	s.respondJSON(w, http.StatusOK, status)
 }
 
 // handleExportTape marks a tape as exported/offsite
@@ -5466,8 +5545,9 @@ func (s *Server) handleScanDrives(w http.ResponseWriter, r *http.Request) {
 	s.respondJSON(w, http.StatusOK, drives)
 }
 
-// handleFormatTapeInDrive formats whatever tape is loaded in a specific drive
-// This works even if the tape is not in our database
+// handleFormatTapeInDrive formats whatever tape is loaded in a specific drive.
+// The operation runs asynchronously and progress can be polled via
+// GET /api/v1/tapes/operation/status.
 func (s *Server) handleFormatTapeInDrive(w http.ResponseWriter, r *http.Request) {
 	driveID, err := s.getIDParam(r)
 	if err != nil {
@@ -5488,6 +5568,14 @@ func (s *Server) handleFormatTapeInDrive(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	s.tapeOp.mu.Lock()
+	if s.tapeOp.running {
+		s.tapeOp.mu.Unlock()
+		s.respondError(w, http.StatusConflict, "a tape operation is already in progress")
+		return
+	}
+	s.tapeOp.mu.Unlock()
+
 	var devicePath string
 	err = s.db.QueryRow("SELECT device_path FROM tape_drives WHERE id = ? AND enabled = 1", driveID).Scan(&devicePath)
 	if err != nil {
@@ -5495,96 +5583,129 @@ func (s *Server) handleFormatTapeInDrive(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	ctx := r.Context()
-	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+	ctx, cancel := context.WithCancel(context.Background())
 
-	if s.eventBus != nil {
-		s.eventBus.Publish(SystemEvent{
-			Type:     "info",
-			Category: "tape",
-			Title:    "Format Started",
-			Message:  fmt.Sprintf("Formatting tape in drive %s — checking tape status...", devicePath),
-			Details:  map[string]interface{}{"drive_id": driveID, "device": devicePath},
-		})
-	}
-
-	// Check if tape is loaded
-	loaded, err := driveSvc.IsTapeLoaded(ctx)
-	if err != nil || !loaded {
-		if s.eventBus != nil {
-			s.eventBus.Publish(SystemEvent{
-				Type:     "error",
-				Category: "tape",
-				Title:    "Format Failed",
-				Message:  "No tape loaded in drive " + devicePath,
-			})
-		}
-		s.respondError(w, http.StatusConflict, "no tape loaded in drive")
+	s.tapeOp.mu.Lock()
+	if s.tapeOp.running {
+		s.tapeOp.mu.Unlock()
+		cancel()
+		s.respondError(w, http.StatusConflict, "a tape operation is already in progress")
 		return
 	}
+	s.tapeOp.running = true
+	s.tapeOp.cancel = cancel
+	s.tapeOp.opType = "format"
+	s.tapeOp.phase = "checking"
+	s.tapeOp.message = "Checking tape status..."
+	s.tapeOp.driveID = driveID
+	s.tapeOp.tapeID = 0
+	s.tapeOp.label = ""
+	s.tapeOp.err = ""
+	s.tapeOp.started = time.Now()
+	s.tapeOp.mu.Unlock()
 
-	// Read current label before formatting (for audit/notification)
-	var oldLabel, oldUUID string
-	if labelData, err := driveSvc.ReadTapeLabel(ctx); err == nil && labelData != nil {
-		oldLabel = labelData.Label
-		oldUUID = labelData.UUID
+	go s.runFormatTapeInDrive(ctx, driveID, devicePath)
+
+	s.respondJSON(w, http.StatusAccepted, map[string]string{
+		"status":  "started",
+		"message": fmt.Sprintf("Format operation started on drive %s", devicePath),
+	})
+}
+
+// runFormatTapeInDrive executes the format-in-drive operation in the background.
+func (s *Server) runFormatTapeInDrive(ctx context.Context, driveID int64, devicePath string) {
+	defer func() {
+		s.tapeOp.mu.Lock()
+		s.tapeOp.running = false
+		s.tapeOp.cancel = nil
+		s.tapeOp.mu.Unlock()
+	}()
+
+	setPhase := func(phase, message string) {
+		s.tapeOp.mu.Lock()
+		s.tapeOp.phase = phase
+		s.tapeOp.message = message
+		s.tapeOp.mu.Unlock()
 		if s.eventBus != nil {
 			s.eventBus.Publish(SystemEvent{
 				Type:     "info",
 				Category: "tape",
-				Title:    "Tape Identified",
-				Message:  fmt.Sprintf("Found tape '%s' (UUID: %s) — proceeding with erase", oldLabel, oldUUID),
+				Title:    "Format Progress",
+				Message:  message,
+				Details:  map[string]interface{}{"drive_id": driveID, "device": devicePath, "phase": phase},
 			})
 		}
-	} else if s.eventBus != nil {
-		s.eventBus.Publish(SystemEvent{
-			Type:     "info",
-			Category: "tape",
-			Title:    "Tape Label Unreadable",
-			Message:  "Could not read existing label — proceeding with erase",
-		})
 	}
 
-	if s.eventBus != nil {
-		s.eventBus.Publish(SystemEvent{
-			Type:     "info",
-			Category: "tape",
-			Title:    "Erasing Tape",
-			Message:  fmt.Sprintf("Running erase command on drive %s...", devicePath),
-		})
-	}
-
-	// Perform the format/erase
-	if err := driveSvc.EraseTape(ctx); err != nil {
+	setError := func(errMsg string) {
+		s.tapeOp.mu.Lock()
+		s.tapeOp.phase = "failed"
+		s.tapeOp.message = errMsg
+		s.tapeOp.err = errMsg
+		s.tapeOp.mu.Unlock()
 		if s.eventBus != nil {
 			s.eventBus.Publish(SystemEvent{
 				Type:     "error",
 				Category: "tape",
 				Title:    "Format Failed",
-				Message:  fmt.Sprintf("Erase command failed on drive %s: %s", devicePath, err.Error()),
+				Message:  errMsg,
+				Details:  map[string]interface{}{"drive_id": driveID, "device": devicePath, "phase": "failed"},
 			})
 		}
-		s.respondError(w, http.StatusInternalServerError, "failed to format tape: "+err.Error())
+	}
+
+	driveSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
+
+	setPhase("checking", fmt.Sprintf("Checking tape in drive %s...", devicePath))
+
+	// Check if tape is loaded
+	loaded, err := driveSvc.IsTapeLoaded(ctx)
+	if err != nil || !loaded {
+		setError("No tape loaded in drive " + devicePath)
 		return
 	}
+
+	// Read current label before formatting (for audit/notification)
+	setPhase("checking", "Reading tape label...")
+	var oldLabel, oldUUID string
+	if labelData, err := driveSvc.ReadTapeLabel(ctx); err == nil && labelData != nil {
+		oldLabel = labelData.Label
+		oldUUID = labelData.UUID
+		s.tapeOp.mu.Lock()
+		s.tapeOp.label = oldLabel
+		s.tapeOp.mu.Unlock()
+	}
+
+	setPhase("erasing", fmt.Sprintf("Erasing tape on drive %s — this may take several minutes...", devicePath))
+
+	// Perform the format/erase
+	if err := driveSvc.EraseTape(ctx); err != nil {
+		setError(fmt.Sprintf("Erase command failed on drive %s: %s", devicePath, err.Error()))
+		return
+	}
+
+	setPhase("updating", "Updating database...")
 
 	// If the tape was in our database, update its status
 	if oldUUID != "" {
 		if _, err := s.db.Exec("UPDATE tapes SET status = 'blank', used_bytes = 0, labeled_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE uuid = ?", oldUUID); err != nil {
 			s.logger.Warn("Failed to update tape status by UUID after format", map[string]interface{}{"error": err.Error(), "uuid": oldUUID})
 		}
-		// Clear unknown tape notification for this UUID
 		s.notifiedUnknownTapes.Delete(oldUUID)
 	}
 	if oldLabel != "" {
 		if _, err := s.db.Exec("UPDATE tapes SET status = 'blank', used_bytes = 0, labeled_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE label = ?", oldLabel); err != nil {
 			s.logger.Warn("Failed to update tape status by label after format", map[string]interface{}{"error": err.Error(), "label": oldLabel})
 		}
-		// Clear unknown tape notification for this label
 		s.notifiedUnknownTapes.Delete(oldLabel)
 	}
 
-	// Publish event
+	s.tapeOp.mu.Lock()
+	s.tapeOp.phase = "complete"
+	s.tapeOp.message = fmt.Sprintf("Tape '%s' formatted/erased in drive %s", oldLabel, devicePath)
+	s.tapeOp.err = ""
+	s.tapeOp.mu.Unlock()
+
 	if s.eventBus != nil {
 		s.eventBus.Publish(SystemEvent{
 			Type:     "success",
@@ -5599,12 +5720,6 @@ func (s *Server) handleFormatTapeInDrive(w http.ResponseWriter, r *http.Request)
 			},
 		})
 	}
-
-	s.respondJSON(w, http.StatusOK, map[string]interface{}{
-		"status":    "formatted",
-		"old_label": oldLabel,
-		"old_uuid":  oldUUID,
-	})
 }
 
 // handleGetLTOTypes returns the LTO capacity mapping
@@ -6942,6 +7057,7 @@ func (s *Server) runBatchLabel(ctx context.Context, devicePath string, driveID i
 		s.batchLabel.mu.Lock()
 		s.batchLabel.progress = i
 		s.batchLabel.current = label
+		s.batchLabel.phase = "waiting"
 		s.batchLabel.message = fmt.Sprintf("Waiting for tape to label as '%s'... Insert tape and close drive.", label)
 		s.batchLabel.mu.Unlock()
 
@@ -6987,6 +7103,9 @@ func (s *Server) runBatchLabel(ctx context.Context, devicePath string, driveID i
 		}
 
 		// Check if tape already has a label
+		s.batchLabel.mu.Lock()
+		s.batchLabel.phase = "checking"
+		s.batchLabel.mu.Unlock()
 		existingLabel, err := driveSvc.ReadTapeLabel(ctx)
 		if err == nil && existingLabel != nil && existingLabel.Label != "" {
 			s.batchLabel.mu.Lock()
@@ -7012,6 +7131,7 @@ func (s *Server) runBatchLabel(ctx context.Context, devicePath string, driveID i
 		tapeUUID := hex.EncodeToString(uuidBytes)
 
 		s.batchLabel.mu.Lock()
+		s.batchLabel.phase = "writing"
 		s.batchLabel.message = fmt.Sprintf("Writing label '%s' to tape...", label)
 		s.batchLabel.mu.Unlock()
 
@@ -7047,6 +7167,9 @@ func (s *Server) runBatchLabel(ctx context.Context, devicePath string, driveID i
 		}
 
 		// Detect tape type
+		s.batchLabel.mu.Lock()
+		s.batchLabel.phase = "detecting"
+		s.batchLabel.mu.Unlock()
 		ltoType := ""
 		if detected, err := driveSvc.DetectTapeType(ctx); err == nil && detected != "" {
 			ltoType = detected
@@ -7057,6 +7180,9 @@ func (s *Server) runBatchLabel(ctx context.Context, devicePath string, driveID i
 		}
 
 		// Create tape record in database
+		s.batchLabel.mu.Lock()
+		s.batchLabel.phase = "saving"
+		s.batchLabel.mu.Unlock()
 		now := time.Now()
 		s.db.Exec(`
 			INSERT INTO tapes (uuid, barcode, label, lto_type, pool_id, status, capacity_bytes, used_bytes, write_count, format_type, labeled_at)
@@ -7065,6 +7191,7 @@ func (s *Server) runBatchLabel(ctx context.Context, devicePath string, driveID i
 
 		s.batchLabel.mu.Lock()
 		s.batchLabel.completed++
+		s.batchLabel.phase = "ejecting"
 		s.batchLabel.message = fmt.Sprintf("Successfully labelled tape as '%s'. Ejecting...", label)
 		s.batchLabel.mu.Unlock()
 
@@ -7199,13 +7326,15 @@ func (s *Server) handleTapesBatchLabel(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleBatchLabelStatus(w http.ResponseWriter, r *http.Request) {
 	s.batchLabel.mu.Lock()
 	status := map[string]interface{}{
-		"running":   s.batchLabel.running,
-		"progress":  s.batchLabel.progress,
-		"total":     s.batchLabel.total,
-		"current":   s.batchLabel.current,
-		"message":   s.batchLabel.message,
-		"completed": s.batchLabel.completed,
-		"failed":    s.batchLabel.failed,
+		"running":       s.batchLabel.running,
+		"progress":      s.batchLabel.progress,
+		"total":         s.batchLabel.total,
+		"current":       s.batchLabel.current,
+		"current_label": s.batchLabel.current,
+		"message":       s.batchLabel.message,
+		"completed":     s.batchLabel.completed,
+		"failed":        s.batchLabel.failed,
+		"phase":         s.batchLabel.phase,
 	}
 	s.batchLabel.mu.Unlock()
 	s.respondJSON(w, http.StatusOK, status)
