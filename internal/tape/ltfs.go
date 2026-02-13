@@ -34,6 +34,18 @@ const driveStabilizationDelay = 3 * time.Second
 // that require additional time to complete the eject mechanics.
 const cartridgeReloadDelay = 10 * time.Second
 
+// setblkMaxRetries is the maximum number of retries for the "mt setblk 0"
+// command after a cartridge reload. Some drives report "Device or resource
+// busy" if the setblk is issued before the firmware has fully released the
+// device after a rewind + load cycle. Retrying with a short delay allows
+// the drive to finish its internal housekeeping.
+const setblkMaxRetries = 5
+
+// setblkRetryDelay is the initial delay between "mt setblk 0" retries.
+// Each subsequent retry doubles this delay (exponential backoff) up to
+// setblkMaxRetries attempts.
+const setblkRetryDelay = 2 * time.Second
+
 // LTFSMetadataFile is the filename written to the root of LTFS volumes for
 // TapeBackarr identification. Defined as a constant for consistency across
 // the codebase.
@@ -248,12 +260,36 @@ func (l *LTFSService) reloadCartridge(ctx context.Context) error {
 
 	// Set the drive to variable block size mode. LTFS uses variable-length
 	// blocks, but some drives retain a stale fixed block size after mkltfs.
-	cmd = exec.CommandContext(ctx, "mt", "-f", l.devicePath, "setblk", "0")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("setblk 0 after reload failed: %s: %w", strings.TrimSpace(string(output)), err)
+	// The drive may still report "Device or resource busy" immediately after
+	// the rewind completes, so retry with exponential backoff.
+	var setblkErr error
+	delay := setblkRetryDelay
+	for attempt := 0; attempt <= setblkMaxRetries; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+			}
+			delay *= 2
+		}
+
+		cmd = exec.CommandContext(ctx, "mt", "-f", l.devicePath, "setblk", "0")
+		output, err := cmd.CombinedOutput()
+		if err == nil {
+			return nil
+		}
+
+		outStr := strings.TrimSpace(string(output))
+		setblkErr = fmt.Errorf("setblk 0 after reload failed: %s: %w", outStr, err)
+
+		// Only retry on transient device-busy errors.
+		if !isDeviceBusy(outStr) {
+			return setblkErr
+		}
 	}
 
-	return nil
+	return setblkErr
 }
 
 // Mount mounts the LTFS tape at the configured mount point.
@@ -638,6 +674,16 @@ func isSGIOError(output string) bool {
 		strings.Contains(lower, "-21700") ||
 		strings.Contains(lower, "no index found in the medium") ||
 		strings.Contains(lower, "medium consistency check failed")
+}
+
+// isDeviceBusy returns true when the output indicates the tape device is
+// temporarily busy. This typically occurs when the drive firmware has not
+// fully released the device after a rewind or load operation, and a
+// subsequent command (e.g. setblk) is issued too quickly.
+func isDeviceBusy(output string) bool {
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "device or resource busy") ||
+		strings.Contains(lower, "device busy")
 }
 
 // verifyByMount attempts to mount and immediately unmount the LTFS volume
