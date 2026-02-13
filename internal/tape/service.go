@@ -26,6 +26,28 @@ const DefaultOperationTimeout = 30 * time.Second
 // ErrOperationTimeout is returned when a tape operation times out
 var ErrOperationTimeout = errors.New("tape operation timed out")
 
+// deviceLocks is a global registry of per-device mutexes.
+// All Service instances that operate on the same device path share the same
+// mutex, preventing concurrent access that would cause "Device or resource busy"
+// errors from the kernel.
+var (
+	deviceLocks   = make(map[string]*sync.Mutex)
+	deviceLocksMu sync.Mutex
+)
+
+// getDeviceLock returns the shared mutex for a given device path, creating one
+// if it does not already exist.
+func getDeviceLock(devicePath string) *sync.Mutex {
+	deviceLocksMu.Lock()
+	defer deviceLocksMu.Unlock()
+	if mu, ok := deviceLocks[devicePath]; ok {
+		return mu
+	}
+	mu := &sync.Mutex{}
+	deviceLocks[devicePath] = mu
+	return mu
+}
+
 // DriveStatus represents the current status of a tape drive
 type DriveStatus struct {
 	DevicePath   string    `json:"device_path"`
@@ -138,6 +160,7 @@ type Service struct {
 	devicePath string
 	blockSize  int
 	labelCache *LabelCache
+	deviceMu   *sync.Mutex // serializes access to the tape device (shared per device path)
 }
 
 // GetBlockSize returns the configured block size
@@ -151,6 +174,7 @@ func NewService(devicePath string, blockSize int) *Service {
 		devicePath: devicePath,
 		blockSize:  blockSize,
 		labelCache: NewLabelCache(),
+		deviceMu:   getDeviceLock(devicePath),
 	}
 }
 
@@ -160,6 +184,7 @@ func NewServiceForDevice(devicePath string, blockSize int) *Service {
 		devicePath: devicePath,
 		blockSize:  blockSize,
 		labelCache: NewLabelCache(),
+		deviceMu:   getDeviceLock(devicePath),
 	}
 }
 
@@ -271,6 +296,14 @@ func ScanDrives(ctx context.Context) ([]map[string]string, error) {
 // GetStatus returns the current status of the tape drive.
 // It enforces a timeout to prevent indefinite blocking when the drive is unresponsive.
 func (s *Service) GetStatus(ctx context.Context) (*DriveStatus, error) {
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
+	return s.getStatusLocked(ctx)
+}
+
+// getStatusLocked is the internal implementation of GetStatus.
+// The caller must hold s.deviceMu.
+func (s *Service) getStatusLocked(ctx context.Context) (*DriveStatus, error) {
 	status := &DriveStatus{
 		DevicePath:  s.devicePath,
 		LastChecked: time.Now(),
@@ -335,6 +368,14 @@ func (s *Service) GetStatus(ctx context.Context) (*DriveStatus, error) {
 // Rewind rewinds the tape to the beginning.
 // It enforces a timeout to prevent indefinite blocking when the drive is unresponsive.
 func (s *Service) Rewind(ctx context.Context) error {
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
+	return s.rewindLocked(ctx)
+}
+
+// rewindLocked is the internal implementation of Rewind.
+// The caller must hold s.deviceMu.
+func (s *Service) rewindLocked(ctx context.Context) error {
 	// Create a context with timeout to prevent indefinite blocking
 	opCtx, cancel := context.WithTimeout(ctx, DefaultOperationTimeout)
 	defer cancel()
@@ -356,6 +397,8 @@ func (s *Service) Rewind(ctx context.Context) error {
 
 // Eject ejects the tape from the drive
 func (s *Service) Eject(ctx context.Context) error {
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
 	cmd := exec.CommandContext(ctx, "mt", "-f", s.devicePath, "eject")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -369,6 +412,8 @@ func (s *Service) Eject(ctx context.Context) error {
 
 // Load loads a tape (if autoloader is available)
 func (s *Service) Load(ctx context.Context) error {
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
 	cmd := exec.CommandContext(ctx, "mt", "-f", s.devicePath, "load")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -382,6 +427,8 @@ func (s *Service) Load(ctx context.Context) error {
 
 // Retension runs a tape retension pass (full wind/rewind cycle)
 func (s *Service) Retension(ctx context.Context) error {
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
 	cmd := exec.CommandContext(ctx, "mt", "-f", s.devicePath, "retension")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -392,8 +439,16 @@ func (s *Service) Retension(ctx context.Context) error {
 
 // SeekToFileNumber positions the tape at the specified file mark
 func (s *Service) SeekToFileNumber(ctx context.Context, fileNum int64) error {
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
+	return s.seekToFileNumberLocked(ctx, fileNum)
+}
+
+// seekToFileNumberLocked is the internal implementation of SeekToFileNumber.
+// The caller must hold s.deviceMu.
+func (s *Service) seekToFileNumberLocked(ctx context.Context, fileNum int64) error {
 	// First rewind
-	if err := s.Rewind(ctx); err != nil {
+	if err := s.rewindLocked(ctx); err != nil {
 		return err
 	}
 
@@ -413,7 +468,9 @@ func (s *Service) SeekToFileNumber(ctx context.Context, fileNum int64) error {
 // GetTapePosition returns the current file number and block number of the tape head
 // by querying the drive status via mt.
 func (s *Service) GetTapePosition(ctx context.Context) (fileNumber, blockNumber int64, err error) {
-	status, err := s.GetStatus(ctx)
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
+	status, err := s.getStatusLocked(ctx)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to get tape status: %w", err)
 	}
@@ -425,6 +482,8 @@ func (s *Service) GetTapePosition(ctx context.Context) (fileNumber, blockNumber 
 
 // SeekToBlock positions the tape at the specified block
 func (s *Service) SeekToBlock(ctx context.Context, blockNum int64) error {
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
 	cmd := exec.CommandContext(ctx, "mt", "-f", s.devicePath, "seek", strconv.FormatInt(blockNum, 10))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -435,6 +494,14 @@ func (s *Service) SeekToBlock(ctx context.Context, blockNum int64) error {
 
 // WriteFileMark writes a file mark on the tape
 func (s *Service) WriteFileMark(ctx context.Context) error {
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
+	return s.writeFileMarkLocked(ctx)
+}
+
+// writeFileMarkLocked is the internal implementation of WriteFileMark.
+// The caller must hold s.deviceMu.
+func (s *Service) writeFileMarkLocked(ctx context.Context) error {
 	cmd := exec.CommandContext(ctx, "mt", "-f", s.devicePath, "weof", "1")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -450,6 +517,14 @@ const (
 
 // SetBlockSize sets the tape block size
 func (s *Service) SetBlockSize(ctx context.Context, size int) error {
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
+	return s.setBlockSizeLocked(ctx, size)
+}
+
+// setBlockSizeLocked is the internal implementation of SetBlockSize.
+// The caller must hold s.deviceMu.
+func (s *Service) setBlockSizeLocked(ctx context.Context, size int) error {
 	cmd := exec.CommandContext(ctx, "mt", "-f", s.devicePath, "setblk", strconv.Itoa(size))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -477,17 +552,20 @@ const (
 // ReadTapeLabel reads the label from the beginning of the tape.
 // It enforces a timeout to prevent indefinite blocking when the drive is unresponsive.
 func (s *Service) ReadTapeLabel(ctx context.Context) (*TapeLabelData, error) {
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
+
 	// Rewind to beginning (already has its own timeout)
-	if err := s.Rewind(ctx); err != nil {
+	if err := s.rewindLocked(ctx); err != nil {
 		return nil, err
 	}
 
 	// Set variable block size mode so the 512-byte label block can be read
 	// regardless of the drive's configured fixed block size.
-	if err := s.SetBlockSize(ctx, 0); err != nil {
+	if err := s.setBlockSizeLocked(ctx, 0); err != nil {
 		return nil, fmt.Errorf("failed to set variable block size for label read: %w", err)
 	}
-	defer s.SetBlockSize(ctx, s.blockSize)
+	defer s.setBlockSizeLocked(ctx, s.blockSize)
 
 	// Create a context with timeout for the dd read operation
 	opCtx, cancel := context.WithTimeout(ctx, DefaultOperationTimeout)
@@ -543,17 +621,20 @@ func (s *Service) ReadTapeLabel(ctx context.Context) (*TapeLabelData, error) {
 // WriteTapeLabel writes a label to the beginning of the tape
 // Optional metadata parameters: encFingerprint, compressionType
 func (s *Service) WriteTapeLabel(ctx context.Context, label string, uuid string, pool string, metadata ...string) error {
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
+
 	// Rewind to beginning
-	if err := s.Rewind(ctx); err != nil {
+	if err := s.rewindLocked(ctx); err != nil {
 		return err
 	}
 
 	// Set variable block size mode so the 512-byte label block can be written
 	// regardless of the drive's configured fixed block size.
-	if err := s.SetBlockSize(ctx, 0); err != nil {
+	if err := s.setBlockSizeLocked(ctx, 0); err != nil {
 		return fmt.Errorf("failed to set variable block size for label write: %w", err)
 	}
-	defer s.SetBlockSize(ctx, s.blockSize)
+	defer s.setBlockSizeLocked(ctx, s.blockSize)
 
 	// Create label block with UUID and pool info
 	fields := []string{labelMagic, label, uuid, pool, strconv.FormatInt(time.Now().Unix(), 10)}
@@ -579,7 +660,7 @@ func (s *Service) WriteTapeLabel(ctx context.Context, label string, uuid string,
 	}
 
 	// Write file mark after label
-	if err := s.WriteFileMark(ctx); err != nil {
+	if err := s.writeFileMarkLocked(ctx); err != nil {
 		return err
 	}
 	// Update cache with newly written label
@@ -603,8 +684,11 @@ func (s *Service) WriteTapeLabel(ctx context.Context, label string, uuid string,
 
 // EraseTape erases/formats the tape, removing all data including labels
 func (s *Service) EraseTape(ctx context.Context) error {
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
+
 	// Rewind first
-	if err := s.Rewind(ctx); err != nil {
+	if err := s.rewindLocked(ctx); err != nil {
 		return err
 	}
 
@@ -619,11 +703,14 @@ func (s *Service) EraseTape(ctx context.Context) error {
 		s.labelCache.Invalidate(s.devicePath)
 	}
 	// Rewind again after erase
-	return s.Rewind(ctx)
+	return s.rewindLocked(ctx)
 }
 
 // GetDriveInfo returns drive information using sg_inq
 func (s *Service) GetDriveInfo(ctx context.Context) (map[string]string, error) {
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
+
 	info := make(map[string]string)
 
 	// Try to get device info using sg_inq
@@ -686,7 +773,15 @@ func (s *Service) GetDriveInfo(ctx context.Context) (map[string]string, error) {
 
 // IsTapeLoaded checks if a tape is loaded in the drive
 func (s *Service) IsTapeLoaded(ctx context.Context) (bool, error) {
-	status, err := s.GetStatus(ctx)
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
+	return s.isTapeLoadedLocked(ctx)
+}
+
+// isTapeLoadedLocked is the internal implementation of IsTapeLoaded.
+// The caller must hold s.deviceMu.
+func (s *Service) isTapeLoadedLocked(ctx context.Context) (bool, error) {
+	status, err := s.getStatusLocked(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -697,7 +792,9 @@ func (s *Service) IsTapeLoaded(ctx context.Context) (bool, error) {
 // by reading the density code from the mt status output.
 // Returns the LTO type string (e.g., "LTO-5") or empty string if detection fails.
 func (s *Service) DetectTapeType(ctx context.Context) (string, error) {
-	status, err := s.GetStatus(ctx)
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
+	status, err := s.getStatusLocked(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -747,12 +844,15 @@ func (s *Service) WaitForTape(ctx context.Context, timeout time.Duration) error 
 // ListTapeContents lists the contents of a tape using tar, starting from current position.
 // It reads at most maxEntries files. If encrypted is true, returns an indicator instead.
 func (s *Service) ListTapeContents(ctx context.Context, maxEntries int) ([]TapeContentEntry, error) {
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
+
 	if maxEntries <= 0 {
 		maxEntries = 1000
 	}
 
 	// Seek past the label to file number 1
-	if err := s.SeekToFileNumber(ctx, 1); err != nil {
+	if err := s.seekToFileNumberLocked(ctx, 1); err != nil {
 		return nil, fmt.Errorf("failed to seek past label: %w", err)
 	}
 
@@ -815,6 +915,8 @@ type DriveStatisticsData struct {
 // preparing it for a cleaning cartridge to be loaded. Once a cleaning tape is inserted,
 // the drive automatically detects it and initiates a cleaning cycle.
 func (s *Service) ForceClean(ctx context.Context) error {
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
 	// rewoffl (rewind-offline) ejects the tape, which is the preparatory step for
 	// loading a cleaning cartridge. LTO drives auto-detect cleaning tapes on load.
 	cmd := exec.CommandContext(ctx, "mt", "-f", s.devicePath, "rewoffl")
@@ -918,6 +1020,9 @@ func UnmarshalTOC(data []byte) (*TapeTOC, error) {
 // The TOC is written as raw JSON padded to 64KB block boundaries, followed by a file mark.
 // This should be called after writing all backup data and its trailing file mark.
 func (s *Service) WriteTOC(ctx context.Context, toc *TapeTOC) error {
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
+
 	tocData, err := json.MarshalIndent(toc, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal TOC: %w", err)
@@ -942,7 +1047,7 @@ func (s *Service) WriteTOC(ctx context.Context, toc *TapeTOC) error {
 	}
 
 	// Write a file mark after the TOC data
-	if err := s.WriteFileMark(ctx); err != nil {
+	if err := s.writeFileMarkLocked(ctx); err != nil {
 		return fmt.Errorf("failed to write file mark after TOC: %w", err)
 	}
 
@@ -951,6 +1056,9 @@ func (s *Service) WriteTOC(ctx context.Context, toc *TapeTOC) error {
 
 // GetDriveStatistics collects drive statistics from tapeinfo and sg_logs
 func (s *Service) GetDriveStatistics(ctx context.Context) (*DriveStatisticsData, error) {
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
+
 	stats := &DriveStatisticsData{}
 
 	// Try tapeinfo first
@@ -1027,6 +1135,9 @@ func (s *Service) parseTapeInfoStats(output string, stats *DriveStatisticsData) 
 // The caller must position the tape to the TOC file section before calling this method.
 // Typically, the TOC is at file #2 (after the label at #0 and backup data at #1).
 func (s *Service) ReadTOC(ctx context.Context) (*TapeTOC, error) {
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
+
 	// Read TOC data from tape using dd with a reasonable max size (16MB)
 	cmd := exec.CommandContext(ctx, "dd",
 		fmt.Sprintf("if=%s", s.devicePath),
@@ -1183,6 +1294,9 @@ type HardwareEncryptionStatus struct {
 // using the stenc utility. keyData is the raw 256-bit key (32 bytes).
 // The key is passed via a temporary file that is securely removed after use.
 func (s *Service) SetHardwareEncryption(ctx context.Context, keyData []byte) error {
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
+
 	if len(keyData) != 32 {
 		return fmt.Errorf("hardware encryption requires a 256-bit (32-byte) key, got %d bytes", len(keyData))
 	}
@@ -1221,6 +1335,9 @@ func (s *Service) SetHardwareEncryption(ctx context.Context, keyData []byte) err
 
 // ClearHardwareEncryption disables hardware encryption on the tape drive.
 func (s *Service) ClearHardwareEncryption(ctx context.Context) error {
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
+
 	opCtx, cancel := context.WithTimeout(ctx, DefaultOperationTimeout)
 	defer cancel()
 
@@ -1238,6 +1355,9 @@ func (s *Service) ClearHardwareEncryption(ctx context.Context) error {
 
 // GetHardwareEncryptionStatus returns the current hardware encryption status of the drive.
 func (s *Service) GetHardwareEncryptionStatus(ctx context.Context) (*HardwareEncryptionStatus, error) {
+	s.deviceMu.Lock()
+	defer s.deviceMu.Unlock()
+
 	status := &HardwareEncryptionStatus{
 		Mode: "off",
 	}
