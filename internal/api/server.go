@@ -917,7 +917,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 func (s *Server) adminOnlyMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		claims := r.Context().Value("claims").(*auth.Claims)
+		claims, ok := r.Context().Value("claims").(*auth.Claims)
+		if !ok || claims == nil {
+			s.respondError(w, http.StatusUnauthorized, "missing authentication")
+			return
+		}
 		if claims.Role != models.RoleAdmin {
 			s.respondError(w, http.StatusForbidden, "admin access required")
 			return
@@ -1086,6 +1090,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 					if labelData.CompressionType != "" {
 						stats.LoadedTapeCompression = labelData.CompressionType
 					}
+					stats.LoadedTapeFormatType = labelData.FormatType
 					cache.Set(s.tapeService.DevicePath(), labelData, true)
 				}
 			}
@@ -2768,12 +2773,13 @@ func (s *Server) handleSetDriveHardwareEncryption(w http.ResponseWriter, r *http
 		})
 	}
 
-	claims := r.Context().Value("claims").(*auth.Claims)
-	s.db.Exec(`
-		INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details)
-		VALUES (?, ?, ?, ?, ?)
-	`, claims.UserID, "enable_hw_encryption", "tape_drive", driveID,
-		fmt.Sprintf("Enabled hardware encryption with key ID %d", req.EncryptionKeyID))
+	if claims, ok := r.Context().Value("claims").(*auth.Claims); ok && claims != nil {
+		s.db.Exec(`
+			INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details)
+			VALUES (?, ?, ?, ?, ?)
+		`, claims.UserID, "enable_hw_encryption", "tape_drive", driveID,
+			fmt.Sprintf("Enabled hardware encryption with key ID %d", req.EncryptionKeyID))
+	}
 
 	s.respondJSON(w, http.StatusOK, map[string]interface{}{
 		"message":           "Hardware encryption enabled on drive",
@@ -2821,11 +2827,12 @@ func (s *Server) handleClearDriveHardwareEncryption(w http.ResponseWriter, r *ht
 		})
 	}
 
-	claims := r.Context().Value("claims").(*auth.Claims)
-	s.db.Exec(`
-		INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details)
-		VALUES (?, ?, ?, ?, ?)
-	`, claims.UserID, "disable_hw_encryption", "tape_drive", driveID, "Disabled hardware encryption")
+	if claims, ok := r.Context().Value("claims").(*auth.Claims); ok && claims != nil {
+		s.db.Exec(`
+			INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details)
+			VALUES (?, ?, ?, ?, ?)
+		`, claims.UserID, "disable_hw_encryption", "tape_drive", driveID, "Disabled hardware encryption")
+	}
 
 	s.respondJSON(w, http.StatusOK, map[string]string{
 		"message": "Hardware encryption disabled on drive",
@@ -3453,6 +3460,16 @@ func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 
 		// Run backup in background
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					if s.logger != nil {
+						s.logger.Error("Panic in backup goroutine", map[string]interface{}{
+							"job_id": job.ID,
+							"panic":  fmt.Sprintf("%v", r),
+						})
+					}
+				}
+			}()
 			ctx := context.Background()
 			if _, err := s.backupService.RunBackup(ctx, &job, &source, tapeID, backupType); err != nil {
 				s.logger.Error("Backup job failed", map[string]interface{}{
@@ -3481,6 +3498,16 @@ func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 
 	// Run backup in background with explicit tape
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if s.logger != nil {
+					s.logger.Error("Panic in backup goroutine", map[string]interface{}{
+						"job_id": job.ID,
+						"panic":  fmt.Sprintf("%v", r),
+					})
+				}
+			}
+		}()
 		ctx := context.Background()
 		if _, err := s.backupService.RunBackup(ctx, &job, &source, tapeID, backupType); err != nil {
 			s.logger.Error("Backup job failed", map[string]interface{}{
@@ -3779,6 +3806,16 @@ func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 
 	// Run backup in background with optional resume state
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if s.logger != nil {
+					s.logger.Error("Panic in backup goroutine", map[string]interface{}{
+						"job_id": job.ID,
+						"panic":  fmt.Sprintf("%v", r),
+					})
+				}
+			}
+		}()
 		ctx := context.Background()
 		var err error
 		if resumeState != "" {
@@ -4463,7 +4500,19 @@ func (s *Server) handleBackupDatabase(w http.ResponseWriter, r *http.Request) {
 	backupID, _ := result.LastInsertId()
 
 	// Run backup in background
-	go s.runDatabaseBackup(backupID, req.TapeID, devicePath)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if s.logger != nil {
+					s.logger.Error("Panic in database backup goroutine", map[string]interface{}{
+						"backup_id": backupID,
+						"panic":     fmt.Sprintf("%v", r),
+					})
+				}
+			}
+		}()
+		s.runDatabaseBackup(backupID, req.TapeID, devicePath)
+	}()
 
 	s.respondJSON(w, http.StatusAccepted, map[string]interface{}{
 		"id":      backupID,
@@ -5256,7 +5305,7 @@ func (s *Server) handleFormatTape(w http.ResponseWriter, r *http.Request) {
 	// Reset tape in database to blank state
 	var tapeUUID, tapeLabel string
 	_ = s.db.QueryRow("SELECT uuid, label FROM tapes WHERE id = ?", id).Scan(&tapeUUID, &tapeLabel)
-	
+
 	_, err = s.db.Exec(`
 		UPDATE tapes SET status = 'blank', used_bytes = 0, write_count = 0,
 		       last_written_at = NULL, labeled_at = NULL, updated_at = CURRENT_TIMESTAMP
@@ -5614,7 +5663,11 @@ func (s *Server) handleGetLTOTypes(w http.ResponseWriter, r *http.Request) {
 
 // handleChangePassword allows any authenticated user to change their own password
 func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
-	claims := r.Context().Value("claims").(*auth.Claims)
+	claims, ok := r.Context().Value("claims").(*auth.Claims)
+	if !ok || claims == nil {
+		s.respondError(w, http.StatusUnauthorized, "missing authentication")
+		return
+	}
 
 	var req struct {
 		OldPassword string `json:"old_password"`
@@ -6631,11 +6684,12 @@ func (s *Server) handleCreateEncryptionKey(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Log the audit
-	claims := r.Context().Value("claims").(*auth.Claims)
-	s.db.Exec(`
-		INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details)
-		VALUES (?, ?, ?, ?, ?)
-	`, claims.UserID, "create", "encryption_key", key.ID, "Created encryption key: "+req.Name)
+	if claims, ok := r.Context().Value("claims").(*auth.Claims); ok && claims != nil {
+		s.db.Exec(`
+			INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details)
+			VALUES (?, ?, ?, ?, ?)
+		`, claims.UserID, "create", "encryption_key", key.ID, "Created encryption key: "+req.Name)
+	}
 
 	s.respondJSON(w, http.StatusCreated, map[string]interface{}{
 		"key":        key,
@@ -6668,11 +6722,12 @@ func (s *Server) handleImportEncryptionKey(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Log the audit
-	claims := r.Context().Value("claims").(*auth.Claims)
-	s.db.Exec(`
-		INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details)
-		VALUES (?, ?, ?, ?, ?)
-	`, claims.UserID, "import", "encryption_key", key.ID, "Imported encryption key: "+req.Name)
+	if claims, ok := r.Context().Value("claims").(*auth.Claims); ok && claims != nil {
+		s.db.Exec(`
+			INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details)
+			VALUES (?, ?, ?, ?, ?)
+		`, claims.UserID, "import", "encryption_key", key.ID, "Imported encryption key: "+req.Name)
+	}
 
 	s.respondJSON(w, http.StatusCreated, map[string]interface{}{
 		"key":     key,
@@ -6693,11 +6748,12 @@ func (s *Server) handleDeleteEncryptionKey(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Log the audit
-	claims := r.Context().Value("claims").(*auth.Claims)
-	s.db.Exec(`
-		INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details)
-		VALUES (?, ?, ?, ?, ?)
-	`, claims.UserID, "delete", "encryption_key", id, "Deleted encryption key")
+	if claims, ok := r.Context().Value("claims").(*auth.Claims); ok && claims != nil {
+		s.db.Exec(`
+			INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details)
+			VALUES (?, ?, ?, ?, ?)
+		`, claims.UserID, "delete", "encryption_key", id, "Deleted encryption key")
+	}
 
 	s.respondJSON(w, http.StatusOK, map[string]string{
 		"message": "Encryption key deleted successfully",
@@ -6712,11 +6768,12 @@ func (s *Server) handleGetKeySheet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log the audit
-	claims := r.Context().Value("claims").(*auth.Claims)
-	s.db.Exec(`
-		INSERT INTO audit_logs (user_id, action, resource_type, details)
-		VALUES (?, ?, ?, ?)
-	`, claims.UserID, "export", "encryption_keys", "Generated key sheet for paper backup")
+	if claims, ok := r.Context().Value("claims").(*auth.Claims); ok && claims != nil {
+		s.db.Exec(`
+			INSERT INTO audit_logs (user_id, action, resource_type, details)
+			VALUES (?, ?, ?, ?)
+		`, claims.UserID, "export", "encryption_keys", "Generated key sheet for paper backup")
+	}
 
 	s.respondJSON(w, http.StatusOK, sheet)
 }
@@ -6729,11 +6786,12 @@ func (s *Server) handleGetKeySheetText(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log the audit
-	claims := r.Context().Value("claims").(*auth.Claims)
-	s.db.Exec(`
-		INSERT INTO audit_logs (user_id, action, resource_type, details)
-		VALUES (?, ?, ?, ?)
-	`, claims.UserID, "export", "encryption_keys", "Generated key sheet text for printing")
+	if claims, ok := r.Context().Value("claims").(*auth.Claims); ok && claims != nil {
+		s.db.Exec(`
+			INSERT INTO audit_logs (user_id, action, resource_type, details)
+			VALUES (?, ?, ?, ?)
+		`, claims.UserID, "export", "encryption_keys", "Generated key sheet text for printing")
+	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Content-Disposition", "attachment; filename=tapebackarr-keysheet.txt")
@@ -6894,7 +6952,23 @@ func (s *Server) handleBatchLabel(w http.ResponseWriter, r *http.Request) {
 	s.batchLabel.mu.Unlock()
 
 	// Start batch labelling in background
-	go s.runBatchLabel(ctx, devicePath, driveID, req.Prefix, req.StartNum, req.Count, req.Digits, req.PoolID, req.FormatType)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if s.logger != nil {
+					s.logger.Error("Panic in batch label goroutine", map[string]interface{}{
+						"drive_id": driveID,
+						"panic":    fmt.Sprintf("%v", r),
+					})
+				}
+				s.batchLabel.mu.Lock()
+				s.batchLabel.running = false
+				s.batchLabel.cancel = nil
+				s.batchLabel.mu.Unlock()
+			}
+		}()
+		s.runBatchLabel(ctx, devicePath, driveID, req.Prefix, req.StartNum, req.Count, req.Digits, req.PoolID, req.FormatType)
+	}()
 
 	s.respondJSON(w, http.StatusAccepted, map[string]interface{}{
 		"status":  "started",
@@ -7187,7 +7261,23 @@ func (s *Server) handleTapesBatchLabel(w http.ResponseWriter, r *http.Request) {
 	s.batchLabel.failed = 0
 	s.batchLabel.mu.Unlock()
 
-	go s.runBatchLabel(ctx, devicePath, req.DriveID, req.Prefix, req.StartNum, req.Count, req.Digits, req.PoolID, req.FormatType)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if s.logger != nil {
+					s.logger.Error("Panic in batch label goroutine", map[string]interface{}{
+						"drive_id": req.DriveID,
+						"panic":    fmt.Sprintf("%v", r),
+					})
+				}
+				s.batchLabel.mu.Lock()
+				s.batchLabel.running = false
+				s.batchLabel.cancel = nil
+				s.batchLabel.mu.Unlock()
+			}
+		}()
+		s.runBatchLabel(ctx, devicePath, req.DriveID, req.Prefix, req.StartNum, req.Count, req.Digits, req.PoolID, req.FormatType)
+	}()
 
 	s.respondJSON(w, http.StatusAccepted, map[string]interface{}{
 		"status":  "started",
@@ -7570,6 +7660,15 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 
 	// Perform restart asynchronously after response is sent
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if s.logger != nil {
+					s.logger.Error("Panic in restart goroutine", map[string]interface{}{
+						"panic": fmt.Sprintf("%v", r),
+					})
+				}
+			}
+		}()
 		time.Sleep(500 * time.Millisecond)
 		// Try systemctl first (standard deployment)
 		cmd := exec.Command("systemctl", "restart", "tapebackarr")
@@ -8341,7 +8440,23 @@ func (s *Server) handleLTFSFormat(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	go s.runLTFSFormat(ctx, devicePath, mountPoint, req.DriveID, req.Label, req.UUID, req.Pool, auditClaims, auditRemote)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if s.logger != nil {
+					s.logger.Error("Panic in LTFS format goroutine", map[string]interface{}{
+						"drive_id": req.DriveID,
+						"panic":    fmt.Sprintf("%v", r),
+					})
+				}
+				s.ltfsFormat.mu.Lock()
+				s.ltfsFormat.running = false
+				s.ltfsFormat.cancel = nil
+				s.ltfsFormat.mu.Unlock()
+			}
+		}()
+		s.runLTFSFormat(ctx, devicePath, mountPoint, req.DriveID, req.Label, req.UUID, req.Pool, auditClaims, auditRemote)
+	}()
 
 	s.respondJSON(w, http.StatusAccepted, map[string]string{
 		"message": "LTFS format started — this may take up to 2 hours",
