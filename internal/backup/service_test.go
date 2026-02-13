@@ -2091,3 +2091,140 @@ func TestHwEncryptionFieldsInDB(t *testing.T) {
 		t.Errorf("expected hw_encryption_key_id to be 1, got %v", bs.HwEncryptionKeyID)
 	}
 }
+
+// TestBlockOffsetSetAfterAsyncChecksums verifies that when computeChecksumsAsync
+// runs concurrently, waiting for it to complete before updating block_offset
+// ensures all catalog entries have their block_offset properly set.
+// This reproduces the race condition where finishTape would try to UPDATE
+// block_offset on catalog entries that hadn't been inserted yet.
+func TestBlockOffsetSetAfterAsyncChecksums(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a real database
+	dbPath := filepath.Join(tmpDir, "test.db")
+	db, err := database.New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.Migrate(); err != nil {
+		t.Fatalf("failed to migrate database: %v", err)
+	}
+
+	// Insert prerequisite records
+	_, err = db.Exec("INSERT INTO tape_pools (name) VALUES ('test-pool')")
+	if err != nil {
+		t.Fatalf("failed to insert pool: %v", err)
+	}
+	_, err = db.Exec("INSERT INTO tapes (uuid, barcode, label, pool_id, status, capacity_bytes, used_bytes) VALUES ('uuid1', 'T001', 'T001', 1, 'active', 1500000000000, 0)")
+	if err != nil {
+		t.Fatalf("failed to insert tape: %v", err)
+	}
+	_, err = db.Exec("INSERT INTO backup_sources (name, source_type, path) VALUES ('test-src', 'local', ?)", tmpDir)
+	if err != nil {
+		t.Fatalf("failed to insert source: %v", err)
+	}
+	_, err = db.Exec("INSERT INTO backup_jobs (name, source_id, pool_id, backup_type, schedule_cron, retention_days) VALUES ('test-job', 1, 1, 'full', '', 30)")
+	if err != nil {
+		t.Fatalf("failed to insert job: %v", err)
+	}
+	result, err := db.Exec("INSERT INTO backup_sets (job_id, tape_id, backup_type, start_time, status) VALUES (1, 1, 'full', CURRENT_TIMESTAMP, 'running')")
+	if err != nil {
+		t.Fatalf("failed to insert backup set: %v", err)
+	}
+	backupSetID, _ := result.LastInsertId()
+
+	// Create test files
+	sourceDir := filepath.Join(tmpDir, "source")
+	os.MkdirAll(sourceDir, 0755)
+
+	const numFiles = 10
+	files := make([]FileInfo, numFiles)
+	for i := 0; i < numFiles; i++ {
+		fileName := fmt.Sprintf("file%04d.txt", i)
+		filePath := filepath.Join(sourceDir, fileName)
+		os.WriteFile(filePath, []byte("test content"), 0644)
+		files[i] = FileInfo{Path: filePath, Size: 12, Mode: 0644, ModTime: time.Now()}
+	}
+
+	svc := &Service{db: db}
+	checksums := &sync.Map{}
+
+	// Launch computeChecksumsAsync in a goroutine with done channel (matching production code)
+	checksumDone := make(chan struct{})
+	go func() {
+		defer close(checksumDone)
+		svc.computeChecksumsAsync(context.Background(), files, checksums, backupSetID, sourceDir)
+	}()
+
+	// Wait for all catalog entries to be inserted (the fix)
+	<-checksumDone
+
+	// Now update block_offset — simulating what finishTape does
+	const tarHeaderOverhead = 1024
+	const offsetBatchSize = 500
+	var cumulativeOffset int64
+	for i := 0; i < len(files); i += offsetBatchSize {
+		end := i + offsetBatchSize
+		if end > len(files) {
+			end = len(files)
+		}
+		batch := files[i:end]
+
+		tx, err := svc.db.Begin()
+		if err != nil {
+			t.Fatalf("failed to begin transaction: %v", err)
+		}
+		stmt, err := tx.Prepare(`UPDATE catalog_entries SET block_offset = ? WHERE backup_set_id = ? AND file_path = ?`)
+		if err != nil {
+			tx.Rollback()
+			t.Fatalf("failed to prepare statement: %v", err)
+		}
+		for _, f := range batch {
+			relPath, _ := filepath.Rel(sourceDir, f.Path)
+			if _, err := stmt.Exec(cumulativeOffset, backupSetID, relPath); err != nil {
+				t.Errorf("failed to update block_offset: %v", err)
+			}
+			cumulativeOffset += f.Size + tarHeaderOverhead
+		}
+		stmt.Close()
+		tx.Commit()
+	}
+
+	// Verify ALL entries have non-NULL block_offset (the bug was that they'd be NULL/0)
+	var nullCount int
+	err = db.QueryRow("SELECT COUNT(*) FROM catalog_entries WHERE backup_set_id = ? AND block_offset IS NULL", backupSetID).Scan(&nullCount)
+	if err != nil {
+		t.Fatalf("failed to query null block_offset count: %v", err)
+	}
+	if nullCount != 0 {
+		t.Errorf("expected 0 catalog entries with NULL block_offset, got %d", nullCount)
+	}
+
+	// Verify block_offset values are correct cumulative offsets
+	rows, err := db.Query("SELECT file_path, block_offset FROM catalog_entries WHERE backup_set_id = ? ORDER BY file_path", backupSetID)
+	if err != nil {
+		t.Fatalf("failed to query catalog entries: %v", err)
+	}
+	defer rows.Close()
+
+	expectedOffset := int64(0)
+	count := 0
+	for rows.Next() {
+		var filePath string
+		var blockOffset int64
+		if err := rows.Scan(&filePath, &blockOffset); err != nil {
+			t.Fatalf("failed to scan row: %v", err)
+		}
+		if blockOffset != expectedOffset {
+			t.Errorf("file %s: expected block_offset %d, got %d", filePath, expectedOffset, blockOffset)
+		}
+		expectedOffset += 12 + tarHeaderOverhead
+		count++
+	}
+
+	if count != numFiles {
+		t.Errorf("expected %d catalog entries, got %d", numFiles, count)
+	}
+}

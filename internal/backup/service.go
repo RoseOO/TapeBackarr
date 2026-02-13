@@ -2113,7 +2113,11 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 	// to the database incrementally as they complete — no post-streaming
 	// cataloging bottleneck. The TOC file list is written to tape at the end.
 	fileChecksums := &sync.Map{}
-	go s.computeChecksumsAsync(ctx, files, fileChecksums, backupSetID, source.Path)
+	checksumDone := make(chan struct{})
+	go func() {
+		defer close(checksumDone)
+		s.computeChecksumsAsync(ctx, files, fileChecksums, backupSetID, source.Path)
+	}()
 
 	// Check if all files fit on the current tape
 	remainingCapacity := tapeCapacity - tapeUsed
@@ -2137,6 +2141,9 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 			streamFailed(err.Error())
 			return nil, fmt.Errorf("failed to stream to tape: %w", err)
 		}
+
+		// Wait for all catalog entries to be inserted before updating block_offset
+		<-checksumDone
 
 		if err := s.finishTape(finishTapeParams{
 			ctx: ctx, job: job, source: source,
@@ -2240,6 +2247,9 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 					streamFailed(err.Error())
 					return nil, fmt.Errorf("failed to stream to tape %s: %w", currentLabel, err)
 				}
+
+				// Wait for all catalog entries to be inserted before updating block_offset
+				<-checksumDone
 
 				// Finish this tape with its per-tape TOC
 				if err := s.finishTape(finishTapeParams{
@@ -3089,7 +3099,7 @@ func (s *Service) SearchCatalog(ctx context.Context, pattern string, limit int) 
 
 	rows, err := s.db.Query(`
 		SELECT ce.id, ce.backup_set_id, ce.file_path, ce.file_size, ce.file_mode, ce.mod_time,
-		       ce.checksum, ce.block_offset, COALESCE(bs.tape_id, 0), COALESCE(t.label, '')
+		       COALESCE(ce.checksum, ''), COALESCE(ce.block_offset, 0), COALESCE(bs.tape_id, 0), COALESCE(t.label, '')
 		FROM catalog_entries ce
 		LEFT JOIN backup_sets bs ON ce.backup_set_id = bs.id
 		LEFT JOIN tapes t ON bs.tape_id = t.id
