@@ -25,6 +25,13 @@ const LTFSDefaultMountPoint = "/mnt/ltfs"
 // The 1-second delay is conservative and works across various LTO drive models.
 const driveStabilizationDelay = 1 * time.Second
 
+// cartridgeReloadDelay is the delay between ejecting a tape (rewoffl) and
+// reloading it (load) during a post-format cartridge reload. Some drives
+// report "not ready" if the load is issued too quickly after the eject
+// because the mechanical eject cycle has not fully completed. The 3-second
+// pause is conservative and accommodates slower LTO drive models.
+const cartridgeReloadDelay = 3 * time.Second
+
 // LTFSMetadataFile is the filename written to the root of LTFS volumes for
 // TapeBackarr identification. Defined as a constant for consistency across
 // the codebase.
@@ -217,7 +224,7 @@ func (l *LTFSService) reloadCartridge(ctx context.Context) error {
 	// Allow the drive mechanics to fully complete the eject before
 	// issuing the load. Without this pause some drives report "not
 	// ready" on the subsequent load command.
-	time.Sleep(3 * time.Second)
+	time.Sleep(cartridgeReloadDelay)
 
 	// Reload the cartridge so the drive re-reads partition labels from
 	// scratch with a clean internal state.
