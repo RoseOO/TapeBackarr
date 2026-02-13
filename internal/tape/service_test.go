@@ -806,3 +806,35 @@ func TestHardwareEncryptionStatusDefaults(t *testing.T) {
 		t.Errorf("expected Mode to be 'off', got %q", status.Mode)
 	}
 }
+
+func TestGetDeviceLockSameDevice(t *testing.T) {
+	mu1 := getDeviceLock("/dev/nst0")
+	mu2 := getDeviceLock("/dev/nst0")
+	if mu1 != mu2 {
+		t.Error("expected same mutex for same device path")
+	}
+}
+
+func TestGetDeviceLockDifferentDevices(t *testing.T) {
+	mu1 := getDeviceLock("/dev/nst0")
+	mu2 := getDeviceLock("/dev/nst1")
+	if mu1 == mu2 {
+		t.Error("expected different mutexes for different device paths")
+	}
+}
+
+func TestServiceSharesDeviceLock(t *testing.T) {
+	svc1 := NewService("/dev/nst99", 65536)
+	svc2 := NewServiceForDevice("/dev/nst99", 65536)
+	if svc1.deviceMu != svc2.deviceMu {
+		t.Error("expected services for the same device to share the same mutex")
+	}
+}
+
+func TestServiceDifferentDeviceLock(t *testing.T) {
+	svc1 := NewService("/dev/nst98", 65536)
+	svc2 := NewServiceForDevice("/dev/nst97", 65536)
+	if svc1.deviceMu == svc2.deviceMu {
+		t.Error("expected services for different devices to have different mutexes")
+	}
+}
