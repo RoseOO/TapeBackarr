@@ -28,9 +28,9 @@ const driveStabilizationDelay = 1 * time.Second
 // cartridgeReloadDelay is the delay between ejecting a tape (rewoffl) and
 // reloading it (load) during a post-format cartridge reload. Some drives
 // report "not ready" if the load is issued too quickly after the eject
-// because the mechanical eject cycle has not fully completed. The 3-second
+// because the mechanical eject cycle has not fully completed. The 5-second
 // pause is conservative and accommodates slower LTO drive models.
-const cartridgeReloadDelay = 3 * time.Second
+const cartridgeReloadDelay = 5 * time.Second
 
 // LTFSMetadataFile is the filename written to the root of LTFS volumes for
 // TapeBackarr identification. Defined as a constant for consistency across
@@ -213,7 +213,13 @@ func (l *LTFSService) waitForRewindComplete(ctx context.Context) error {
 // SG_IO READ ioctl failures (EINVAL / error -21700) when ltfsck or ltfs
 // mount attempts to read the freshly written LTFS structures.
 //
-// Sequence: mt rewoffl → mt load → rewind + wait-for-BOT + stabilize.
+// After the reload, the drive block size is explicitly set to variable
+// mode (0) because LTFS uses variable-length blocks. Some drives retain
+// a stale fixed block size after mkltfs, which causes SG_IO READ ioctl
+// failures (EINVAL / -21700) when ltfsck performs its full medium
+// consistency check.
+//
+// Sequence: mt rewoffl → mt load → rewind + wait-for-BOT + stabilize → mt setblk 0.
 func (l *LTFSService) reloadCartridge(ctx context.Context) error {
 	// Rewind-offline ejects the tape.
 	cmd := exec.CommandContext(ctx, "mt", "-f", l.devicePath, "rewoffl")
@@ -234,7 +240,22 @@ func (l *LTFSService) reloadCartridge(ctx context.Context) error {
 	}
 
 	// Rewind to BOT and wait for the tape to be fully settled.
-	return l.rewindTape(ctx)
+	if err := l.rewindTape(ctx); err != nil {
+		return err
+	}
+
+	// Set the drive to variable block size mode. LTFS uses variable-length
+	// blocks, but some drives (notably Tandberg/Quantum LTO) retain stale
+	// fixed block size settings after mkltfs. Without this reset, ltfsck's
+	// full medium consistency check fails with SG_IO READ ioctl errors
+	// (EINVAL / -21700) because the drive tries to read with the wrong
+	// block size.
+	cmd = exec.CommandContext(ctx, "mt", "-f", l.devicePath, "setblk", "0")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("setblk 0 after reload failed: %s: %w", strings.TrimSpace(string(output)), err)
+	}
+
+	return nil
 }
 
 // Mount mounts the LTFS tape at the configured mount point.
@@ -582,19 +603,26 @@ func (l *LTFSService) CheckWithRetry(ctx context.Context) error {
 }
 
 // isSGIOError returns true when the output contains indicators of a
-// transient SG_IO ioctl failure. These errors occur when the drive
-// firmware has stale cached state after mkltfs and are resolved by
-// ejecting and reloading the cartridge.
+// transient SG_IO ioctl failure or its consequences. These errors occur
+// when the drive firmware has stale cached state after mkltfs and are
+// resolved by ejecting, reloading the cartridge, and resetting the block
+// size to variable mode.
 //
 // Typical indicators:
 //   - "SG_IO ioctl" — the kernel-level SCSI generic ioctl failed
 //   - "ioctl error" — LTFS backend reports an ioctl-level failure
 //   - "-21700" — LTFS internal error code for an ioctl error
+//   - "no index found in the medium" — consequence of failed reads due to
+//     stale drive state; ltfsck cannot read the index that mkltfs wrote
+//   - "medium consistency check failed" — ltfsck summary when read errors
+//     prevent it from verifying the freshly formatted medium
 func isSGIOError(output string) bool {
 	lower := strings.ToLower(output)
 	return strings.Contains(lower, "sg_io ioctl") ||
 		strings.Contains(lower, "ioctl error") ||
-		strings.Contains(lower, "-21700")
+		strings.Contains(lower, "-21700") ||
+		strings.Contains(lower, "no index found in the medium") ||
+		strings.Contains(lower, "medium consistency check failed")
 }
 
 // FormatAndLabel formats the tape with LTFS and writes a TapeBackarr-compatible

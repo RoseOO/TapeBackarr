@@ -478,6 +478,16 @@ LTFS16021E Volume is inconsistent and was not corrected.: exit status 4`,
 			output: "LTFS15013E Cannot format: device is busy",
 			want:   false,
 		},
+		{
+			name:   "no index found in medium",
+			output: "LTFS11253E No index found in the medium.",
+			want:   true,
+		},
+		{
+			name:   "medium consistency check failed",
+			output: "LTFS11027E Cannot mount volume: medium consistency check failed.",
+			want:   true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
