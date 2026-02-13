@@ -247,6 +247,7 @@ func (s *Server) setupRoutes() {
 			r.Put("/{id}", s.handleUpdateDrive)
 			r.Delete("/{id}", s.handleDeleteDrive)
 			r.Post("/{id}/eject", s.handleEjectTape)
+			r.Post("/{id}/load-tape", s.handleLoadTape)
 			r.Post("/{id}/rewind", s.handleRewindTape)
 			r.Post("/{id}/select", s.handleSelectDrive)
 			r.Post("/{id}/format-tape", s.handleFormatTapeInDrive)
@@ -2355,6 +2356,46 @@ func (s *Server) handleEjectTape(w http.ResponseWriter, r *http.Request) {
 	}
 	s.auditLog(r, "eject", "tape_drive", driveID, "Ejected tape")
 	s.respondJSON(w, http.StatusOK, map[string]string{"status": "ejected"})
+}
+
+func (s *Server) handleLoadTape(w http.ResponseWriter, r *http.Request) {
+	driveID, _ := s.getIDParam(r)
+	ctx := r.Context()
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "tape",
+			Title:    "Load Started",
+			Message:  "Loading tape into drive...",
+		})
+	}
+	if err := s.tapeService.Load(ctx); err != nil {
+		if s.eventBus != nil {
+			s.eventBus.Publish(SystemEvent{
+				Type:     "error",
+				Category: "tape",
+				Title:    "Load Failed",
+				Message:  fmt.Sprintf("Failed to load tape: %s", err.Error()),
+			})
+		}
+		s.respondError(w, http.StatusInternalServerError, "failed to load tape: "+err.Error())
+		return
+	}
+
+	if cache := s.tapeService.GetLabelCache(); cache != nil {
+		cache.Invalidate(s.tapeService.DevicePath())
+	}
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "success",
+			Category: "tape",
+			Title:    "Tape Loaded",
+			Message:  "Tape has been loaded into the drive",
+		})
+	}
+	s.auditLog(r, "load", "tape_drive", driveID, "Loaded tape")
+	s.respondJSON(w, http.StatusOK, map[string]string{"status": "loaded"})
 }
 
 func (s *Server) handleRewindTape(w http.ResponseWriter, r *http.Request) {

@@ -220,6 +220,17 @@
     }
   }
 
+  async function loadTape(id: number) {
+    try {
+      error = '';
+      await api.api.post(`/drives/${id}/load-tape`, {});
+      showSuccessMsg('Tape loaded');
+      await loadDrives();
+    } catch (e) {
+      error = 'Failed to load tape';
+    }
+  }
+
   async function rewindTape(id: number) {
     try {
       error = '';
@@ -411,6 +422,7 @@
               <button class="btn btn-secondary btn-sm" on:click={() => selectDrive(drive.id)}>Select</button>
               <button class="btn btn-secondary btn-sm" on:click={() => rewindTape(drive.id)}>Rewind</button>
               <button class="btn btn-secondary btn-sm" on:click={() => ejectTape(drive.id)}>Eject</button>
+              <button class="btn btn-secondary btn-sm" on:click={() => loadTape(drive.id)}>Load</button>
               <button class="btn btn-info btn-sm" on:click={() => openStatsModal(drive)} disabled={!drive.enabled}>📊 Stats</button>
               <button class="btn btn-warning btn-sm" on:click={() => openFormatDriveModal(drive)} disabled={drive.status === 'offline'}>Format</button>
               <button class="btn btn-danger btn-sm" on:click={() => deleteDrive(drive.id)}>Remove</button>

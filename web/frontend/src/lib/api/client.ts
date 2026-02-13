@@ -132,6 +132,12 @@ export async function ejectTape(driveId: number) {
   });
 }
 
+export async function loadTape(driveId: number) {
+  return fetchApi(`/drives/${driveId}/load-tape`, {
+    method: 'POST',
+  });
+}
+
 export async function rewindTape(driveId: number) {
   return fetchApi(`/drives/${driveId}/rewind`, {
     method: 'POST',
