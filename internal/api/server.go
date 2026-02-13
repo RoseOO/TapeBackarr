@@ -8365,7 +8365,7 @@ func (s *Server) runLTFSFormat(ctx context.Context, devicePath, mountPoint strin
 
 		setPhase("verifying", "Running post-format consistency check (ltfsck)...")
 
-		if err := ltfsSvc.Check(ctx); err != nil {
+		if err := ltfsSvc.CheckWithRetry(ctx); err != nil {
 			setError("LTFS post-format verification failed: " + err.Error())
 			return
 		}

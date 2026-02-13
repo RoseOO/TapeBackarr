@@ -430,3 +430,60 @@ LTFS14013E Cannot mount the volume from device.`,
 		})
 	}
 }
+
+func TestIsSGIOError(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{
+			name:   "SG_IO ioctl failure",
+			output: "LTFS30200I Failed to execute SG_IO ioctl, opcode = 08 (22).",
+			want:   true,
+		},
+		{
+			name:   "ioctl error from backend",
+			output: "LTFS30263I READ returns ioctl error (-21700) /dev/nst0.",
+			want:   true,
+		},
+		{
+			name:   "error code -21700",
+			output: "LTFS12049E Cannot read: backend call failed (-21700).",
+			want:   true,
+		},
+		{
+			name: "full ltfsck failure output from issue",
+			output: `ltfsck failed: LTFS16000I Starting ltfsck, LTFS version 2.5.0.0 (Prelim), log level 2.
+LTFS11026I Performing a full medium consistency check.
+LTFS30200I Failed to execute SG_IO ioctl, opcode = 08 (22).
+LTFS30263I READ returns ioctl error (-21700) /dev/nst0.
+LTFS12049E Cannot read: backend call failed (-21700).
+LTFS11253E No index found in the medium.
+LTFS16021E Volume is inconsistent and was not corrected.: exit status 4`,
+			want: true,
+		},
+		{
+			name:   "label read failure is not SG_IO error",
+			output: "LTFS11009E Cannot read volume: failed to read partition labels.",
+			want:   false,
+		},
+		{
+			name:   "empty output",
+			output: "",
+			want:   false,
+		},
+		{
+			name:   "unrelated error",
+			output: "LTFS15013E Cannot format: device is busy",
+			want:   false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isSGIOError(tt.output); got != tt.want {
+				t.Errorf("isSGIOError(%q) = %v, want %v", tt.output, got, tt.want)
+			}
+		})
+	}
+}
