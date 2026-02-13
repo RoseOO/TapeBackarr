@@ -586,6 +586,11 @@ export async function cancelBatchLabel() {
   });
 }
 
+// Get tape operation (format/label) status
+export async function getTapeOpStatus() {
+  return fetchApi('/tapes/operation/status');
+}
+
 // Batch update multiple tapes
 export async function batchUpdateTapes(data: { tape_ids: number[]; status?: string; pool_id?: number }) {
   return fetchApi('/tapes/batch-update', {

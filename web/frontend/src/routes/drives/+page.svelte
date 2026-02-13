@@ -82,6 +82,14 @@
   };
   let pools: any[] = [];
   let ltoTypes: Record<string, number> = {};
+
+  // Format operation progress
+  let formatOpRunning = false;
+  let formatOpPhase = '';
+  let formatOpMessage = '';
+  let formatOpElapsed = 0;
+  let formatOpError = '';
+  let formatOpPollInterval: ReturnType<typeof setInterval> | null = null;
   let newDrive = {
     device_path: '',
     display_name: '',
@@ -118,10 +126,31 @@
     } catch (e) {
       // Non-critical
     }
+
+    // Resume polling if a format operation is already running
+    try {
+      const opStatus = await api.getTapeOpStatus();
+      if (opStatus.running && opStatus.op_type === 'format') {
+        formatOpRunning = true;
+        formatOpPhase = opStatus.phase || 'checking';
+        formatOpMessage = opStatus.message || '';
+        formatOpElapsed = opStatus.elapsed_seconds || 0;
+        // Find the target drive
+        formatDriveTarget = drives.find((d: Drive) => d.id === opStatus.drive_id) || null;
+        if (formatDriveTarget) {
+          formatConfirmChecked = true;
+          showFormatDriveModal = true;
+        }
+        startFormatOpPolling();
+      }
+    } catch {
+      // Ignore
+    }
   });
 
   onDestroy(() => {
     unsubVersion();
+    stopFormatOpPolling();
   });
 
   async function loadDrives() {
@@ -264,18 +293,80 @@
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   }
 
+  function formatDuration(seconds: number): string {
+    if (seconds < 60) return `${seconds}s`;
+    const min = Math.floor(seconds / 60);
+    const sec = seconds % 60;
+    if (min < 60) return `${min}m ${sec}s`;
+    const hr = Math.floor(min / 60);
+    const remMin = min % 60;
+    return `${hr}h ${remMin}m`;
+  }
+
+  function formatPhaseLabel(phase: string): string {
+    switch (phase) {
+      case 'checking': return 'Checking tape';
+      case 'erasing': return 'Erasing tape';
+      case 'updating': return 'Updating database';
+      case 'complete': return 'Complete';
+      case 'failed': return 'Failed';
+      default: return phase || 'Preparing';
+    }
+  }
+
   async function formatTapeInDrive() {
     if (!formatDriveTarget || !formatConfirmChecked) return;
     try {
       error = '';
+      formatOpRunning = true;
+      formatOpPhase = 'checking';
+      formatOpMessage = 'Starting format...';
+      formatOpElapsed = 0;
+      formatOpError = '';
       await api.formatTapeInDrive(formatDriveTarget.id, true);
-      showFormatDriveModal = false;
-      formatDriveTarget = null;
-      formatConfirmChecked = false;
-      showSuccessMsg('Tape formatted successfully');
-      await loadDrives();
+      startFormatOpPolling();
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to format tape';
+      formatOpRunning = false;
+      formatOpPhase = '';
+      formatOpMessage = '';
+    }
+  }
+
+  function startFormatOpPolling() {
+    stopFormatOpPolling();
+    formatOpPollInterval = setInterval(async () => {
+      try {
+        const status = await api.getTapeOpStatus();
+        formatOpPhase = status.phase || '';
+        formatOpMessage = status.message || '';
+        formatOpElapsed = status.elapsed_seconds || 0;
+
+        if (!status.running && (status.phase === 'complete' || status.phase === 'failed')) {
+          stopFormatOpPolling();
+          formatOpRunning = false;
+          if (status.phase === 'complete') {
+            showFormatDriveModal = false;
+            formatDriveTarget = null;
+            formatConfirmChecked = false;
+            formatOpPhase = '';
+            formatOpMessage = '';
+            showSuccessMsg('Tape formatted successfully');
+            await loadDrives();
+          } else {
+            formatOpError = status.error || status.message || 'Format failed';
+          }
+        }
+      } catch {
+        // Ignore transient poll errors
+      }
+    }, 2000);
+  }
+
+  function stopFormatOpPolling() {
+    if (formatOpPollInterval) {
+      clearInterval(formatOpPollInterval);
+      formatOpPollInterval = null;
     }
   }
 
@@ -528,32 +619,71 @@
 
 <!-- Format Tape in Drive Modal -->
 {#if showFormatDriveModal && formatDriveTarget}
-  <div class="modal-backdrop" on:click={() => showFormatDriveModal = false}>
+  <div class="modal-backdrop" on:click={() => { if (!formatOpRunning) showFormatDriveModal = false; }}>
     <div class="modal" on:click|stopPropagation={() => {}}>
       <h2>⚠️ Format Tape</h2>
-      <div class="format-warning">
-        <p><strong>WARNING: This will ERASE ALL DATA on the tape currently loaded in {formatDriveTarget.display_name || formatDriveTarget.device_path}.</strong></p>
-        {#if formatDriveTarget.current_tape}
-          <p>Current tape: <strong>{formatDriveTarget.current_tape}</strong></p>
-        {/if}
-        {#if formatDriveTarget.unknown_tape}
-          <p>Tape label: <strong>{formatDriveTarget.unknown_tape.label}</strong><br/>
-          UUID: <code>{formatDriveTarget.unknown_tape.uuid || 'N/A'}</code></p>
-        {/if}
-        <p class="danger-text">This action is <strong>irreversible</strong>. All data on the tape will be permanently destroyed.</p>
-      </div>
-      <div class="form-group checkbox-group">
-        <label class="confirm-label">
-          <input type="checkbox" bind:checked={formatConfirmChecked} />
-          <span>I understand this will permanently erase all data on this tape</span>
-        </label>
-      </div>
-      <div class="form-actions">
-        <button class="btn btn-secondary" on:click={() => showFormatDriveModal = false}>Cancel</button>
-        <button class="btn btn-danger" on:click={formatTapeInDrive} disabled={!formatConfirmChecked}>
-          🗑️ Format Tape
-        </button>
-      </div>
+
+      {#if formatOpRunning}
+        <!-- Progress display during format -->
+        <div class="format-progress">
+          <div class="spinner"></div>
+          <div class="format-progress-info">
+            <strong>{formatPhaseLabel(formatOpPhase)}</strong>
+            <p style="color: #888; margin: 0.25rem 0 0; font-size: 0.9rem;">{formatOpMessage}</p>
+            {#if formatOpElapsed > 0}
+              <p style="color: #888; margin: 0.25rem 0 0; font-size: 0.8rem;">
+                Elapsed: {formatDuration(formatOpElapsed)}
+              </p>
+            {/if}
+          </div>
+        </div>
+        <div class="format-phases">
+          <div class="format-phase" class:active={formatOpPhase === 'checking'} class:done={['erasing','updating','complete'].includes(formatOpPhase)}>
+            <span class="phase-dot"></span> Checking tape
+          </div>
+          <div class="format-phase" class:active={formatOpPhase === 'erasing'} class:done={['updating','complete'].includes(formatOpPhase)}>
+            <span class="phase-dot"></span> Erasing tape
+          </div>
+          <div class="format-phase" class:active={formatOpPhase === 'updating'} class:done={formatOpPhase === 'complete'}>
+            <span class="phase-dot"></span> Updating database
+          </div>
+        </div>
+        <p style="text-align: center; color: #888; font-size: 0.8rem; margin-top: 1rem;">
+          ⏳ Format may take several minutes — do not close this page
+        </p>
+      {:else if formatOpError}
+        <div class="format-warning">
+          <p><strong>❌ Format Failed</strong></p>
+          <p>{formatOpError}</p>
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-secondary" on:click={() => { showFormatDriveModal = false; formatOpError = ''; }}>Close</button>
+        </div>
+      {:else}
+        <div class="format-warning">
+          <p><strong>WARNING: This will ERASE ALL DATA on the tape currently loaded in {formatDriveTarget.display_name || formatDriveTarget.device_path}.</strong></p>
+          {#if formatDriveTarget.current_tape}
+            <p>Current tape: <strong>{formatDriveTarget.current_tape}</strong></p>
+          {/if}
+          {#if formatDriveTarget.unknown_tape}
+            <p>Tape label: <strong>{formatDriveTarget.unknown_tape.label}</strong><br/>
+            UUID: <code>{formatDriveTarget.unknown_tape.uuid || 'N/A'}</code></p>
+          {/if}
+          <p class="danger-text">This action is <strong>irreversible</strong>. All data on the tape will be permanently destroyed.</p>
+        </div>
+        <div class="form-group checkbox-group">
+          <label class="confirm-label">
+            <input type="checkbox" bind:checked={formatConfirmChecked} />
+            <span>I understand this will permanently erase all data on this tape</span>
+          </label>
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-secondary" on:click={() => showFormatDriveModal = false}>Cancel</button>
+          <button class="btn btn-danger" on:click={formatTapeInDrive} disabled={!formatConfirmChecked}>
+            🗑️ Format Tape
+          </button>
+        </div>
+      {/if}
     </div>
   </div>
 {/if}
@@ -1066,5 +1196,89 @@
     color: var(--text-secondary, #888);
     margin: 0;
     line-height: 1.5;
+  }
+
+  .spinner {
+    width: 40px;
+    height: 40px;
+    border: 4px solid #e0e0e0;
+    border-top-color: #4a4aff;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    margin-bottom: 1rem;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .format-progress {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1.5rem;
+    background: var(--bg-input, #f8f9fa);
+    border-radius: 8px;
+    margin-bottom: 1rem;
+  }
+
+  .format-progress .spinner {
+    flex-shrink: 0;
+    margin-bottom: 0;
+  }
+
+  .format-progress-info {
+    flex: 1;
+  }
+
+  .format-phases {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0 0.5rem;
+  }
+
+  .format-phase {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+    color: #888;
+    opacity: 0.5;
+    transition: all 0.3s;
+  }
+
+  .format-phase.active {
+    color: #4a4aff;
+    font-weight: 600;
+    opacity: 1;
+  }
+
+  .format-phase.done {
+    color: #22c55e;
+    opacity: 0.8;
+  }
+
+  .phase-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #888;
+    flex-shrink: 0;
+  }
+
+  .format-phase.active .phase-dot {
+    background: #4a4aff;
+    box-shadow: 0 0 6px #4a4aff;
+    animation: pulse-dot 1.5s infinite;
+  }
+
+  .format-phase.done .phase-dot {
+    background: #22c55e;
+  }
+
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
   }
 </style>

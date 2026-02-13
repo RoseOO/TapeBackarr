@@ -20,6 +20,7 @@
     created_at: string;
     encryption_key_fingerprint: string;
     encryption_key_name: string;
+    format_type: string;
   }
 
   interface Pool {
@@ -41,6 +42,7 @@
     total: number;
     current_label: string;
     message: string;
+    phase: string;
   }
 
   let tapes: Tape[] = [];
@@ -72,6 +74,14 @@
   // Batch label progress
   let batchLabelStatus: BatchLabelStatus | null = null;
   let batchLabelPollInterval: ReturnType<typeof setInterval> | null = null;
+
+  // Tape operation (format/label) progress
+  let tapeOpPhase = '';
+  let tapeOpMessage = '';
+  let tapeOpElapsed = 0;
+  let tapeOpRunning = false;
+  let tapeOpError = '';
+  let tapeOpPollInterval: ReturnType<typeof setInterval> | null = null;
 
   // Batch selection
   let selectedTapes: Set<number> = new Set();
@@ -191,10 +201,12 @@
   onMount(async () => {
     await loadData();
     checkBatchLabelStatus();
+    checkTapeOpStatus();
   });
 
   onDestroy(() => {
     stopBatchLabelPolling();
+    stopTapeOpPolling();
     unsubTapesVersion();
   });
 
@@ -372,13 +384,19 @@
         await api.formatLTFS(formatDriveId, selectedTape.label, selectedTape.uuid || crypto.randomUUID(), '', true);
         showFormatModal = false;
         showSuccess('Tape formatted with LTFS successfully');
+        await loadData();
       } else {
+        tapeOpRunning = true;
+        tapeOpPhase = 'checking';
+        tapeOpMessage = 'Starting format…';
+        tapeOpElapsed = 0;
+        tapeOpError = '';
         await api.formatTape(selectedTape.id, formatDriveId, true);
-        showFormatModal = false;
-        showSuccess('Tape formatted successfully');
+        startTapeOpPolling();
       }
-      await loadData();
     } catch (e) {
+      tapeOpRunning = false;
+      tapeOpPhase = '';
       error = e instanceof Error ? e.message : 'Failed to format tape';
     }
   }
@@ -411,11 +429,16 @@
     if (!selectedTape || !newLabel) return;
     try {
       error = '';
+      tapeOpRunning = true;
+      tapeOpPhase = 'checking';
+      tapeOpMessage = 'Starting label…';
+      tapeOpElapsed = 0;
+      tapeOpError = '';
       await api.labelTape(selectedTape.id, newLabel, labelDriveId ?? undefined, labelForce, labelAutoEject);
-      showLabelModal = false;
-      showSuccess('Tape labeled');
-      await loadData();
+      startTapeOpPolling();
     } catch (e) {
+      tapeOpRunning = false;
+      tapeOpPhase = '';
       error = e instanceof Error ? e.message : 'Failed to label tape';
     }
   }
@@ -431,6 +454,7 @@
       drive_id: null,
       write_label: false,
       auto_eject: false,
+      format_type: tape.format_type || 'raw',
     };
     showEditModal = true;
   }
@@ -512,6 +536,98 @@
     if (tape.capacity_bytes === 0) return 0;
     return (tape.used_bytes / tape.capacity_bytes) * 100;
   }
+
+  function formatDuration(seconds: number): string {
+    if (seconds < 60) return `${seconds}s`;
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `${m}m ${s}s`;
+  }
+
+  function opPhaseLabel(phase: string): string {
+    switch (phase) {
+      case 'checking': return 'Checking tape…';
+      case 'erasing': return 'Erasing tape…';
+      case 'writing': return 'Writing label…';
+      case 'verifying': return 'Verifying label…';
+      case 'ejecting': return 'Ejecting tape…';
+      case 'updating': return 'Updating database…';
+      case 'complete': return 'Complete';
+      case 'failed': return 'Failed';
+      default: return phase || 'Working…';
+    }
+  }
+
+  function batchPhaseLabel(phase: string): string {
+    switch (phase) {
+      case 'waiting': return 'Waiting…';
+      case 'checking': return 'Checking tape…';
+      case 'writing': return 'Writing label…';
+      case 'detecting': return 'Detecting tape…';
+      case 'saving': return 'Saving to database…';
+      case 'ejecting': return 'Ejecting tape…';
+      default: return phase || '';
+    }
+  }
+
+  function startTapeOpPolling() {
+    stopTapeOpPolling();
+    tapeOpPollInterval = setInterval(async () => {
+      await checkTapeOpStatus();
+    }, 1500);
+  }
+
+  function stopTapeOpPolling() {
+    if (tapeOpPollInterval) {
+      clearInterval(tapeOpPollInterval);
+      tapeOpPollInterval = null;
+    }
+  }
+
+  async function checkTapeOpStatus() {
+    try {
+      const status = await api.getTapeOpStatus();
+      if (status && status.running) {
+        tapeOpRunning = true;
+        tapeOpPhase = status.phase || '';
+        tapeOpMessage = status.message || '';
+        tapeOpElapsed = status.elapsed_seconds || 0;
+        tapeOpError = '';
+        if (!tapeOpPollInterval) {
+          startTapeOpPolling();
+        }
+      } else if (status && status.phase === 'complete') {
+        tapeOpRunning = false;
+        tapeOpPhase = 'complete';
+        tapeOpMessage = status.message || 'Operation complete';
+        tapeOpElapsed = status.elapsed_seconds || 0;
+        tapeOpError = '';
+        stopTapeOpPolling();
+        await loadData();
+        setTimeout(() => {
+          showFormatModal = false;
+          showLabelModal = false;
+          tapeOpPhase = '';
+          tapeOpMessage = '';
+          tapeOpElapsed = 0;
+          showSuccess(status.op_type === 'format' ? 'Tape formatted successfully' : 'Tape labeled successfully');
+        }, 1500);
+      } else if (status && status.phase === 'failed') {
+        tapeOpRunning = false;
+        tapeOpPhase = 'failed';
+        tapeOpMessage = status.message || '';
+        tapeOpError = status.error || 'Operation failed';
+        stopTapeOpPolling();
+      } else {
+        tapeOpRunning = false;
+        stopTapeOpPolling();
+      }
+    } catch {
+      // Status endpoint not available or no operation running
+      tapeOpRunning = false;
+      stopTapeOpPolling();
+    }
+  }
 </script>
 
 <div class="page-header">
@@ -542,11 +658,17 @@
 {#if batchLabelStatus && (batchLabelStatus.running || (batchLabelStatus.total > 0 && batchLabelStatus.completed < batchLabelStatus.total))}
   <div class="card batch-progress-panel">
     <div class="batch-progress-header">
-      <strong>📦 Batch Label in Progress</strong>
+      <div style="display: flex; align-items: center; gap: 0.75rem;">
+        <div class="spinner" style="width: 24px; height: 24px; border-width: 3px;"></div>
+        <strong>📦 Batch Label in Progress</strong>
+      </div>
       <button class="btn btn-danger btn-sm" on:click={handleCancelBatchLabel}>Cancel</button>
     </div>
     <div class="batch-progress-details">
       <span>Label: <strong>{batchLabelStatus.current_label || '—'}</strong></span>
+      {#if batchLabelStatus.phase}
+        <span class="badge badge-info">{batchPhaseLabel(batchLabelStatus.phase)}</span>
+      {/if}
       <span>{batchLabelStatus.message || ''}</span>
     </div>
     <div class="progress-bar-outer">
@@ -808,30 +930,69 @@
 
 <!-- Format Modal -->
 {#if showFormatModal && selectedTape}
-  <div class="modal-overlay" on:click={() => showFormatModal = false}>
+  <div class="modal-overlay" on:click={() => { if (!tapeOpRunning) showFormatModal = false; }}>
     <div class="modal" on:click|stopPropagation={() => {}}>
       <h2>⚠️ Format Tape</h2>
-      <p class="modal-desc warning-text">This will erase ALL data on tape <strong>{selectedTape.label}</strong> including the label. This action cannot be undone.</p>
-      <div class="form-group">
-        <label for="format-drive">Select Drive</label>
-        <select id="format-drive" bind:value={formatDriveId}>
-          {#each drives as drive}
-            <option value={drive.id}>{drive.display_name || drive.device_path}</option>
-          {/each}
-        </select>
-        <small>The tape must be loaded in the selected drive</small>
-      </div>
-      <div class="form-group" style="margin-top: 0.5rem;">
-        <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
-          <input type="checkbox" bind:checked={formatAsLTFS} />
-          Format as LTFS
-        </label>
-        <small>Use LTFS format for self-describing tape. Requires LTFS tools installed.</small>
-      </div>
-      <div class="modal-actions">
-        <button class="btn btn-secondary" on:click={() => showFormatModal = false}>Cancel</button>
-        <button class="btn btn-danger" on:click={handleFormat}>{formatAsLTFS ? 'Format as LTFS' : 'Format Tape'}</button>
-      </div>
+      {#if tapeOpRunning || tapeOpPhase === 'complete' || tapeOpPhase === 'failed'}
+        <div class="format-progress">
+          {#if tapeOpPhase !== 'complete' && tapeOpPhase !== 'failed'}
+            <div class="spinner"></div>
+          {/if}
+          <div class="format-progress-info">
+            <strong>{opPhaseLabel(tapeOpPhase)}</strong>
+            <p style="color: var(--text-muted, #888); margin: 0.25rem 0 0; font-size: 0.9rem;">{tapeOpMessage}</p>
+            {#if tapeOpElapsed > 0}
+              <p style="color: var(--text-muted, #888); margin: 0.25rem 0 0; font-size: 0.8rem;">
+                Elapsed: {formatDuration(tapeOpElapsed)}
+              </p>
+            {/if}
+          </div>
+        </div>
+        <div class="format-phases">
+          <div class="format-phase" class:active={tapeOpPhase === 'checking'} class:done={['erasing', 'updating', 'complete'].includes(tapeOpPhase)}>
+            <span class="phase-dot"></span> Checking tape
+          </div>
+          <div class="format-phase" class:active={tapeOpPhase === 'erasing'} class:done={['updating', 'complete'].includes(tapeOpPhase)}>
+            <span class="phase-dot"></span> Erasing tape
+          </div>
+          <div class="format-phase" class:active={tapeOpPhase === 'updating'} class:done={['complete'].includes(tapeOpPhase)}>
+            <span class="phase-dot"></span> Updating database
+          </div>
+          <div class="format-phase" class:active={tapeOpPhase === 'complete'} class:done={tapeOpPhase === 'complete'}>
+            <span class="phase-dot"></span> Complete
+          </div>
+        </div>
+        {#if tapeOpPhase === 'failed'}
+          <div class="card error-card" style="margin-top: 1rem;">
+            <p>{tapeOpError || 'Format failed'}</p>
+          </div>
+          <div class="modal-actions">
+            <button class="btn btn-secondary" on:click={() => { tapeOpPhase = ''; tapeOpError = ''; showFormatModal = false; }}>Close</button>
+          </div>
+        {/if}
+      {:else}
+        <p class="modal-desc warning-text">This will erase ALL data on tape <strong>{selectedTape.label}</strong> including the label. This action cannot be undone.</p>
+        <div class="form-group">
+          <label for="format-drive">Select Drive</label>
+          <select id="format-drive" bind:value={formatDriveId}>
+            {#each drives as drive}
+              <option value={drive.id}>{drive.display_name || drive.device_path}</option>
+            {/each}
+          </select>
+          <small>The tape must be loaded in the selected drive</small>
+        </div>
+        <div class="form-group" style="margin-top: 0.5rem;">
+          <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+            <input type="checkbox" bind:checked={formatAsLTFS} />
+            Format as LTFS
+          </label>
+          <small>Use LTFS format for self-describing tape. Requires LTFS tools installed.</small>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" on:click={() => showFormatModal = false}>Cancel</button>
+          <button class="btn btn-danger" on:click={handleFormat}>{formatAsLTFS ? 'Format as LTFS' : 'Format Tape'}</button>
+        </div>
+      {/if}
     </div>
   </div>
 {/if}
@@ -857,44 +1018,89 @@
 
 <!-- Label Modal -->
 {#if showLabelModal && selectedTape}
-  <div class="modal-overlay" on:click={() => showLabelModal = false}>
+  <div class="modal-overlay" on:click={() => { if (!tapeOpRunning) showLabelModal = false; }}>
     <div class="modal" on:click|stopPropagation={() => {}}>
       <h2>Write Tape Label</h2>
-      <p class="modal-desc">Write label data to the physical tape in the drive. UUID: {selectedTape.uuid || 'N/A'}</p>
-      <form on:submit|preventDefault={handleLabel}>
-        <div class="form-group">
-          <label for="new-label">Label</label>
-          <input type="text" id="new-label" bind:value={newLabel} required />
+      {#if tapeOpRunning || tapeOpPhase === 'complete' || tapeOpPhase === 'failed'}
+        <div class="format-progress">
+          {#if tapeOpPhase !== 'complete' && tapeOpPhase !== 'failed'}
+            <div class="spinner"></div>
+          {/if}
+          <div class="format-progress-info">
+            <strong>{opPhaseLabel(tapeOpPhase)}</strong>
+            <p style="color: var(--text-muted, #888); margin: 0.25rem 0 0; font-size: 0.9rem;">{tapeOpMessage}</p>
+            {#if tapeOpElapsed > 0}
+              <p style="color: var(--text-muted, #888); margin: 0.25rem 0 0; font-size: 0.8rem;">
+                Elapsed: {formatDuration(tapeOpElapsed)}
+              </p>
+            {/if}
+          </div>
         </div>
-        {#if drives.length > 0}
-          <div class="form-group">
-            <label for="label-drive">Drive</label>
-            <select id="label-drive" bind:value={labelDriveId}>
-              {#each drives as drive}
-                <option value={drive.id}>{drive.display_name || drive.device_path}</option>
-              {/each}
-            </select>
-            <small>The tape must be loaded in the selected drive</small>
+        <div class="format-phases">
+          <div class="format-phase" class:active={tapeOpPhase === 'checking'} class:done={['verifying', 'writing', 'ejecting', 'updating', 'complete'].includes(tapeOpPhase)}>
+            <span class="phase-dot"></span> Checking tape
+          </div>
+          <div class="format-phase" class:active={tapeOpPhase === 'verifying'} class:done={['writing', 'ejecting', 'updating', 'complete'].includes(tapeOpPhase)}>
+            <span class="phase-dot"></span> Verifying label
+          </div>
+          <div class="format-phase" class:active={tapeOpPhase === 'writing'} class:done={['ejecting', 'updating', 'complete'].includes(tapeOpPhase)}>
+            <span class="phase-dot"></span> Writing label
+          </div>
+          <div class="format-phase" class:active={tapeOpPhase === 'ejecting'} class:done={['updating', 'complete'].includes(tapeOpPhase)}>
+            <span class="phase-dot"></span> Ejecting tape
+          </div>
+          <div class="format-phase" class:active={tapeOpPhase === 'updating'} class:done={['complete'].includes(tapeOpPhase)}>
+            <span class="phase-dot"></span> Updating database
+          </div>
+          <div class="format-phase" class:active={tapeOpPhase === 'complete'} class:done={tapeOpPhase === 'complete'}>
+            <span class="phase-dot"></span> Complete
+          </div>
+        </div>
+        {#if tapeOpPhase === 'failed'}
+          <div class="card error-card" style="margin-top: 1rem;">
+            <p>{tapeOpError || 'Label operation failed'}</p>
+          </div>
+          <div class="modal-actions">
+            <button class="btn btn-secondary" on:click={() => { tapeOpPhase = ''; tapeOpError = ''; showLabelModal = false; }}>Close</button>
           </div>
         {/if}
-        <div class="form-group checkbox-group">
-          <label>
-            <input type="checkbox" bind:checked={labelForce} />
-            Force overwrite existing label
-          </label>
-          <small>If the tape already has a label, overwrite it (tape data is not erased)</small>
-        </div>
-        <div class="form-group checkbox-group">
-          <label>
-            <input type="checkbox" bind:checked={labelAutoEject} />
-            Auto-eject tape after labeling
-          </label>
-        </div>
-        <div class="modal-actions">
-          <button type="button" class="btn btn-secondary" on:click={() => showLabelModal = false}>Cancel</button>
-          <button type="submit" class="btn btn-primary">Write Label</button>
-        </div>
-      </form>
+      {:else}
+        <p class="modal-desc">Write label data to the physical tape in the drive. UUID: {selectedTape.uuid || 'N/A'}</p>
+        <form on:submit|preventDefault={handleLabel}>
+          <div class="form-group">
+            <label for="new-label">Label</label>
+            <input type="text" id="new-label" bind:value={newLabel} required />
+          </div>
+          {#if drives.length > 0}
+            <div class="form-group">
+              <label for="label-drive">Drive</label>
+              <select id="label-drive" bind:value={labelDriveId}>
+                {#each drives as drive}
+                  <option value={drive.id}>{drive.display_name || drive.device_path}</option>
+                {/each}
+              </select>
+              <small>The tape must be loaded in the selected drive</small>
+            </div>
+          {/if}
+          <div class="form-group checkbox-group">
+            <label>
+              <input type="checkbox" bind:checked={labelForce} />
+              Force overwrite existing label
+            </label>
+            <small>If the tape already has a label, overwrite it (tape data is not erased)</small>
+          </div>
+          <div class="form-group checkbox-group">
+            <label>
+              <input type="checkbox" bind:checked={labelAutoEject} />
+              Auto-eject tape after labeling
+            </label>
+          </div>
+          <div class="modal-actions">
+            <button type="button" class="btn btn-secondary" on:click={() => showLabelModal = false}>Cancel</button>
+            <button type="submit" class="btn btn-primary">Write Label</button>
+          </div>
+        </form>
+      {/if}
     </div>
   </div>
 {/if}
@@ -1235,5 +1441,89 @@
     border-radius: 4px;
     font-family: monospace;
     font-size: 0.8rem;
+  }
+
+  .spinner {
+    width: 40px;
+    height: 40px;
+    border: 4px solid var(--border-color, #e0e0e0);
+    border-top-color: var(--accent-primary, #4a4aff);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    margin-bottom: 1rem;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .format-progress {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1.5rem;
+    background: var(--bg-input, #f8f9fa);
+    border-radius: 8px;
+    margin-bottom: 1rem;
+  }
+
+  .format-progress .spinner {
+    flex-shrink: 0;
+    margin-bottom: 0;
+  }
+
+  .format-progress-info {
+    flex: 1;
+  }
+
+  .format-phases {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0 0.5rem;
+  }
+
+  .format-phase {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+    color: var(--text-muted, #888);
+    opacity: 0.5;
+    transition: all 0.3s;
+  }
+
+  .format-phase.active {
+    color: var(--accent-primary, #4a4aff);
+    font-weight: 600;
+    opacity: 1;
+  }
+
+  .format-phase.done {
+    color: var(--badge-success-text, #22c55e);
+    opacity: 0.8;
+  }
+
+  .phase-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-muted, #888);
+    flex-shrink: 0;
+  }
+
+  .format-phase.active .phase-dot {
+    background: var(--accent-primary, #4a4aff);
+    box-shadow: 0 0 6px var(--accent-primary, #4a4aff);
+    animation: pulse-dot 1.5s infinite;
+  }
+
+  .format-phase.done .phase-dot {
+    background: var(--badge-success-text, #22c55e);
+  }
+
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
   }
 </style>
