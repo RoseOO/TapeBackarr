@@ -1670,7 +1670,7 @@ func TestLTFSFormatRejectsWhenAlreadyRunning(t *testing.T) {
 	}
 }
 
-func TestAdminMiddlewareNoClaims(t *testing.T) {
+func TestAdminOnlyMiddlewareNoClaims(t *testing.T) {
 	s := &Server{
 		router: chi.NewRouter(),
 	}
@@ -1690,7 +1690,7 @@ func TestAdminMiddlewareNoClaims(t *testing.T) {
 	}
 }
 
-func TestAdminMiddlewareValidClaims(t *testing.T) {
+func TestAdminOnlyMiddlewareValidClaims(t *testing.T) {
 	s := &Server{
 		router: chi.NewRouter(),
 	}
