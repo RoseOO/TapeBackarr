@@ -20,6 +20,7 @@
     created_at: string;
     encryption_key_fingerprint: string;
     encryption_key_name: string;
+    format_type: string;
   }
 
   interface Pool {
@@ -453,6 +454,7 @@
       drive_id: null,
       write_label: false,
       auto_eject: false,
+      format_type: tape.format_type || 'raw',
     };
     showEditModal = true;
   }
