@@ -1445,9 +1445,8 @@ func (s *Service) CalculateChecksum(path string) (string, error) {
 // completes. This builds the catalog incrementally rather than in one large
 // batch after all checksums finish, preventing the "stuck in cataloging"
 // state for large file counts. The function is called after streaming
-// completes to avoid NFS I/O contention with the tape pipeline.
-// cataloging" state for large file counts. The TOC file list is written to
-// tape separately at the end by finishTape.
+// completes to avoid NFS I/O contention with the tape pipeline. The TOC
+// file list is written to tape separately at the end by finishTape.
 func (s *Service) computeChecksumsAsync(ctx context.Context, files []FileInfo, checksums *sync.Map, backupSetID int64, sourcePath string) {
 	// Use multiple workers to maximize NFS read throughput. This function now
 	// runs after tape streaming has finished, so there is no risk of I/O
