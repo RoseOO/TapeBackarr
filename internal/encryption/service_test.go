@@ -247,3 +247,49 @@ func TestWrongKeyDecryption(t *testing.T) {
 		t.Error("Expected decryption to fail with wrong key, but it succeeded")
 	}
 }
+
+func TestStreamChunkSizeIs1MB(t *testing.T) {
+	// Guard against accidental regressions: StreamChunkSize must be 1MB
+	// to minimize per-chunk GCM overhead and match the LTO block size.
+	const expected = 1024 * 1024
+	if StreamChunkSize != expected {
+		t.Errorf("StreamChunkSize = %d, want %d (1MB)", StreamChunkSize, expected)
+	}
+}
+
+func TestEncryptDecryptLargeChunks(t *testing.T) {
+	// Verify that data larger than the 1MB StreamChunkSize (spanning
+	// multiple encryption chunks) round-trips correctly.
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+
+	// 3MB + 42 bytes: exercises full chunks and a partial final chunk
+	data := make([]byte, 3*1024*1024+42)
+	for i := range data {
+		data[i] = byte(i % 251)
+	}
+
+	encReader, err := NewEncryptingReader(bytes.NewReader(data), key)
+	if err != nil {
+		t.Fatalf("NewEncryptingReader: %v", err)
+	}
+	encrypted, err := io.ReadAll(encReader)
+	if err != nil {
+		t.Fatalf("encrypt ReadAll: %v", err)
+	}
+
+	decReader, err := NewDecryptingReader(bytes.NewReader(encrypted), key)
+	if err != nil {
+		t.Fatalf("NewDecryptingReader: %v", err)
+	}
+	decrypted, err := io.ReadAll(decReader)
+	if err != nil {
+		t.Fatalf("decrypt ReadAll: %v", err)
+	}
+
+	if !bytes.Equal(data, decrypted) {
+		t.Errorf("round-trip failed: expected %d bytes, got %d", len(data), len(decrypted))
+	}
+}
