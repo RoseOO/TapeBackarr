@@ -1449,7 +1449,7 @@ func (s *Service) CalculateChecksum(path string) (string, error) {
 // cataloging" state for large file counts. The TOC file list is written to
 // tape separately at the end by finishTape.
 func (s *Service) computeChecksumsAsync(ctx context.Context, files []FileInfo, checksums *sync.Map, backupSetID int64, sourcePath string) {
-	// Use multiple workers to maximise NFS read throughput. This function now
+	// Use multiple workers to maximize NFS read throughput. This function now
 	// runs after tape streaming has finished, so there is no risk of I/O
 	// contention with tar. More workers keep many NFS read requests in flight,
 	// hiding per-file open/close latency on the NAS.
