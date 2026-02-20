@@ -1069,64 +1069,94 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get drive status and loaded tape label
-	ctx := r.Context()
-	statusCtx, statusCancel := context.WithTimeout(ctx, 10*time.Second)
-	defer statusCancel()
-	status, err := s.tapeService.GetStatus(statusCtx)
-	if err != nil {
-		stats.DriveStatus = "error"
-	} else if status.Online {
-		stats.DriveStatus = "online"
-		// Use cached label data to avoid rewinding the tape on every dashboard load
-		if cache := s.tapeService.GetLabelCache(); cache != nil {
-			if cached := cache.Get(s.tapeService.DevicePath(), 5*time.Minute); cached != nil {
-				if cached.Label != nil {
-					stats.LoadedTape = cached.Label.Label
-					stats.LoadedTapeUUID = cached.Label.UUID
-					stats.LoadedTapePool = cached.Label.Pool
-					if cached.Label.EncryptionKeyFingerprint != "" {
-						stats.LoadedTapeEncrypted = true
-						stats.LoadedTapeEncKeyFP = cached.Label.EncryptionKeyFingerprint
-					}
-					if cached.Label.CompressionType != "" {
-						stats.LoadedTapeCompression = cached.Label.CompressionType
-					}
-					stats.LoadedTapeFormatType = cached.Label.FormatType
-				}
-			} else {
-				// Cache miss - read label and cache it
-				labelCtx, labelCancel := context.WithTimeout(ctx, 5*time.Second)
-				defer labelCancel()
-				if labelData, err := s.tapeService.ReadTapeLabel(labelCtx); err == nil && labelData != nil {
-					stats.LoadedTape = labelData.Label
-					stats.LoadedTapeUUID = labelData.UUID
-					stats.LoadedTapePool = labelData.Pool
-					if labelData.EncryptionKeyFingerprint != "" {
-						stats.LoadedTapeEncrypted = true
-						stats.LoadedTapeEncKeyFP = labelData.EncryptionKeyFingerprint
-					}
-					if labelData.CompressionType != "" {
-						stats.LoadedTapeCompression = labelData.CompressionType
-					}
-					stats.LoadedTapeFormatType = labelData.FormatType
-					cache.Set(s.tapeService.DevicePath(), labelData, true)
-				}
-			}
-		}
+	// First check if there are active backup jobs - if so, skip tape operations
+	// to avoid blocking the dashboard on mutex contention with running jobs.
+	var jobsRunning bool
+	if s.backupService != nil {
+		activeJobs := s.backupService.GetActiveJobs()
+		jobsRunning = len(activeJobs) > 0
+	}
 
-		// Look up format_type from DB if we identified the loaded tape
-		if stats.LoadedTapeUUID != "" && stats.LoadedTapeFormatType == "" {
-			var dbFormatType string
-			if err := s.db.QueryRow("SELECT format_type FROM tapes WHERE uuid = ?", stats.LoadedTapeUUID).Scan(&dbFormatType); err == nil {
-				stats.LoadedTapeFormatType = dbFormatType
+	if jobsRunning {
+		// Jobs are running, use cached status or return "busy" to avoid blocking
+		stats.DriveStatus = "busy"
+		// Try to get label from cache without hitting the tape
+		if cache := s.tapeService.GetLabelCache(); cache != nil {
+			// Use a longer TTL when jobs are running to avoid refreshes
+			if cached := cache.Get(s.tapeService.DevicePath(), 30*time.Minute); cached != nil && cached.Label != nil {
+				stats.LoadedTape = cached.Label.Label
+				stats.LoadedTapeUUID = cached.Label.UUID
+				stats.LoadedTapePool = cached.Label.Pool
+				if cached.Label.EncryptionKeyFingerprint != "" {
+					stats.LoadedTapeEncrypted = true
+					stats.LoadedTapeEncKeyFP = cached.Label.EncryptionKeyFingerprint
+				}
+				if cached.Label.CompressionType != "" {
+					stats.LoadedTapeCompression = cached.Label.CompressionType
+				}
+				stats.LoadedTapeFormatType = cached.Label.FormatType
 			}
-		}
-		// Default to "raw" if we have a loaded tape but couldn't determine format
-		if stats.LoadedTape != "" && stats.LoadedTapeFormatType == "" {
-			stats.LoadedTapeFormatType = string(models.TapeFormatRaw)
 		}
 	} else {
-		stats.DriveStatus = "offline"
+		ctx := r.Context()
+		statusCtx, statusCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer statusCancel()
+		status, err := s.tapeService.GetStatus(statusCtx)
+		if err != nil {
+			stats.DriveStatus = "error"
+		} else if status.Online {
+			stats.DriveStatus = "online"
+			// Use cached label data to avoid rewinding the tape on every dashboard load
+			if cache := s.tapeService.GetLabelCache(); cache != nil {
+				if cached := cache.Get(s.tapeService.DevicePath(), 5*time.Minute); cached != nil {
+					if cached.Label != nil {
+						stats.LoadedTape = cached.Label.Label
+						stats.LoadedTapeUUID = cached.Label.UUID
+						stats.LoadedTapePool = cached.Label.Pool
+						if cached.Label.EncryptionKeyFingerprint != "" {
+							stats.LoadedTapeEncrypted = true
+							stats.LoadedTapeEncKeyFP = cached.Label.EncryptionKeyFingerprint
+						}
+						if cached.Label.CompressionType != "" {
+							stats.LoadedTapeCompression = cached.Label.CompressionType
+						}
+						stats.LoadedTapeFormatType = cached.Label.FormatType
+					}
+				} else {
+					// Cache miss - read label and cache it
+					labelCtx, labelCancel := context.WithTimeout(ctx, 5*time.Second)
+					defer labelCancel()
+					if labelData, err := s.tapeService.ReadTapeLabel(labelCtx); err == nil && labelData != nil {
+						stats.LoadedTape = labelData.Label
+						stats.LoadedTapeUUID = labelData.UUID
+						stats.LoadedTapePool = labelData.Pool
+						if labelData.EncryptionKeyFingerprint != "" {
+							stats.LoadedTapeEncrypted = true
+							stats.LoadedTapeEncKeyFP = labelData.EncryptionKeyFingerprint
+						}
+						if labelData.CompressionType != "" {
+							stats.LoadedTapeCompression = labelData.CompressionType
+						}
+						stats.LoadedTapeFormatType = labelData.FormatType
+						cache.Set(s.tapeService.DevicePath(), labelData, true)
+					}
+				}
+			}
+
+			// Look up format_type from DB if we identified the loaded tape
+			if stats.LoadedTapeUUID != "" && stats.LoadedTapeFormatType == "" {
+				var dbFormatType string
+				if err := s.db.QueryRow("SELECT format_type FROM tapes WHERE uuid = ?", stats.LoadedTapeUUID).Scan(&dbFormatType); err == nil {
+					stats.LoadedTapeFormatType = dbFormatType
+				}
+			}
+			// Default to "raw" if we have a loaded tape but couldn't determine format
+			if stats.LoadedTape != "" && stats.LoadedTapeFormatType == "" {
+				stats.LoadedTapeFormatType = string(models.TapeFormatRaw)
+			}
+		} else {
+			stats.DriveStatus = "offline"
+		}
 	}
 
 	s.respondJSON(w, http.StatusOK, stats)
