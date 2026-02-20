@@ -61,7 +61,8 @@ func (s *Service) tryLockWithContext(ctx context.Context) error {
 	}
 
 	// Fall back to polling with context checking
-	ticker := time.NewTicker(50 * time.Millisecond)
+	// Use 100ms interval to balance responsiveness vs CPU overhead
+	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {

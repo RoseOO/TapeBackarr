@@ -26,6 +26,10 @@ import (
 	"github.com/RoseOO/TapeBackarr/internal/tape"
 )
 
+// driveProbeTimeout limits how long we wait for a single drive probe operation.
+// This prevents one unresponsive drive from blocking the entire scan loop.
+const driveProbeTimeout = 45 * time.Second
+
 // FileInfo represents a file in the backup set
 type FileInfo struct {
 	Path    string    `json:"path"`
@@ -1795,9 +1799,6 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 	var devicePath string
 	const tapeRetryInterval = 10 * time.Second
 	const maxConsecutiveErrors = 30 // give up after ~5 minutes of persistent drive errors
-	// driveProbeTimeout limits how long we wait for a single drive probe operation.
-	// This prevents one unresponsive drive from blocking the entire scan loop.
-	const driveProbeTimeout = 45 * time.Second
 	lastNotifiedIssue := ""
 	consecutiveErrors := 0
 
