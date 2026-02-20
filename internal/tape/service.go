@@ -26,6 +26,9 @@ const DefaultOperationTimeout = 30 * time.Second
 // ErrOperationTimeout is returned when a tape operation times out
 var ErrOperationTimeout = errors.New("tape operation timed out")
 
+// ErrDeviceBusy is returned when the tape device is busy with another operation
+var ErrDeviceBusy = errors.New("tape device is busy")
+
 // deviceLocks is a global registry of per-device mutexes.
 // All Service instances that operate on the same device path share the same
 // mutex, preventing concurrent access that would cause "Device or resource busy"
@@ -46,6 +49,31 @@ func getDeviceLock(devicePath string) *sync.Mutex {
 	mu := &sync.Mutex{}
 	deviceLocks[devicePath] = mu
 	return mu
+}
+
+// tryLockWithContext attempts to acquire the device mutex while respecting context cancellation.
+// It uses TryLock in a polling loop to allow context cancellation to interrupt the wait.
+// This prevents indefinite blocking when another operation is holding the lock.
+func (s *Service) tryLockWithContext(ctx context.Context) error {
+	// First try a quick non-blocking lock
+	if s.deviceMu.TryLock() {
+		return nil
+	}
+
+	// Fall back to polling with context checking
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("failed to acquire device lock: %w", ctx.Err())
+		case <-ticker.C:
+			if s.deviceMu.TryLock() {
+				return nil
+			}
+		}
+	}
 }
 
 // DriveStatus represents the current status of a tape drive
@@ -296,7 +324,13 @@ func ScanDrives(ctx context.Context) ([]map[string]string, error) {
 // GetStatus returns the current status of the tape drive.
 // It enforces a timeout to prevent indefinite blocking when the drive is unresponsive.
 func (s *Service) GetStatus(ctx context.Context) (*DriveStatus, error) {
-	s.deviceMu.Lock()
+	if err := s.tryLockWithContext(ctx); err != nil {
+		return &DriveStatus{
+			DevicePath:  s.devicePath,
+			LastChecked: time.Now(),
+			Error:       fmt.Sprintf("device busy: %v", err),
+		}, ErrDeviceBusy
+	}
 	defer s.deviceMu.Unlock()
 	return s.getStatusLocked(ctx)
 }
@@ -525,9 +559,20 @@ func (s *Service) SetBlockSize(ctx context.Context, size int) error {
 // setBlockSizeLocked is the internal implementation of SetBlockSize.
 // The caller must hold s.deviceMu.
 func (s *Service) setBlockSizeLocked(ctx context.Context, size int) error {
-	cmd := exec.CommandContext(ctx, "mt", "-f", s.devicePath, "setblk", strconv.Itoa(size))
+	// Create a context with timeout to prevent indefinite blocking
+	opCtx, cancel := context.WithTimeout(ctx, DefaultOperationTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(opCtx, "mt", "-f", s.devicePath, "setblk", strconv.Itoa(size))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		// Check if the error was due to context timeout/cancellation
+		if opCtx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("set block size timed out after %v: %w", DefaultOperationTimeout, ErrOperationTimeout)
+		}
+		if opCtx.Err() == context.Canceled {
+			return fmt.Errorf("set block size cancelled: %w", ctx.Err())
+		}
 		return fmt.Errorf("set block size failed: %s", string(output))
 	}
 	return nil
@@ -552,7 +597,9 @@ const (
 // ReadTapeLabel reads the label from the beginning of the tape.
 // It enforces a timeout to prevent indefinite blocking when the drive is unresponsive.
 func (s *Service) ReadTapeLabel(ctx context.Context) (*TapeLabelData, error) {
-	s.deviceMu.Lock()
+	if err := s.tryLockWithContext(ctx); err != nil {
+		return nil, fmt.Errorf("ReadTapeLabel: %w", err)
+	}
 	defer s.deviceMu.Unlock()
 
 	// Rewind to beginning (already has its own timeout)
@@ -773,7 +820,9 @@ func (s *Service) GetDriveInfo(ctx context.Context) (map[string]string, error) {
 
 // IsTapeLoaded checks if a tape is loaded in the drive
 func (s *Service) IsTapeLoaded(ctx context.Context) (bool, error) {
-	s.deviceMu.Lock()
+	if err := s.tryLockWithContext(ctx); err != nil {
+		return false, fmt.Errorf("IsTapeLoaded: %w", err)
+	}
 	defer s.deviceMu.Unlock()
 	return s.isTapeLoadedLocked(ctx)
 }

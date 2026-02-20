@@ -1795,6 +1795,9 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 	var devicePath string
 	const tapeRetryInterval = 10 * time.Second
 	const maxConsecutiveErrors = 30 // give up after ~5 minutes of persistent drive errors
+	// driveProbeTimeout limits how long we wait for a single drive probe operation.
+	// This prevents one unresponsive drive from blocking the entire scan loop.
+	const driveProbeTimeout = 45 * time.Second
 	lastNotifiedIssue := ""
 	consecutiveErrors := 0
 
@@ -1803,8 +1806,11 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		dbErr := s.db.QueryRow("SELECT device_path FROM tape_drives WHERE current_tape_id = ? AND COALESCE(enabled, 1) = 1", tapeID).Scan(&devicePath)
 		if dbErr == nil {
 			// Verify the tape is actually the correct one by reading the physical label
+			// Use a per-drive timeout context to prevent blocking on unresponsive drives
+			probeCtx, probeCancel := context.WithTimeout(ctx, driveProbeTimeout)
 			probeSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
-			physLabel, readErr := probeSvc.ReadTapeLabel(ctx)
+			physLabel, readErr := probeSvc.ReadTapeLabel(probeCtx)
+			probeCancel()
 			if readErr == nil && physLabel != nil && physLabel.Label == expectedLabel && physLabel.UUID == expectedUUID {
 				s.logger.Info("Found correct tape via current_tape_id lookup", map[string]interface{}{
 					"tape": expectedLabel, "device": devicePath,
@@ -1812,28 +1818,53 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 				consecutiveErrors = 0
 				break
 			}
-			// Label didn't match — fall through to scan all drives
-			s.logger.Warn("current_tape_id drive has wrong/unreadable label, scanning all drives", map[string]interface{}{
-				"device": devicePath, "expected_tape": expectedLabel,
-			})
+			// Label didn't match or read timed out — fall through to scan all drives
+			if readErr != nil && probeCtx.Err() == context.DeadlineExceeded {
+				s.logger.Warn("Drive probe timed out during current_tape_id lookup, scanning all drives", map[string]interface{}{
+					"device": devicePath, "timeout": driveProbeTimeout.String(),
+				})
+			} else {
+				s.logger.Warn("current_tape_id drive has wrong/unreadable label, scanning all drives", map[string]interface{}{
+					"device": devicePath, "expected_tape": expectedLabel,
+				})
+			}
 		}
 
 		// Scan all enabled drives and read physical labels to find the correct tape
 		driveRows, driveErr := s.db.Query("SELECT device_path FROM tape_drives WHERE COALESCE(enabled, 1) = 1")
 		if driveErr == nil {
 			found := false
+			driveIndex := 0
 			for driveRows.Next() {
 				var dp string
 				if err := driveRows.Scan(&dp); err != nil {
 					continue
 				}
+				driveIndex++
+				// Update progress to indicate which drive is being probed (keeps UI responsive)
+				s.updateProgress(job.ID, "positioning", fmt.Sprintf("Probing drive %d (%s) for tape %s...", driveIndex, dp, expectedLabel))
+
+				// Use a per-drive timeout context to prevent blocking on unresponsive drives
+				probeCtx, probeCancel := context.WithTimeout(ctx, driveProbeTimeout)
 				probeSvc := tape.NewServiceForDevice(dp, s.tapeService.GetBlockSize())
-				loaded, loadErr := probeSvc.IsTapeLoaded(ctx)
+				loaded, loadErr := probeSvc.IsTapeLoaded(probeCtx)
 				if loadErr != nil || !loaded {
+					probeCancel()
+					if probeCtx.Err() == context.DeadlineExceeded {
+						s.logger.Warn("Drive probe timed out checking tape loaded status, skipping", map[string]interface{}{
+							"device": dp, "timeout": driveProbeTimeout.String(),
+						})
+					}
 					continue
 				}
-				physLabel, readErr := probeSvc.ReadTapeLabel(ctx)
+				physLabel, readErr := probeSvc.ReadTapeLabel(probeCtx)
+				probeCancel()
 				if readErr != nil || physLabel == nil {
+					if probeCtx.Err() == context.DeadlineExceeded {
+						s.logger.Warn("Drive probe timed out reading tape label, skipping", map[string]interface{}{
+							"device": dp, "timeout": driveProbeTimeout.String(),
+						})
+					}
 					continue
 				}
 				if physLabel.Label == expectedLabel && physLabel.UUID == expectedUUID {
@@ -2390,10 +2421,17 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 
 			// Fast path: try current_tape_id lookup first
 			if err := s.db.QueryRow("SELECT device_path FROM tape_drives WHERE current_tape_id = ? AND COALESCE(enabled, 1) = 1", currentTapeID).Scan(&devicePath); err == nil {
+				// Use a per-drive timeout context to prevent blocking on unresponsive drives
+				probeCtx, probeCancel := context.WithTimeout(ctx, driveProbeTimeout)
 				probeSvc := tape.NewServiceForDevice(devicePath, s.tapeService.GetBlockSize())
-				physLabel, readErr := probeSvc.ReadTapeLabel(ctx)
+				physLabel, readErr := probeSvc.ReadTapeLabel(probeCtx)
+				probeCancel()
 				if readErr == nil && physLabel != nil && physLabel.Label == currentLabel && physLabel.UUID == currentUUID {
 					foundSpanDrive = true
+				} else if probeCtx.Err() == context.DeadlineExceeded {
+					s.logger.Warn("Drive probe timed out during tape spanning lookup, scanning all drives", map[string]interface{}{
+						"device": devicePath, "timeout": driveProbeTimeout.String(),
+					})
 				}
 			}
 
@@ -2401,18 +2439,37 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 			if !foundSpanDrive {
 				driveRows, driveErr := s.db.Query("SELECT device_path FROM tape_drives WHERE COALESCE(enabled, 1) = 1")
 				if driveErr == nil {
+					driveIndex := 0
 					for driveRows.Next() {
 						var dp string
 						if err := driveRows.Scan(&dp); err != nil {
 							continue
 						}
+						driveIndex++
+						// Update progress to indicate which drive is being probed (keeps UI responsive)
+						s.updateProgress(job.ID, "positioning", fmt.Sprintf("Probing drive %d (%s) for tape %s...", driveIndex, dp, currentLabel))
+
+						// Use a per-drive timeout context to prevent blocking on unresponsive drives
+						probeCtx, probeCancel := context.WithTimeout(ctx, driveProbeTimeout)
 						probeSvc := tape.NewServiceForDevice(dp, s.tapeService.GetBlockSize())
-						loaded, loadErr := probeSvc.IsTapeLoaded(ctx)
+						loaded, loadErr := probeSvc.IsTapeLoaded(probeCtx)
 						if loadErr != nil || !loaded {
+							probeCancel()
+							if probeCtx.Err() == context.DeadlineExceeded {
+								s.logger.Warn("Drive probe timed out checking tape loaded status, skipping", map[string]interface{}{
+									"device": dp, "timeout": driveProbeTimeout.String(),
+								})
+							}
 							continue
 						}
-						physLabel, readErr := probeSvc.ReadTapeLabel(ctx)
+						physLabel, readErr := probeSvc.ReadTapeLabel(probeCtx)
+						probeCancel()
 						if readErr != nil || physLabel == nil {
+							if probeCtx.Err() == context.DeadlineExceeded {
+								s.logger.Warn("Drive probe timed out reading tape label, skipping", map[string]interface{}{
+									"device": dp, "timeout": driveProbeTimeout.String(),
+								})
+							}
 							continue
 						}
 						if physLabel.Label == currentLabel && physLabel.UUID == currentUUID {
