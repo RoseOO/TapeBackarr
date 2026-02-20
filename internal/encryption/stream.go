@@ -9,8 +9,9 @@ import (
 )
 
 const (
-	// StreamChunkSize is the size of each encryption chunk (64KB to match tape block size)
-	StreamChunkSize = 64 * 1024
+	// StreamChunkSize is the size of each encryption chunk (1MB to match the
+	// default LTO block size and minimize per-chunk GCM overhead).
+	StreamChunkSize = 1024 * 1024
 	// NonceSize is the size of the GCM nonce (12 bytes)
 	NonceSize = 12
 	// TagSize is the size of the GCM authentication tag (16 bytes)

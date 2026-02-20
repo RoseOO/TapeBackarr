@@ -1431,7 +1431,8 @@ func (s *Service) CalculateChecksum(path string) (string, error) {
 	defer f.Close()
 
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	buf := make([]byte, 1024*1024) // 1MB buffer reduces syscall overhead on NFS
+	if _, err := io.CopyBuffer(h, f, buf); err != nil {
 		return "", err
 	}
 
@@ -1441,16 +1442,23 @@ func (s *Service) CalculateChecksum(path string) (string, error) {
 // computeChecksumsAsync computes SHA256 checksums for all files concurrently,
 // storing results in the provided sync.Map (path -> checksum string) AND
 // inserting catalog entries into the database as each batch of checksums
-// completes. This builds the catalog incrementally during streaming rather
-// than in one large batch after streaming finishes, preventing the "stuck in
-// cataloging" state for large file counts. The TOC file list is written to
-// tape separately at the end by finishTape.
+// completes. This builds the catalog incrementally rather than in one large
+// batch after all checksums finish, preventing the "stuck in cataloging"
+// state for large file counts. The function is called after streaming
+// completes to avoid NFS I/O contention with the tape pipeline. The TOC
+// file list is written to tape separately at the end by finishTape.
 func (s *Service) computeChecksumsAsync(ctx context.Context, files []FileInfo, checksums *sync.Map, backupSetID int64, sourcePath string) {
-	// Use at most 2 workers to avoid I/O contention with the concurrent tape
-	// streaming pipeline (tar reads the same files from disk). More workers
-	// would create random I/O patterns that destroy sequential read throughput,
-	// especially on HDDs — the exact symptom that causes slow tape writes.
-	numWorkers := 2
+	// Use multiple workers to maximize NFS read throughput. This function now
+	// runs after tape streaming has finished, so there is no risk of I/O
+	// contention with tar. More workers keep many NFS read requests in flight,
+	// hiding per-file open/close latency on the NAS.
+	numWorkers := runtime.NumCPU()
+	if numWorkers < 4 {
+		numWorkers = 4
+	}
+	if numWorkers > 16 {
+		numWorkers = 16
+	}
 
 	type catalogEntry struct {
 		relPath  string
@@ -2108,16 +2116,23 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 		return s.StreamToTape(ctx, source.Path, batch, devicePath, progressCb, &pauseFlag)
 	}
 
-	// Start concurrent checksum computation for all files. Checksums are
-	// computed in parallel with tape streaming and catalog entries are written
-	// to the database incrementally as they complete — no post-streaming
-	// cataloging bottleneck. The TOC file list is written to tape at the end.
+	// Checksum computation is deferred until after streaming completes to
+	// avoid I/O contention on the source filesystem. When checksumming runs
+	// concurrently with tar, both compete for NFS/SMB bandwidth, destroying
+	// sequential read throughput (often dropping from 300+ MB/s to < 10 MB/s
+	// on NAS arrays with spinning disks). By checksumming after streaming,
+	// the tape pipeline gets full source bandwidth during the write phase.
 	fileChecksums := &sync.Map{}
 	checksumDone := make(chan struct{})
-	go func() {
-		defer close(checksumDone)
-		s.computeChecksumsAsync(ctx, files, fileChecksums, backupSetID, source.Path)
-	}()
+	var startChecksumsOnce sync.Once
+	startChecksums := func() {
+		startChecksumsOnce.Do(func() {
+			go func() {
+				defer close(checksumDone)
+				s.computeChecksumsAsync(ctx, files, fileChecksums, backupSetID, source.Path)
+			}()
+		})
+	}
 
 	// Check if all files fit on the current tape
 	remainingCapacity := tapeCapacity - tapeUsed
@@ -2142,7 +2157,8 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 			return nil, fmt.Errorf("failed to stream to tape: %w", err)
 		}
 
-		// Wait for all catalog entries to be inserted before updating block_offset
+		// Start checksums now that streaming is done (no NFS contention)
+		startChecksums()
 		<-checksumDone
 
 		if err := s.finishTape(finishTapeParams{
@@ -2248,7 +2264,11 @@ func (s *Service) RunBackup(ctx context.Context, job *models.BackupJob, source *
 					return nil, fmt.Errorf("failed to stream to tape %s: %w", currentLabel, err)
 				}
 
-				// Wait for all catalog entries to be inserted before updating block_offset
+				// Start checksums now that streaming is done (no NFS contention).
+				// sync.Once ensures this only launches the goroutine on the first
+				// batch; subsequent batches find checksums already in progress or
+				// complete, so <-checksumDone returns immediately.
+				startChecksums()
 				<-checksumDone
 
 				// Finish this tape with its per-tape TOC
