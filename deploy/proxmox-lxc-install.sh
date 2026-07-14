@@ -308,7 +308,7 @@ install_tapebackarr() {
     pct exec "$ct_id" -- bash -c "
         set -e
         cd /tmp
-        git clone https://github.com/LinearTapeFileSystem/ltfs.git
+        git clone --recurse-submodules https://github.com/LinearTapeFileSystem/ltfs.git
         cd ltfs
         ./autogen.sh
         # LTFS configure checks for 'icu' via pkg-config, but Debian ships ICU
