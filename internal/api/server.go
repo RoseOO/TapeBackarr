@@ -290,6 +290,15 @@ func (s *Server) setupRoutes() {
 			r.Delete("/{id}", s.handleDeleteSource)
 		})
 
+		// Backup Destinations
+		r.Route("/api/v1/destinations", func(r chi.Router) {
+			r.Get("/", s.handleListDestinations)
+			r.Post("/", s.handleCreateDestination)
+			r.Get("/{id}", s.handleGetDestination)
+			r.Put("/{id}", s.handleUpdateDestination)
+			r.Delete("/{id}", s.handleDeleteDestination)
+		})
+
 		// Backup Jobs
 		r.Route("/api/v1/jobs", func(r chi.Router) {
 			r.Get("/", s.handleListJobs)
@@ -963,6 +972,13 @@ func (s *Server) respondError(w http.ResponseWriter, status int, message string)
 func (s *Server) getIDParam(r *http.Request) (int64, error) {
 	idStr := chi.URLParam(r, "id")
 	return strconv.ParseInt(idStr, 10, 64)
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // Auth handlers
@@ -3062,6 +3078,190 @@ func (s *Server) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 	s.respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
+// Destination handlers
+
+func (s *Server) handleListDestinations(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.db.Query(`
+		SELECT d.id, d.name, d.destination_type, COALESCE(d.path, '') as path,
+		       d.pool_id, COALESCE(d.enabled, 1) as enabled,
+		       d.created_at, d.updated_at
+		FROM backup_destinations d
+		ORDER BY d.name
+	`)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer rows.Close()
+
+	dests := make([]map[string]interface{}, 0)
+	for rows.Next() {
+		var d models.BackupDestination
+		if err := rows.Scan(&d.ID, &d.Name, &d.DestinationType, &d.Path, &d.PoolID, &d.Enabled, &d.CreatedAt, &d.UpdatedAt); err != nil {
+			continue
+		}
+		dest := map[string]interface{}{
+			"id":               d.ID,
+			"name":             d.Name,
+			"destination_type": d.DestinationType,
+			"path":             d.Path,
+			"pool_id":          d.PoolID,
+			"enabled":          d.Enabled,
+			"created_at":       d.CreatedAt,
+			"updated_at":       d.UpdatedAt,
+		}
+		dests = append(dests, dest)
+	}
+	if dests == nil {
+		dests = make([]map[string]interface{}, 0)
+	}
+	s.respondJSON(w, http.StatusOK, dests)
+}
+
+func (s *Server) handleCreateDestination(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name            string `json:"name"`
+		DestinationType string `json:"destination_type"`
+		Path            string `json:"path"`
+		PoolID          *int64 `json:"pool_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Name == "" {
+		s.respondError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if req.DestinationType == "" {
+		req.DestinationType = "tape_pool"
+	}
+	if req.DestinationType == string(models.DestTypeFile) && req.Path == "" {
+		s.respondError(w, http.StatusBadRequest, "path is required for file destinations")
+		return
+	}
+
+	result, err := s.db.Exec(`
+		INSERT INTO backup_destinations (name, destination_type, path, pool_id)
+		VALUES (?, ?, ?, ?)
+	`, req.Name, req.DestinationType, req.Path, req.PoolID)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	id, _ := result.LastInsertId()
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "destination",
+			Title:    "Destination Created",
+			Message:  fmt.Sprintf("Backup destination %q created", req.Name),
+		})
+	}
+	s.auditLog(r, "create", "backup_destination", id, "Created destination")
+
+	s.respondJSON(w, http.StatusCreated, map[string]interface{}{
+		"id":   id,
+		"name": req.Name,
+	})
+}
+
+func (s *Server) handleGetDestination(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid destination id")
+		return
+	}
+
+	var d models.BackupDestination
+	err = s.db.QueryRow(`
+		SELECT id, name, destination_type, COALESCE(path, ''), pool_id,
+		       COALESCE(enabled, 1), created_at, updated_at
+		FROM backup_destinations WHERE id = ?
+	`, id).Scan(&d.ID, &d.Name, &d.DestinationType, &d.Path, &d.PoolID, &d.Enabled, &d.CreatedAt, &d.UpdatedAt)
+	if err != nil {
+		s.respondError(w, http.StatusNotFound, "destination not found")
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"id":               d.ID,
+		"name":             d.Name,
+		"destination_type": d.DestinationType,
+		"path":             d.Path,
+		"pool_id":          d.PoolID,
+		"enabled":          d.Enabled,
+		"created_at":       d.CreatedAt,
+		"updated_at":       d.UpdatedAt,
+	})
+}
+
+func (s *Server) handleUpdateDestination(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid destination id")
+		return
+	}
+
+	var req struct {
+		Name            *string `json:"name"`
+		DestinationType *string `json:"destination_type"`
+		Path            *string `json:"path"`
+		PoolID          *int64  `json:"pool_id"`
+		Enabled         *bool   `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Name != nil {
+		s.db.Exec("UPDATE backup_destinations SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", *req.Name, id)
+	}
+	if req.DestinationType != nil {
+		s.db.Exec("UPDATE backup_destinations SET destination_type = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", *req.DestinationType, id)
+	}
+	if req.Path != nil {
+		s.db.Exec("UPDATE backup_destinations SET path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", *req.Path, id)
+	}
+	if req.PoolID != nil {
+		s.db.Exec("UPDATE backup_destinations SET pool_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", *req.PoolID, id)
+	}
+	if req.Enabled != nil {
+		s.db.Exec("UPDATE backup_destinations SET enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", boolToInt(*req.Enabled), id)
+	}
+
+	s.auditLog(r, "update", "backup_destination", id, "Updated destination")
+	s.respondJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+func (s *Server) handleDeleteDestination(w http.ResponseWriter, r *http.Request) {
+	id, err := s.getIDParam(r)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "invalid destination id")
+		return
+	}
+
+	_, err = s.db.Exec("DELETE FROM backup_destinations WHERE id = ?", id)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(SystemEvent{
+			Type:     "info",
+			Category: "destination",
+			Title:    "Destination Deleted",
+			Message:  fmt.Sprintf("Backup destination %d deleted", id),
+		})
+	}
+	s.auditLog(r, "delete", "backup_destination", id, "Deleted destination")
+	s.respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
 // Job handlers
 
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
@@ -3071,10 +3271,12 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		       j.encryption_enabled, j.encryption_key_id,
 		       COALESCE(j.hw_encryption_enabled, 0), j.hw_encryption_key_id,
 		       COALESCE(j.compression, 'none') as compression,
-		       j.last_run_at, j.next_run_at
+		       j.last_run_at, j.next_run_at,
+		       COALESCE(j.destination_id, 0) as destination_id, d.name as destination_name
 		FROM backup_jobs j
 		LEFT JOIN backup_sources s ON j.source_id = s.id
 		LEFT JOIN tape_pools p ON j.pool_id = p.id
+		LEFT JOIN backup_destinations d ON j.destination_id = d.id
 		ORDER BY j.name
 	`)
 	if err != nil {
@@ -3087,13 +3289,15 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var j models.BackupJob
 		var sourceName, poolName *string
+		var destName *string
 		var compression string
 		if err := rows.Scan(&j.ID, &j.Name, &j.SourceID, &sourceName, &j.PoolID, &poolName,
 			&j.BackupType, &j.ScheduleCron, &j.RetentionDays, &j.Enabled,
 			&j.EncryptionEnabled, &j.EncryptionKeyID,
 			&j.HwEncryptionEnabled, &j.HwEncryptionKeyID,
 			&compression,
-			&j.LastRunAt, &j.NextRunAt); err != nil {
+			&j.LastRunAt, &j.NextRunAt,
+			&j.DestinationID, &destName); err != nil {
 			continue
 		}
 		job := map[string]interface{}{
@@ -3103,6 +3307,8 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			"source_name":           sourceName,
 			"pool_id":               j.PoolID,
 			"pool_name":             poolName,
+			"destination_id":        j.DestinationID,
+			"destination_name":      destName,
 			"backup_type":           j.BackupType,
 			"schedule_cron":         j.ScheduleCron,
 			"retention_days":        j.RetentionDays,
@@ -3126,6 +3332,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		Name              string `json:"name"`
 		SourceID          int64  `json:"source_id"`
 		PoolID            int64  `json:"pool_id"`
+		DestinationID     *int64 `json:"destination_id"`
 		BackupType        string `json:"backup_type"`
 		ScheduleCron      string `json:"schedule_cron"`
 		RetentionDays     int    `json:"retention_days"`
@@ -3184,10 +3391,10 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := s.db.Exec(`
-		INSERT INTO backup_jobs (name, source_id, pool_id, backup_type, schedule_cron, retention_days, enabled,
+		INSERT INTO backup_jobs (name, source_id, pool_id, destination_id, backup_type, schedule_cron, retention_days, enabled,
 			encryption_enabled, encryption_key_id, hw_encryption_enabled, hw_encryption_key_id, compression)
-		VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
-	`, req.Name, req.SourceID, req.PoolID, req.BackupType, req.ScheduleCron, req.RetentionDays,
+		VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+	`, req.Name, req.SourceID, req.PoolID, req.DestinationID, req.BackupType, req.ScheduleCron, req.RetentionDays,
 		encryptionEnabled, req.EncryptionKeyID, hwEncryptionEnabled, req.HwEncryptionKeyID, compression)
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, err.Error())
@@ -3233,10 +3440,11 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 
 	var j models.BackupJob
 	err = s.db.QueryRow(`
-		SELECT id, name, source_id, pool_id, backup_type, schedule_cron, retention_days, 
+		SELECT id, name, source_id, pool_id, COALESCE(destination_id, 0) as destination_id,
+		       backup_type, schedule_cron, retention_days,
 		       enabled, last_run_at, next_run_at, created_at, updated_at
 		FROM backup_jobs WHERE id = ?
-	`, id).Scan(&j.ID, &j.Name, &j.SourceID, &j.PoolID, &j.BackupType, &j.ScheduleCron, &j.RetentionDays,
+	`, id).Scan(&j.ID, &j.Name, &j.SourceID, &j.PoolID, &j.DestinationID, &j.BackupType, &j.ScheduleCron, &j.RetentionDays,
 		&j.Enabled, &j.LastRunAt, &j.NextRunAt, &j.CreatedAt, &j.UpdatedAt)
 	if err != nil {
 		s.respondError(w, http.StatusNotFound, "job not found")
@@ -3262,6 +3470,7 @@ func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request) {
 		RetentionDays   *int    `json:"retention_days"`
 		Enabled         *bool   `json:"enabled"`
 		EncryptionKeyID *int64  `json:"encryption_key_id"`
+		DestinationID  *int64  `json:"destination_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.respondError(w, http.StatusBadRequest, "invalid request body")
@@ -3295,6 +3504,10 @@ func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request) {
 	if req.PoolID != nil {
 		updates = append(updates, "pool_id = ?")
 		args = append(args, *req.PoolID)
+	}
+	if req.DestinationID != nil {
+		updates = append(updates, "destination_id = ?")
+		args = append(args, *req.DestinationID)
 	}
 	if req.BackupType != nil {
 		updates = append(updates, "backup_type = ?")
@@ -3437,12 +3650,13 @@ func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 	// Get job details
 	var job models.BackupJob
 	err = s.db.QueryRow(`
-		SELECT id, name, source_id, pool_id, backup_type, retention_days,
+		SELECT id, name, source_id, pool_id, COALESCE(destination_id, 0) as destination_id,
+			backup_type, retention_days,
 			encryption_enabled, encryption_key_id,
 			COALESCE(hw_encryption_enabled, 0), hw_encryption_key_id,
 			compression
 		FROM backup_jobs WHERE id = ?
-	`, id).Scan(&job.ID, &job.Name, &job.SourceID, &job.PoolID, &job.BackupType, &job.RetentionDays,
+	`, id).Scan(&job.ID, &job.Name, &job.SourceID, &job.PoolID, &job.DestinationID, &job.BackupType, &job.RetentionDays,
 		&job.EncryptionEnabled, &job.EncryptionKeyID,
 		&job.HwEncryptionEnabled, &job.HwEncryptionKeyID,
 		&job.Compression)
@@ -3468,7 +3682,58 @@ func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 		backupType = models.BackupType(req.BackupType)
 	}
 
-	// Determine tape to use
+	// Check if this job has a file destination
+	if job.DestinationID != nil && *job.DestinationID > 0 {
+		var dest models.BackupDestination
+		err = s.db.QueryRow(`
+			SELECT id, name, destination_type, COALESCE(path, ''), pool_id,
+			       COALESCE(enabled, 1), created_at, updated_at
+			FROM backup_destinations WHERE id = ?
+		`, *job.DestinationID).Scan(&dest.ID, &dest.Name, &dest.DestinationType, &dest.Path, &dest.PoolID, &dest.Enabled, &dest.CreatedAt, &dest.UpdatedAt)
+		if err != nil {
+			s.respondError(w, http.StatusNotFound, "destination not found")
+			return
+		}
+
+		if dest.DestinationType == models.DestTypeFile {
+			// Run file backup in background
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						if s.logger != nil {
+							s.logger.Error("Panic in file backup goroutine", map[string]interface{}{
+								"job_id": job.ID,
+								"panic":  fmt.Sprintf("%v", r),
+							})
+						}
+					}
+				}()
+				ctx := context.Background()
+				if _, err := s.backupService.RunBackupToFile(ctx, &job, &source, &dest, backupType); err != nil {
+					s.logger.Error("File backup job failed", map[string]interface{}{
+						"job_id":   job.ID,
+						"job_name": job.Name,
+						"error":    err.Error(),
+					})
+				}
+			}()
+
+			s.auditLog(r, "run", "backup_job", id, "Started file backup job")
+			s.respondJSON(w, http.StatusAccepted, map[string]interface{}{
+				"status":     "started",
+				"message":    fmt.Sprintf("File backup job started, output to %s", dest.Path),
+				"destination": dest.Path,
+			})
+			return
+		}
+
+		// Destination is tape_pool type — use its pool_id if set
+		if dest.DestinationType == models.DestTypeTapePool && dest.PoolID != nil {
+			job.PoolID = *dest.PoolID
+		}
+	}
+
+	// Determine tape to use (existing tape backup logic)
 	tapeID := req.TapeID
 
 	// Default to pool-based selection when no tape_id is provided

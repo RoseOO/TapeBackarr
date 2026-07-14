@@ -127,9 +127,39 @@ func main() {
 		`, job.SourceID).Scan(&source.ID, &source.Name, &source.SourceType, &source.Path,
 			&source.IncludePatterns, &source.ExcludePatterns)
 		if err != nil {
-			// Notify on failure
 			telegramService.NotifyBackupFailed(ctx, job.Name, fmt.Sprintf("source not found: %v", err))
 			return fmt.Errorf("source not found: %w", err)
+		}
+
+		// Check for file destination
+		if job.DestinationID != nil && *job.DestinationID > 0 {
+			var dest models.BackupDestination
+			err = db.QueryRow(`
+				SELECT id, name, destination_type, COALESCE(path, ''), pool_id,
+				       COALESCE(enabled, 1), created_at, updated_at
+				FROM backup_destinations WHERE id = ?
+			`, *job.DestinationID).Scan(&dest.ID, &dest.Name, &dest.DestinationType, &dest.Path, &dest.PoolID, &dest.Enabled, &dest.CreatedAt, &dest.UpdatedAt)
+			if err != nil {
+				telegramService.NotifyBackupFailed(ctx, job.Name, fmt.Sprintf("destination not found: %v", err))
+				return fmt.Errorf("destination not found: %w", err)
+			}
+
+			if dest.DestinationType == models.DestTypeFile {
+				telegramService.NotifyBackupStarted(ctx, job.Name, 1, string(job.BackupType))
+				startTime := time.Now()
+				result, runErr := backupService.RunBackupToFile(ctx, job, &source, &dest, job.BackupType)
+				if runErr != nil {
+					telegramService.NotifyBackupFailed(ctx, job.Name, runErr.Error())
+					return runErr
+				}
+				duration := time.Since(startTime)
+				telegramService.NotifyBackupCompleted(ctx, job.Name, result.FileCount, result.TotalBytes, duration)
+				return nil
+			}
+			// For tape_pool destinations, override pool_id
+			if dest.DestinationType == models.DestTypeTapePool && dest.PoolID != nil {
+				job.PoolID = *dest.PoolID
+			}
 		}
 
 		// Get an available tape from the pool

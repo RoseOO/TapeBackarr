@@ -9,7 +9,7 @@
 # Requirements:
 # - Proxmox VE 7.0 or later
 # - Internet connection
-# - Available LXC template (Debian 12 preferred)
+# - Available LXC template (Debian 13 preferred)
 
 set -e
 
@@ -99,24 +99,24 @@ select_template() {
     
     # List available templates and select the best one
     local templates
-    templates=$(pveam list local 2>/dev/null | grep -E "debian-1[12]" | head -1 | awk '{print $1}')
+    templates=$(pveam list local 2>/dev/null | grep -E "debian-1[23]" | head -1 | awk '{print $1}')
     
     if [[ -z "$templates" ]]; then
-        msg_info "No Debian template found. Downloading Debian 12..." >&2
+        msg_info "No Debian template found. Downloading Debian 13..." >&2
         pveam update >&2
         
-        # Get available Debian 12 templates dynamically from pveam available
+        # Get available Debian 13 templates dynamically from pveam available
         local available_template
-        available_template=$(pveam available --section system 2>/dev/null | grep -E "debian-12-standard_[0-9].*_amd64" | head -1 | awk '{print $2}')
+        available_template=$(pveam available --section system 2>/dev/null | grep -E "debian-13-standard_[0-9].*_amd64" | head -1 | awk '{print $2}')
         
         if [[ -z "$available_template" ]]; then
-            msg_error "Could not find a Debian 12 template in the available templates. Check your network connection and run 'pveam available --section system' to see available templates."
+            msg_error "Could not find a Debian 13 template in the available templates. Check your network connection and run 'pveam available --section system' to see available templates."
         fi
         
         msg_info "Downloading template: $available_template" >&2
         pveam download local "$available_template" >&2
         
-        templates=$(pveam list local 2>/dev/null | grep "debian-12" | head -1 | awk '{print $1}')
+        templates=$(pveam list local 2>/dev/null | grep "debian-13" | head -1 | awk '{print $1}')
     fi
     
     if [[ -z "$templates" ]]; then

@@ -318,6 +318,14 @@ const (
 	SourceTypeNFS   SourceType = "nfs"
 )
 
+// DestinationType represents the type of backup destination
+type DestinationType string
+
+const (
+	DestTypeTapePool DestinationType = "tape_pool"
+	DestTypeFile     DestinationType = "file"
+)
+
 // BackupSource represents a configured backup source
 type BackupSource struct {
 	ID              int64      `json:"id" db:"id"`
@@ -329,6 +337,18 @@ type BackupSource struct {
 	Enabled         bool       `json:"enabled" db:"enabled"`
 	CreatedAt       time.Time  `json:"created_at" db:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at" db:"updated_at"`
+}
+
+// BackupDestination represents a configured backup destination
+type BackupDestination struct {
+	ID              int64           `json:"id" db:"id"`
+	Name            string          `json:"name" db:"name"`
+	DestinationType DestinationType `json:"destination_type" db:"destination_type"`
+	Path            string          `json:"path" db:"path"`
+	PoolID          *int64          `json:"pool_id" db:"pool_id"`
+	Enabled         bool            `json:"enabled" db:"enabled"`
+	CreatedAt       time.Time       `json:"created_at" db:"created_at"`
+	UpdatedAt       time.Time       `json:"updated_at" db:"updated_at"`
 }
 
 // BackupType represents the type of backup
@@ -345,6 +365,7 @@ type BackupJob struct {
 	Name                string          `json:"name" db:"name"`
 	SourceID            int64           `json:"source_id" db:"source_id"`
 	PoolID              int64           `json:"pool_id" db:"pool_id"`
+	DestinationID       *int64          `json:"destination_id" db:"destination_id"`
 	BackupType          BackupType      `json:"backup_type" db:"backup_type"`
 	ScheduleCron        string          `json:"schedule_cron" db:"schedule_cron"`
 	RetentionDays       int             `json:"retention_days" db:"retention_days"`
@@ -393,6 +414,7 @@ type BackupSet struct {
 	Compressed        bool            `json:"compressed" db:"compressed"`
 	CompressionType   CompressionType `json:"compression_type" db:"compression_type"`
 	ParentSetID       *int64          `json:"parent_set_id" db:"parent_set_id"`
+	FilePath          string          `json:"file_path" db:"file_path"`
 	CreatedAt         time.Time       `json:"created_at" db:"created_at"`
 	UpdatedAt         time.Time       `json:"updated_at" db:"updated_at"`
 }

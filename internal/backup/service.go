@@ -3250,3 +3250,366 @@ func (d *DummyScanner) Scan() bool   { return false }
 func (d *DummyScanner) Text() string { return "" }
 
 var _ interface{ Scan() bool } = &DummyScanner{}
+
+// StreamToFile streams files to a tar archive file instead of a tape device.
+func (s *Service) StreamToFile(ctx context.Context, sourcePath string, files []FileInfo, outputPath string, progressCb func(bytesWritten int64), pauseFlag *int32) (int64, error) {
+	if len(files) == 0 {
+		return 0, nil
+	}
+
+	fileListPath := fmt.Sprintf("/tmp/tapebackarr-filelist-%d.txt", time.Now().UnixNano())
+	fileList, err := os.Create(fileListPath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create file list: %w", err)
+	}
+	defer os.Remove(fileListPath)
+
+	for _, f := range files {
+		relPath, _ := filepath.Rel(sourcePath, f.Path)
+		fmt.Fprintln(fileList, relPath)
+	}
+	fileList.Close()
+
+	tarArgs := []string{
+		"-c",
+		"-b", fmt.Sprintf("%d", s.blockSize/512),
+		"-C", sourcePath,
+		"-T", fileListPath,
+		"-f", outputPath,
+	}
+
+	cmd := exec.CommandContext(ctx, "tar", tarArgs...)
+	cmd.Dir = sourcePath
+
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		return 0, fmt.Errorf("backup cancelled: %w", ctx.Err())
+	}
+	if err != nil {
+		return 0, fmt.Errorf("tar failed: %s", string(output))
+	}
+
+	fi, statErr := os.Stat(outputPath)
+	if statErr != nil {
+		return 0, fmt.Errorf("failed to stat output file: %w", statErr)
+	}
+
+	if progressCb != nil {
+		progressCb(fi.Size())
+	}
+	return fi.Size(), nil
+}
+
+// StreamToFileCompressed streams files to a compressed tar archive file.
+func (s *Service) StreamToFileCompressed(ctx context.Context, sourcePath string, files []FileInfo, outputPath string, compression models.CompressionType, progressCb func(bytesWritten int64), pauseFlag *int32) (int64, error) {
+	if len(files) == 0 {
+		return 0, nil
+	}
+
+	fileListPath := fmt.Sprintf("/tmp/tapebackarr-filelist-%d.txt", time.Now().UnixNano())
+	fileList, err := os.Create(fileListPath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create file list: %w", err)
+	}
+	defer os.Remove(fileListPath)
+
+	for _, f := range files {
+		relPath, _ := filepath.Rel(sourcePath, f.Path)
+		fmt.Fprintln(fileList, relPath)
+	}
+	fileList.Close()
+
+	var cmd *exec.Cmd
+	switch compression {
+	case models.CompressionGzip:
+		if _, lookErr := exec.LookPath("pigz"); lookErr == nil {
+			cmd = exec.CommandContext(ctx, "sh", "-c",
+				fmt.Sprintf("tar -c -b %d -C %s -T %s | pigz -1 -c > %s",
+					s.blockSize/512, sourcePath, fileListPath, outputPath))
+		} else {
+			cmd = exec.CommandContext(ctx, "sh", "-c",
+				fmt.Sprintf("tar -c -b %d -C %s -T %s | gzip -1 -c > %s",
+					s.blockSize/512, sourcePath, fileListPath, outputPath))
+		}
+	case models.CompressionZstd:
+		cmd = exec.CommandContext(ctx, "sh", "-c",
+			fmt.Sprintf("tar -c -b %d -C %s -T %s | zstd -T0 -c --no-progress > %s",
+				s.blockSize/512, sourcePath, fileListPath, outputPath))
+	default:
+		return 0, fmt.Errorf("unsupported compression type: %s", compression)
+	}
+
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		return 0, fmt.Errorf("backup cancelled: %w", ctx.Err())
+	}
+	if err != nil {
+		return 0, fmt.Errorf("tar+compress failed: %s", string(output))
+	}
+
+	fi, statErr := os.Stat(outputPath)
+	if statErr != nil {
+		return 0, fmt.Errorf("failed to stat output file: %w", statErr)
+	}
+
+	if progressCb != nil {
+		progressCb(fi.Size())
+	}
+	return fi.Size(), nil
+}
+
+// StreamToFileEncrypted streams files to an encrypted tar archive file using openssl.
+func (s *Service) StreamToFileEncrypted(ctx context.Context, sourcePath string, files []FileInfo, outputPath string, encryptionKey string, progressCb func(bytesWritten int64), pauseFlag *int32) (int64, error) {
+	if len(files) == 0 {
+		return 0, nil
+	}
+
+	fileListPath := fmt.Sprintf("/tmp/tapebackarr-filelist-%d.txt", time.Now().UnixNano())
+	fileList, err := os.Create(fileListPath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create file list: %w", err)
+	}
+	defer os.Remove(fileListPath)
+
+	for _, f := range files {
+		relPath, _ := filepath.Rel(sourcePath, f.Path)
+		fmt.Fprintln(fileList, relPath)
+	}
+	fileList.Close()
+
+	cmd := exec.CommandContext(ctx, "sh", "-c",
+		fmt.Sprintf("tar -c -b %d -C %s -T %s | openssl enc -aes-256-cbc -pass pass:%s -pbkdf2 -iter 100000 -out %s",
+			s.blockSize/512, sourcePath, fileListPath, encryptionKey, outputPath))
+
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		return 0, fmt.Errorf("backup cancelled: %w", ctx.Err())
+	}
+	if err != nil {
+		return 0, fmt.Errorf("tar+encrypt failed: %s", string(output))
+	}
+
+	fi, statErr := os.Stat(outputPath)
+	if statErr != nil {
+		return 0, fmt.Errorf("failed to stat output file: %w", statErr)
+	}
+
+	if progressCb != nil {
+		progressCb(fi.Size())
+	}
+	return fi.Size(), nil
+}
+
+// RunBackupToFile runs a backup job writing to a file destination (NFS share, mounted disk, etc.)
+func (s *Service) RunBackupToFile(ctx context.Context, job *models.BackupJob, source *models.BackupSource, dest *models.BackupDestination, backupType models.BackupType) (*models.BackupSet, error) {
+	startTime := time.Now()
+
+	ctx, cancel := context.WithCancel(ctx)
+	var pauseFlag int32
+
+	s.mu.Lock()
+	s.activeJobs[job.ID] = &JobProgress{
+		JobID:   job.ID,
+		JobName: job.Name,
+		Phase:   "initializing",
+		Status:  "running",
+		Message: "Starting file backup job...",
+		StartTime: startTime,
+		UpdatedAt: startTime,
+		LogLines:  []string{fmt.Sprintf("[%s] Starting file backup job: %s", startTime.Format("15:04:05"), job.Name)},
+	}
+	s.cancelFuncs[job.ID] = cancel
+	s.pauseFlags[job.ID] = &pauseFlag
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.activeJobs, job.ID)
+		delete(s.cancelFuncs, job.ID)
+		delete(s.pauseFlags, job.ID)
+		s.mu.Unlock()
+		cancel()
+	}()
+
+	// Build output filename
+	timestamp := startTime.Format("20060102-150405")
+	ext := ".tar"
+	if job.Compression == models.CompressionGzip {
+		ext = ".tar.gz"
+	} else if job.Compression == models.CompressionZstd {
+		ext = ".tar.zst"
+	}
+	outputFilename := fmt.Sprintf("%s-%s-%s%s", job.Name, source.Name, timestamp, ext)
+	outputPath := filepath.Join(dest.Path, outputFilename)
+
+	s.emitEvent("info", "backup", "File Backup Started", fmt.Sprintf("Starting file backup job: %s -> %s", job.Name, outputPath))
+	s.logger.Info("Starting file backup job", map[string]interface{}{
+		"job_id":      job.ID,
+		"job_name":    job.Name,
+		"source_path": source.Path,
+		"output_path": outputPath,
+		"backup_type": backupType,
+	})
+
+	result, err := s.db.Exec(`
+		INSERT INTO backup_sets (job_id, tape_id, backup_type, format_type, start_time, status, file_path)
+		VALUES (?, 0, ?, 'raw', ?, ?, ?)
+	`, job.ID, backupType, startTime, models.BackupSetStatusRunning, outputPath)
+	if err != nil {
+		s.updateProgress(job.ID, "failed", "Failed to create backup set: "+err.Error())
+		return nil, fmt.Errorf("failed to create backup set: %w", err)
+	}
+
+	backupSetID, _ := result.LastInsertId()
+	s.mu.Lock()
+	if p, ok := s.activeJobs[job.ID]; ok {
+		p.BackupSetID = backupSetID
+	}
+	s.mu.Unlock()
+
+	s.updateProgress(job.ID, "scanning", fmt.Sprintf("Scanning source: %s", source.Path))
+	files, err := s.ScanSource(ctx, source)
+	if err != nil {
+		s.updateProgress(job.ID, "failed", fmt.Sprintf("Failed to scan source: %s", err.Error()))
+		s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
+		return nil, fmt.Errorf("failed to scan source: %w", err)
+	}
+
+	s.updateProgress(job.ID, "scanning", fmt.Sprintf("Scan complete: found %d files", len(files)))
+
+	if backupType == models.BackupTypeIncremental {
+		var snapshotData []byte
+		if snapErr := s.db.QueryRow(`
+			SELECT snapshot_data FROM snapshots WHERE source_id = ? ORDER BY created_at DESC LIMIT 1
+		`, source.ID).Scan(&snapshotData); snapErr == nil && len(snapshotData) > 0 {
+			files, err = s.CompareWithSnapshot(ctx, files, snapshotData)
+			if err != nil {
+				s.logger.Warn("Failed to compare with snapshot, doing full backup", map[string]interface{}{"error": err.Error()})
+			}
+		}
+	}
+
+	var totalBytes int64
+	for _, f := range files {
+		totalBytes += f.Size
+	}
+
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+
+	s.mu.Lock()
+	if p, ok := s.activeJobs[job.ID]; ok {
+		p.TotalFiles = int64(len(files))
+		p.TotalBytes = totalBytes
+	}
+	s.mu.Unlock()
+
+	progressCb := func(bytesWritten int64) {
+		s.mu.Lock()
+		if p, ok := s.activeJobs[job.ID]; ok {
+			p.BytesWritten = bytesWritten
+			p.UpdatedAt = time.Now()
+		}
+		s.mu.Unlock()
+	}
+
+	var actualBytes int64
+	useCompression := job.Compression != "" && job.Compression != models.CompressionNone && job.Compression != models.CompressionLTO
+
+	if job.EncryptionEnabled && job.EncryptionKeyID != nil {
+		encKey, keyErr := s.GetEncryptionKey(ctx, *job.EncryptionKeyID)
+		if keyErr != nil {
+			return nil, fmt.Errorf("failed to get encryption key: %w", keyErr)
+		}
+		s.updateProgress(job.ID, "streaming", fmt.Sprintf("Encrypting and writing %d files to %s...", len(files), outputPath))
+		actualBytes, err = s.StreamToFileEncrypted(ctx, source.Path, files, outputPath, encKey, progressCb, &pauseFlag)
+	} else if useCompression {
+		s.updateProgress(job.ID, "streaming", fmt.Sprintf("Compressing (%s) and writing %d files to %s...", job.Compression, len(files), outputPath))
+		actualBytes, err = s.StreamToFileCompressed(ctx, source.Path, files, outputPath, job.Compression, progressCb, &pauseFlag)
+	} else {
+		s.updateProgress(job.ID, "streaming", fmt.Sprintf("Writing %d files to %s...", len(files), outputPath))
+		actualBytes, err = s.StreamToFile(ctx, source.Path, files, outputPath, progressCb, &pauseFlag)
+	}
+
+	if err != nil {
+		s.updateProgress(job.ID, "failed", "Stream failed: "+err.Error())
+		s.updateBackupSetStatus(backupSetID, models.BackupSetStatusFailed, err.Error())
+		return nil, fmt.Errorf("failed to stream to file: %w", err)
+	}
+
+	// Compute checksums and write TOC
+	fileChecksums := &sync.Map{}
+	checksumDone := make(chan struct{})
+	go func() {
+		defer close(checksumDone)
+		s.computeChecksumsAsync(ctx, files, fileChecksums, backupSetID, source.Path)
+	}()
+	<-checksumDone
+
+	// Write TOC JSON alongside the archive
+	tocPath := outputPath + ".toc.json"
+	tocEntries := make([]map[string]interface{}, 0, len(files))
+	for _, f := range files {
+		checksum, _ := fileChecksums.Load(f.Path)
+		tocEntries = append(tocEntries, map[string]interface{}{
+			"path":     f.Path,
+			"size":     f.Size,
+			"mode":     f.Mode,
+			"mod_time": f.ModTime.Format(time.RFC3339),
+			"checksum": checksum,
+		})
+	}
+	tocData, _ := json.MarshalIndent(map[string]interface{}{
+		"job_id":       job.ID,
+		"job_name":     job.Name,
+		"source_name":  source.Name,
+		"backup_type":  backupType,
+		"start_time":   startTime.Format(time.RFC3339),
+		"file_count":   len(files),
+		"total_bytes":  totalBytes,
+		"actual_bytes": actualBytes,
+		"files":        tocEntries,
+	}, "", "  ")
+	if tocWriteErr := os.WriteFile(tocPath, tocData, 0644); tocWriteErr != nil {
+		s.logger.Warn("Failed to write TOC file", map[string]interface{}{"error": tocWriteErr.Error()})
+	} else {
+		s.logger.Info("Wrote TOC file", map[string]interface{}{"path": tocPath})
+	}
+
+	endTime := time.Now()
+	encrypted := job.EncryptionEnabled && job.EncryptionKeyID != nil
+	compressed := useCompression
+
+	s.db.Exec(`UPDATE backup_sets SET status=?, end_time=?, file_count=?, total_bytes=?,
+		encrypted=?, encryption_key_id=?, compressed=?, compression_type=?, updated_at=?
+		WHERE id=?`,
+		models.BackupSetStatusCompleted, endTime, len(files), totalBytes,
+		encrypted, job.EncryptionKeyID, compressed, job.Compression, time.Now(),
+		backupSetID)
+
+	snapshot, _ := s.CreateSnapshot(files)
+	s.db.Exec(`INSERT INTO snapshots (source_id, backup_set_id, file_count, total_bytes, snapshot_data)
+		VALUES (?, ?, ?, ?, ?)`, source.ID, backupSetID, len(files), totalBytes, snapshot)
+
+	s.updateProgress(job.ID, "completed", fmt.Sprintf("Backup complete: %d files, %s written to %s", len(files), formatBytes(actualBytes), outputPath))
+	s.emitEvent("info", "backup", "File Backup Complete",
+		fmt.Sprintf("Job %s completed: %d files written to %s", job.Name, len(files), outputFilename))
+
+	return &models.BackupSet{
+		ID:       backupSetID,
+		JobID:    job.ID,
+		FilePath: outputPath,
+		Status:   models.BackupSetStatusCompleted,
+	}, nil
+}
+
+func formatBytes(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}

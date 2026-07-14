@@ -241,6 +241,35 @@ export async function deleteSource(id: number) {
   });
 }
 
+// Destinations
+export async function getDestinations() {
+  return fetchApi('/destinations');
+}
+
+export async function getDestination(id: number) {
+  return fetchApi(`/destinations/${id}`);
+}
+
+export async function createDestination(data: { name: string; destination_type: string; path?: string; pool_id?: number | null }) {
+  return fetchApi('/destinations', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateDestination(id: number, data: { name?: string; destination_type?: string; path?: string; pool_id?: number | null; enabled?: boolean }) {
+  return fetchApi(`/destinations/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteDestination(id: number) {
+  return fetchApi(`/destinations/${id}`, {
+    method: 'DELETE',
+  });
+}
+
 // Jobs
 export async function getJobs() {
   return fetchApi('/jobs');
@@ -250,7 +279,7 @@ export async function getJob(id: number) {
   return fetchApi(`/jobs/${id}`);
 }
 
-export async function createJob(data: { name: string; source_id: number; pool_id: number; backup_type: string; schedule_cron?: string; retention_days: number; encryption_key_id?: number | null }) {
+export async function createJob(data: { name: string; source_id: number; pool_id: number; backup_type: string; schedule_cron?: string; retention_days: number; encryption_key_id?: number | null; destination_id?: number | null }) {
   return fetchApi('/jobs', {
     method: 'POST',
     body: JSON.stringify(data),

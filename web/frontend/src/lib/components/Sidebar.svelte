@@ -26,6 +26,7 @@
       items: [
         { href: '/jobs', label: 'Backup Jobs', icon: '📦' },
         { href: '/sources', label: 'Sources', icon: '📁' },
+        { href: '/destinations', label: 'Destinations', icon: '📤' },
         { href: '/restore', label: 'Restore', icon: '🔄' },
       ],
     },

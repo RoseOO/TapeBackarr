@@ -72,11 +72,21 @@
     key_fingerprint: string;
   }
 
+  interface Destination {
+    id: number;
+    name: string;
+    destination_type: string;
+    path: string;
+    pool_id: number | null;
+    enabled: boolean;
+  }
+
   let jobs: Job[] = [];
   let sources: Source[] = [];
   let pools: Pool[] = [];
   let tapes: Tape[] = [];
   let encryptionKeys: EncryptionKey[] = [];
+  let destinations: Destination[] = [];
   let activeJobs: ActiveJob[] = [];
   let loading = true;
   let error = '';
@@ -100,6 +110,7 @@
     name: '',
     source_id: 0,
     pool_id: 0,
+    destination_id: null as number | null,
     backup_type: 'full',
     schedule_cron: '',
     retention_days: 30,
@@ -139,18 +150,20 @@
     loading = true;
     error = '';
     try {
-      const [jobsResult, sourcesResult, poolsResult, tapesResult, keysResult] = await Promise.all([
+      const [jobsResult, sourcesResult, poolsResult, tapesResult, keysResult, destsResult] = await Promise.all([
         api.getJobs(),
         api.getSources(),
         api.getPools(),
         api.getTapes(),
         api.getEncryptionKeys(),
+        api.getDestinations(),
       ]);
       jobs = Array.isArray(jobsResult) ? jobsResult : [];
       sources = Array.isArray(sourcesResult) ? sourcesResult : [];
       pools = Array.isArray(poolsResult) ? poolsResult : [];
       tapes = Array.isArray(tapesResult) ? tapesResult : [];
       encryptionKeys = keysResult?.keys || [];
+      destinations = Array.isArray(destsResult) ? destsResult : [];
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load data';
     } finally {
@@ -166,6 +179,9 @@
       }
       if (!payload.hw_encryption_key_id) {
         delete payload.hw_encryption_key_id;
+      }
+      if (!payload.destination_id) {
+        delete payload.destination_id;
       }
       await api.createJob(payload);
       showCreateModal = false;
@@ -243,6 +259,7 @@
       name: '',
       source_id: 0,
       pool_id: 0,
+      destination_id: null as number | null,
       backup_type: 'full',
       schedule_cron: '',
       retention_days: 30,
@@ -609,6 +626,16 @@
               <option value={pool.id}>{pool.name}</option>
             {/each}
           </select>
+        </div>
+        <div class="form-group">
+          <label for="dest">Destination (optional)</label>
+          <select id="dest" bind:value={formData.destination_id}>
+            <option value={null}>Use Tape Pool (default)</option>
+            {#each destinations as dest}
+              <option value={dest.id}>{dest.name} ({dest.destination_type === 'file' ? 'File' : 'Pool'})</option>
+            {/each}
+          </select>
+          <small>Select a file destination to write to disk/NFS instead of tape.</small>
         </div>
         <div class="form-group">
           <label for="type">Backup Type</label>
