@@ -311,17 +311,24 @@ install_tapebackarr() {
         git clone https://github.com/LinearTapeFileSystem/ltfs.git
         cd ltfs
         ./autogen.sh
-        # ICU on Debian is split into icu-uc/icu-i18n modules — LTFS expects a single 'icu' module.
-        # Set the env vars explicitly to work around the pkg-config module name mismatch.
-        ICU_CFLAGS=\"\$(pkg-config --cflags icu-uc)\"
-        ICU_LIBS=\"\$(pkg-config --libs icu-uc icu-i18n)\"
-        ICU_MODULE_CFLAGS=\"\$ICU_CFLAGS\" ICU_MODULE_LIBS=\"\$ICU_LIBS\" \
-            ./configure --disable-dependency-tracking
+        # LTFS configure checks for 'icu' via pkg-config, but Debian ships ICU
+        # as icu-uc / icu-i18n modules. Create a wrapper .pc file.
+        ICU_VER=\$(pkg-config --modversion icu-uc 2>/dev/null || echo '72.1')
+        ICU_CFLAGS=\$(pkg-config --cflags icu-uc 2>/dev/null || echo '')
+        ICU_LIBS=\$(pkg-config --libs icu-uc icu-i18n 2>/dev/null || echo '-licuuc -licui18n -licudata')
+        cat > /tmp/icu.pc << PCEND
+Name: icu
+Description: ICU Library
+Version: \${ICU_VER}
+Libs: \${ICU_LIBS}
+Cflags: \${ICU_CFLAGS}
+PCEND
+        PKG_CONFIG_PATH=/tmp:\${PKG_CONFIG_PATH} ./configure --disable-dependency-tracking
         make -j\$(nproc)
         make install
         ldconfig
         cd /tmp
-        rm -rf ltfs
+        rm -rf ltfs /tmp/icu.pc
     "
     msg_ok "LTFS installed from source"
     
