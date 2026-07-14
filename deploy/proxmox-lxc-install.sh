@@ -97,15 +97,14 @@ select_template() {
     
     msg_info "Looking for Debian templates..." >&2
     
-    # List available templates and select the best one
+    # Always prefer Debian 13
     local templates
-    templates=$(pveam list local 2>/dev/null | grep -E "debian-1[23]" | head -1 | awk '{print $1}')
+    templates=$(pveam list local 2>/dev/null | grep -E "debian-13" | head -1 | awk '{print $1}')
     
     if [[ -z "$templates" ]]; then
-        msg_info "No Debian template found. Downloading Debian 13..." >&2
+        msg_info "No Debian 13 template found locally. Downloading Debian 13..." >&2
         pveam update >&2
         
-        # Get available Debian 13 templates dynamically from pveam available
         local available_template
         available_template=$(pveam available --section system 2>/dev/null | grep -E "debian-13-standard_[0-9].*_amd64" | head -1 | awk '{print $2}')
         
