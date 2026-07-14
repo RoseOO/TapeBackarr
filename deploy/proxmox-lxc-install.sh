@@ -173,7 +173,7 @@ create_container() {
     fi
     
     # Create the container
-    # Note: template should be the full volid (e.g., local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst)
+    # Note: template should be the full volid (e.g., local:vztmpl/debian-13-standard_13.0-1_amd64.tar.zst)
     pct create "$ct_id" "$template" \
         --hostname "$CT_HOSTNAME" \
         --memory "$CT_MEMORY" \
@@ -311,7 +311,12 @@ install_tapebackarr() {
         git clone https://github.com/LinearTapeFileSystem/ltfs.git
         cd ltfs
         ./autogen.sh
-        ./configure --disable-dependency-tracking
+        # ICU on Debian is split into icu-uc/icu-i18n modules — LTFS expects a single 'icu' module.
+        # Set the env vars explicitly to work around the pkg-config module name mismatch.
+        ICU_CFLAGS=\"\$(pkg-config --cflags icu-uc)\"
+        ICU_LIBS=\"\$(pkg-config --libs icu-uc icu-i18n)\"
+        ICU_MODULE_CFLAGS=\"\$ICU_CFLAGS\" ICU_MODULE_LIBS=\"\$ICU_LIBS\" \
+            ./configure --disable-dependency-tracking
         make -j\$(nproc)
         make install
         ldconfig
